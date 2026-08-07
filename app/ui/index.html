@@ -188,6 +188,14 @@
       } catch(e) {}
     }
 
+    async function autoDetectConfig() {
+      const res = await fetch('/api/config/auto-detect', { method: 'POST' });
+      const data = await res.json();
+      alert(data.message || 'Auto-detection complete');
+      loadConfig();
+      loadStatus();
+    }
+
     async function saveConfig() {
       const cfg = {
         rentasst_url: document.getElementById('rentasst_url').value,

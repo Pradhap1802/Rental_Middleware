@@ -16,17 +16,15 @@ class DatabaseManager:
     def _create_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        # Enable WAL mode and high-performance PRAGMAs
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA cache_size=-64000;")  # 64 MB cache
+        conn.execute("PRAGMA cache_size=-64000;")
         conn.execute("PRAGMA temp_store=MEMORY;")
         conn.execute("PRAGMA busy_timeout=10000;")
         return conn
 
     def _init_db(self):
         with self.get_connection() as conn:
-            # Main mapping table
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS mapping (
@@ -44,7 +42,13 @@ class DatabaseManager:
                 )
                 """
             )
-            # Sync History
+            # Ensure all columns exist on older SQLite databases
+            for col in ["tally_guid TEXT", "sync_version INTEGER DEFAULT 1", "last_hash TEXT", "last_synced_at DATETIME", "last_sync DATETIME", "last_attempt DATETIME", "status TEXT"]:
+                try:
+                    conn.execute(f"ALTER TABLE mapping ADD COLUMN {col};")
+                except Exception:
+                    pass
+
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sync_history (
@@ -59,7 +63,12 @@ class DatabaseManager:
                 )
                 """
             )
-            # Checkpoints
+            for col in ["tally_guid TEXT", "external_id TEXT", "details TEXT"]:
+                try:
+                    conn.execute(f"ALTER TABLE sync_history ADD COLUMN {col};")
+                except Exception:
+                    pass
+
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sync_checkpoint (
@@ -69,71 +78,45 @@ class DatabaseManager:
                 )
                 """
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS checkpoints (
-                    entity_type TEXT PRIMARY KEY,
-                    last_sync_at TEXT
-                )
-                """
-            )
-            # Dead letter tables
+
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS dead_letters (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     entity_type TEXT NOT NULL,
-                    source_id TEXT,
-                    error TEXT NOT NULL,
+                    rentasst_id TEXT NOT NULL,
+                    error_message TEXT NOT NULL,
                     payload TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    failed_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS dead_letter (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    entity_type TEXT NOT NULL,
-                    source_id TEXT,
-                    error TEXT NOT NULL,
-                    payload TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
-            # Queue table
+
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sync_queue (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     entity_type TEXT NOT NULL,
-                    payload TEXT,
                     status TEXT NOT NULL DEFAULT 'Pending',
-                    attempts INTEGER DEFAULT 0,
-                    max_attempts INTEGER DEFAULT 3,
-                    error_message TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 3,
+                    next_attempt_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    last_error TEXT,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    scheduled_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_queue_fetch ON sync_queue (status, scheduled_at, id);")
-            try:
-                conn.execute(
-                    """
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_queue_dedup 
-                    ON sync_queue (entity_type) 
-                    WHERE status IN ('Pending', 'Running', 'Waiting', 'Retry');
-                    """
-                )
-            except sqlite3.OperationalError:
-                pass  # Index already exists or fallback
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_active_queue_job 
+                ON sync_queue (entity_type) 
+                WHERE status IN ('Pending', 'Running', 'Waiting', 'Retry')
+                """
+            )
 
     @contextmanager
-    def get_connection(self):
-        """Returns a context-managed connection from thread-local storage."""
+    def get_connection(self) -> ContextManager[sqlite3.Connection]:
         if not hasattr(self._local, "conn") or self._local.conn is None:
             self._local.conn = self._create_connection()
         try:
@@ -145,8 +128,5 @@ class DatabaseManager:
 
     def close(self):
         if hasattr(self._local, "conn") and self._local.conn is not None:
-            try:
-                self._local.conn.close()
-            except Exception:
-                pass
+            self._local.conn.close()
             self._local.conn = None

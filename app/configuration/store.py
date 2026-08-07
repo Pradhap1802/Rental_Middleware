@@ -26,8 +26,12 @@ class ConfigStore:
         return Fernet(key)
 
     def load_safe(self) -> Optional[AppConfig]:
+        from ..services.discovery_service import DiscoveryService
         if not os.path.exists(self.cfg_path):
-            return None
+            # Auto-discover RentAsst setup automatically on first run
+            auto_cfg = DiscoveryService.auto_discover_rentasst()
+            self.save(auto_cfg)
+            return auto_cfg
         try:
             fernet = self._get_fernet()
             with open(self.cfg_path, "rb") as f:
@@ -36,7 +40,7 @@ class ConfigStore:
             data = json.loads(raw.decode("utf-8"))
             return AppConfig(**data)
         except Exception:
-            return None
+            return DiscoveryService.auto_discover_rentasst()
 
     def require(self) -> AppConfig:
         cfg = self.load_safe()
