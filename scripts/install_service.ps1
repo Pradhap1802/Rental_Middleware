@@ -1,11 +1,17 @@
-# PowerShell script to install RentAsst Middleware as a Windows Service
+# PowerShell script to install RentAsst Middleware Executable as a Windows Service
 $ServiceName = "RentAsstMiddlewareService"
 $DisplayName = "RentAsst Standalone Middleware Service"
-$ScriptPath = "$PSScriptRoot\..\service.py"
-$PythonPath = "$PSScriptRoot\..\venv\Scripts\python.exe"
+$ExePath = "$PSScriptRoot\..\dist\RentalMiddleware\RentalMiddleware.exe"
 
-Write-Host "Installing $DisplayName..." -ForegroundColor Green
-$BinaryPath = "`"$PythonPath`" `"$ScriptPath`""
+if (Test-Path $ExePath) {
+    $BinaryPath = "`"$ExePath`""
+    Write-Host "Installing $DisplayName using compiled standalone executable: $ExePath" -ForegroundColor Green
+} else {
+    $PythonPath = "$PSScriptRoot\..\venv\Scripts\python.exe"
+    $ScriptPath = "$PSScriptRoot\..\service.py"
+    $BinaryPath = "`"$PythonPath`" `"$ScriptPath`""
+    Write-Host "Installing $DisplayName using Python script: $ScriptPath" -ForegroundColor Yellow
+}
 
 # Check if service already exists
 $Service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -21,4 +27,4 @@ sc.exe failure $ServiceName reset= 86400 actions= restart/10000/restart/10000/re
 
 Write-Host "Service $ServiceName installed successfully." -ForegroundColor Green
 Start-Service -Name $ServiceName
-Write-Host "Service $ServiceName started." -ForegroundColor Green
+Write-Host "Service $ServiceName started in background." -ForegroundColor Green

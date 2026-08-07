@@ -37,7 +37,7 @@ class SyncScheduler:
         except Exception as e:
             log_event("Scheduler", f"Error during background scheduler enqueue: {str(e)}")
 
-    def start(self, interval_minutes: int = 15):
+    def start(self, interval_minutes: int = 10):
         if not self.is_running:
             self.scheduler.add_job(
                 self._sync_job,

@@ -1,1 +1,33 @@
-*.pyc
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv/
+
+# Local Data & Runtime Database
+.data/
+*.db
+*.db-wal
+*.db-shm
+*.key
+*.enc
+
+# PyInstaller Build & Dist Output
+build/
+dist/
+*.spec
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# IDE / Editor Files
+.vscode/
+.idea/
+*.swp
+
+# OS Metadata
+Thumbs.db
+Desktop.ini
