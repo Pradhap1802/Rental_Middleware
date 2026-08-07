@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RentAsst Middleware</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --accent: #6366f1;
+      --accent-hover: #4f46e5;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: #334155;
+      --success: #10b981;
+      --error: #ef4444;
+      --warning: #f59e0b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 2rem; }
+    .container { max-width: 1000px; margin: 0 auto; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
+    h1 { font-size: 1.75rem; font-weight: 700; background: linear-gradient(135deg, #a5b4fc, #6366f1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .status-badge { background: #064e3b; color: #34d399; padding: 0.35rem 0.85rem; border-radius: 9999px; font-size: 0.85rem; font-weight: 600; display: inline-flex; align-items: center; gap: 0.5rem; }
+    .pulse { width: 8px; height: 8px; background: #34d399; border-radius: 50%; box-shadow: 0 0 8px #34d399; }
+    .metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 2rem; }
+    .metric-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; text-align: center; }
+    .metric-card .val { font-size: 1.5rem; font-weight: 700; margin-top: 0.25rem; color: var(--text); }
+    .metric-card .lbl { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem; }
+    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; }
+    .card h2 { font-size: 1.15rem; margin-bottom: 1rem; color: var(--text); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+    .form-group { margin-bottom: 1rem; }
+    label { display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.4rem; }
+    input, select { width: 100%; background: #0f172a; border: 1px solid var(--border); color: var(--text); padding: 0.65rem 0.85rem; border-radius: 6px; font-size: 0.9rem; }
+    input:focus, select:focus { outline: none; border-color: var(--accent); }
+    .btn-group { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
+    button { background: var(--accent); color: white; border: none; padding: 0.6rem 1rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+    button:hover { background: var(--accent-hover); }
+    button.secondary { background: #334155; }
+    button.secondary:hover { background: #475569; }
+    button.danger { background: #991b1b; }
+    button.danger:hover { background: #dc2626; }
+    button.warning { background: #92400e; }
+    button.warning:hover { background: #d97706; }
+    .sync-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; }
+    .sync-btn { background: #27272a; border: 1px solid var(--border); padding: 0.85rem; text-align: center; border-radius: 8px; cursor: pointer; transition: all 0.2s; font-size: 0.9rem; }
+    .sync-btn:hover { border-color: var(--accent); background: #1e1e24; }
+    .log-box { background: #090d16; border: 1px solid var(--border); border-radius: 8px; padding: 1rem; font-family: monospace; font-size: 0.85rem; height: 200px; overflow-y: auto; color: var(--text-muted); white-space: pre-wrap; }
+    .badge-pill { padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+    .badge-success { background: #064e3b; color: #34d399; }
+    .badge-error { background: #7f1d1d; color: #f87171; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>RentAsst Middleware <span style="font-size: 0.9rem; font-weight: 400; color: var(--text-muted);"></span></h1>
+        <!-- <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 0.2rem;" id="machine_info">Standalone Integration Gateway</p> -->
+      </div>
+      <div class="status-badge" id="service_status"><span class="pulse"></span> Service Active</div>
+    </header>
+
+    <!-- Operational Telemetry Tiles -->
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <div class="lbl">Pending / Waiting</div>
+        <div class="val" id="metric_pending">0</div>
+      </div>
+      <div class="metric-card">
+        <div class="lbl">Retry Queue</div>
+        <div class="val" id="metric_retry" style="color: var(--warning);">0</div>
+      </div>
+      <div class="metric-card">
+        <div class="lbl">Completed Jobs</div>
+        <div class="val" id="metric_completed" style="color: var(--success);">0</div>
+      </div>
+      <div class="metric-card">
+        <div class="lbl">Failed Jobs</div>
+        <div class="val" id="metric_failed" style="color: var(--error);">0</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>RentAsst System Settings</h2>
+        <div class="form-group">
+          <label>RentAsst API Endpoint</label>
+          <input type="text" id="rentasst_url" value="http://localhost:8000/api">
+        </div>
+        <div class="form-group">
+          <label>API Key / Token</label>
+          <input type="password" id="rentasst_api_key" placeholder="Enter RentAsst API Token">
+        </div>
+        <div class="btn-group">
+          <button onclick="testConnection('rentasst')">Test RentAsst API</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>External Target System Settings</h2>
+        <div class="form-group">
+          <label>External System Target URL (Tally / ERP)</label>
+          <input type="text" id="external_url" value="http://localhost:9000">
+        </div>
+        <div class="form-group">
+          <label>Target API Key (Optional)</label>
+          <input type="password" id="external_api_key" placeholder="Enter API Key if required">
+        </div>
+        <div class="btn-group">
+          <button onclick="testConnection('external')">Test Connection</button>
+          <button class="secondary" onclick="saveConfig()">Save All Config</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Management Toolbar & Queue Controls -->
+    <div class="card" style="margin-bottom: 2rem;">
+      <h2>
+        Engine Operations & Queue Control
+        <span id="running_job_info" style="font-size: 0.8rem; font-weight: 400; color: var(--text-muted);">Current Job: Idle</span>
+      </h2>
+      <div class="btn-group" style="margin-bottom: 1.25rem;">
+        <button class="warning" onclick="controlScheduler('pause')">Pause Scheduler</button>
+        <button class="secondary" onclick="controlScheduler('resume')">Resume Scheduler</button>
+        <button onclick="retryFailedJobs()">Retry Failed</button>
+        <button class="secondary" onclick="downloadLogs()">Download Logs</button>
+        <button class="danger" onclick="clearDeadLetters()">Clear Dead Letters</button>
+        <button class="secondary" onclick="triggerBackup()">Trigger Backup</button>
+      </div>
+
+      <h3 style="font-size: 0.95rem; margin-bottom: 0.75rem; color: var(--text-muted);">Manual Entity Synchronization</h3>
+      <div class="sync-actions">
+        <div class="sync-btn" onclick="triggerSync('customers')">👥 Customers Sync</div>
+        <div class="sync-btn" onclick="triggerSync('equipment')">🚜 Equipment & Assets</div>
+        <div class="sync-btn" onclick="triggerSync('rental_orders')">📄 Rental Contracts</div>
+        <div class="sync-btn" onclick="triggerSync('invoices')">🧾 Invoices & Billing</div>
+        <div class="sync-btn" onclick="triggerSync('payments')">💳 Payments & Deposits</div>
+      </div>
+    </div>
+
+    <!-- Execution Logs -->
+    <div class="card">
+      <h2>Execution Logs & Telemetry Diagnostics</h2>
+      <div class="log-box" id="logBox">Loading telemetry and system logs...</div>
+    </div>
+  </div>
+
+  <script>
+    async function loadStatus() {
+      try {
+        const res = await fetch('/api/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        
+        //document.getElementById('machine_info').innerText = `Host: ${data.machine_name} | Memory: ${data.resource_metrics.memory_usage_mb} MB | Sched: ${data.system_health.scheduler_status}`;
+        document.getElementById('metric_pending').innerText = data.queue_metrics.pending_jobs;
+        document.getElementById('metric_retry').innerText = data.queue_metrics.running_jobs;
+        document.getElementById('metric_completed').innerText = data.queue_metrics.completed_jobs;
+        document.getElementById('metric_failed').innerText = data.queue_metrics.failed_jobs;
+        document.getElementById('running_job_info').innerText = `Current Job: ${data.system_health.running_job || 'Idle'}`;
+      } catch(e) {}
+    }
+
+    async function loadConfig() {
+      try {
+        const res = await fetch('/api/config');
+        if (res.ok) {
+          const cfg = await res.json();
+          if (cfg.rentasst_url) document.getElementById('rentasst_url').value = cfg.rentasst_url;
+          if (cfg.rentasst_api_key) document.getElementById('rentasst_api_key').value = cfg.rentasst_api_key;
+          if (cfg.external_url) document.getElementById('external_url').value = cfg.external_url;
+          if (cfg.external_api_key) document.getElementById('external_api_key').value = cfg.external_api_key;
+        }
+      } catch(e) {}
+    }
+
+    async function loadLogs() {
+      try {
+        const res = await fetch('/api/logs?lines=60');
+        if (res.ok) {
+          const data = await res.json();
+          document.getElementById('logBox').innerText = data.lines.join('');
+        }
+      } catch(e) {}
+    }
+
+    async function saveConfig() {
+      const cfg = {
+        rentasst_url: document.getElementById('rentasst_url').value,
+        rentasst_api_key: document.getElementById('rentasst_api_key').value,
+        external_url: document.getElementById('external_url').value,
+        external_api_key: document.getElementById('external_api_key').value,
+        auto_sync_enabled: true
+      };
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg)
+      });
+      const data = await res.json();
+      alert(data.message || 'Config Saved');
+      loadStatus();
+    }
+
+    async function testConnection(target) {
+      const res = await fetch(`/api/test/${target}`, { method: 'POST' });
+      const data = await res.json();
+      alert(data.message || 'Test Completed');
+    }
+
+    async function triggerSync(entity) {
+      const logBox = document.getElementById('logBox');
+      logBox.innerText += `\n[ACTION] Triggering sync for ${entity}...`;
+      const res = await fetch(`/api/sync/${entity}`, { method: 'POST' });
+      const data = await res.json();
+      logBox.innerText += `\n[RESULT] ${JSON.stringify(data)}`;
+      loadStatus();
+    }
+
+    async function controlScheduler(action) {
+      const res = await fetch(`/api/scheduler/${action}`, { method: 'POST' });
+      const data = await res.json();
+      alert(data.message || `Scheduler ${action}`);
+      loadStatus();
+    }
+
+    async function retryFailedJobs() {
+      const res = await fetch('/api/queue/retry-failed', { method: 'POST' });
+      const data = await res.json();
+      alert(`Requeued ${data.requeued_count} failed jobs.`);
+      loadStatus();
+    }
+
+    async function clearDeadLetters() {
+      const res = await fetch('/api/deadletters/clear', { method: 'POST' });
+      const data = await res.json();
+      alert(`Cleared ${data.cleared_count} dead letters.`);
+      loadStatus();
+    }
+
+    async function triggerBackup() {
+      const res = await fetch('/api/backups', { method: 'POST' });
+      const data = await res.json();
+      alert(`Backup completed: ${data.db_backup}`);
+    }
+
+    function downloadLogs() {
+      window.location.href = '/api/logs/download';
+    }
+
+    loadConfig();
+    loadStatus();
+    loadLogs();
+    setInterval(loadStatus, 3000);
+    setInterval(loadLogs, 5000);
+  </script>
+</body>
+</html>
