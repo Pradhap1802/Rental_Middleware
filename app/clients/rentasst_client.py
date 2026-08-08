@@ -97,5 +97,10 @@ class RentAsstClient:
     def fetch_payments(self) -> List[Dict[str, Any]]:
         return self._request_with_fallback(["payment", "payments"])
 
+    def fetch_businesses(self) -> List[Dict[str, Any]]:
+        """Fetches list of available RentAsst business companies for multi-tenant company selection."""
+        return self._request_with_fallback(["user/businesses", "business", "tenants", "businesses"])
+
     def close(self):
         self.session.close()
+

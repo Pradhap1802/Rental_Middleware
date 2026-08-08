@@ -35,3 +35,32 @@ def auto_detect_config(request: Request, svc: ConfigService = Depends(get_config
     if scheduler and saved_cfg.auto_sync_enabled:
         scheduler.start(saved_cfg.sync_interval_minutes)
     return {"status": "success", "message": "RentAsst setup auto-detected successfully!", "config": saved_cfg}
+
+
+@router.get("/companies/rentasst")
+def get_rentasst_companies(svc: ConfigService = Depends(get_config_service)):
+    """Fetches list of available RentAsst business companies based on configured URL and Token."""
+    cfg = svc.get_config()
+    from ..clients.rentasst_client import RentAsstClient
+    client = RentAsstClient(cfg)
+    try:
+        businesses = client.fetch_businesses()
+        return {"status": "success", "companies": businesses}
+    except Exception as e:
+        return {"status": "error", "message": f"Could not fetch RentAsst businesses: {str(e)}", "companies": []}
+    finally:
+        client.close()
+
+
+@router.get("/companies/tally")
+def get_tally_companies(svc: ConfigService = Depends(get_config_service)):
+    """Queries Tally Prime XML server to return all currently open/loaded companies."""
+    cfg = svc.get_config()
+    from ..clients.external_client import ExternalClient
+    client = ExternalClient(cfg)
+    try:
+        companies = client.fetch_tally_companies()
+        return {"status": "success", "companies": companies}
+    except Exception as e:
+        return {"status": "error", "message": f"Could not fetch Tally companies: {str(e)}", "companies": []}
+

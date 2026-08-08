@@ -129,12 +129,6 @@
       </div>
     </div>
 
-    <!-- Execution Logs -->
-    <div class="card">
-      <h2>Execution Logs & Telemetry Diagnostics</h2>
-      <div class="log-box" id="logBox">Loading telemetry and system logs...</div>
-    </div>
-  </div>
 
   <script>
     async function loadStatus() {
@@ -165,15 +159,6 @@
       } catch(e) {}
     }
 
-    async function loadLogs() {
-      try {
-        const res = await fetch('/api/logs?lines=60');
-        if (res.ok) {
-          const data = await res.json();
-          document.getElementById('logBox').innerText = data.lines.join('');
-        }
-      } catch(e) {}
-    }
 
     async function autoDetectConfig() {
       const res = await fetch('/api/config/auto-detect', { method: 'POST' });
@@ -208,11 +193,9 @@
     }
 
     async function triggerSync(entity) {
-      const logBox = document.getElementById('logBox');
-      logBox.innerText += `\n[ACTION] Triggering sync for ${entity}...`;
       const res = await fetch(`/api/sync/${entity}`, { method: 'POST' });
       const data = await res.json();
-      logBox.innerText += `\n[RESULT] ${JSON.stringify(data)}`;
+      alert(`Sync triggered for ${entity}: ` + (data.message || JSON.stringify(data)));
       loadStatus();
     }
 
@@ -220,9 +203,7 @@
 
     loadConfig();
     loadStatus();
-    loadLogs();
     setInterval(loadStatus, 3000);
-    setInterval(loadLogs, 5000);
   </script>
 </body>
 </html>

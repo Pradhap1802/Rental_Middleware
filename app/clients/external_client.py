@@ -125,7 +125,54 @@ class ExternalClient:
             pass
         return True
 
+    def fetch_tally_companies(self) -> List[Dict[str, str]]:
+        """Queries Tally Prime XML server to get all currently loaded/open companies."""
+        if self.cfg.external_system_type != "tally":
+            return []
+        xml = """<ENVELOPE>
+   <HEADER>
+      <VERSION>1</VERSION>
+      <TALLYREQUEST>EXPORT</TALLYREQUEST>
+      <TYPE>COLLECTION</TYPE>
+      <ID>ListofCompanies</ID>
+   </HEADER>
+   <BODY>
+      <DESC>
+         <STATICVARIABLES>
+            <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+         </STATICVARIABLES>
+         <TDL>
+            <TDLMESSAGE>
+               <COLLECTION NAME="ListofCompanies" ISMODIFY="No">
+                  <TYPE>Company</TYPE>
+                  <NATIVEMETHOD>NAME</NATIVEMETHOD>
+               </COLLECTION>
+            </TDLMESSAGE>
+         </TDL>
+      </DESC>
+   </BODY>
+</ENVELOPE>"""
+        try:
+            r = self.session.post(self.base_url, data=xml.encode("utf-8"), headers={"Content-Type": "text/xml"}, timeout=10)
+            if r.status_code == 200:
+                clean = sanitize_tally_xml(r.content)
+                root = ET.fromstring(clean)
+                companies = []
+                for comp in root.findall(".//COMPANY"):
+                    name = comp.findtext("NAME") or comp.attrib.get("NAME")
+                    if name:
+                        companies.append({"name": name.strip()})
+                return companies
+        except Exception:
+            pass
+        return []
+
     def _post_tally_xml(self, xml_string: str) -> str:
+        # Dynamically inject target Tally Company into STATICVARIABLES if set in config
+        if getattr(self.cfg, "tally_company_name", None) and "<STATICVARIABLES>" not in xml_string:
+            company_var = f"<STATICVARIABLES><SVCURRENTCOMPANY>{self.cfg.tally_company_name}</SVCURRENTCOMPANY></STATICVARIABLES>"
+            xml_string = xml_string.replace("<REQUESTDESC>", f"<REQUESTDESC>{company_var}")
+
         headers = {"Content-Type": "text/xml"}
         r = self.session.post(self.base_url, data=xml_string.encode("utf-8"), headers=headers, timeout=15)
         r.raise_for_status()
@@ -144,6 +191,7 @@ class ExternalClient:
         except Exception:
             pass
         return "TALLY-SUCCESS"
+
 
     def sync_customer(self, data: Dict[str, Any]) -> str:
         if self.cfg.external_system_type == "tally":
