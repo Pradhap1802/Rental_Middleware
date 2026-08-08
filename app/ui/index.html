@@ -41,25 +41,19 @@
     button:hover { background: var(--accent-hover); }
     button.secondary { background: #334155; }
     button.secondary:hover { background: #475569; }
-    button.danger { background: #991b1b; }
-    button.danger:hover { background: #dc2626; }
-    button.warning { background: #92400e; }
-    button.warning:hover { background: #d97706; }
     .sync-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; }
     .sync-btn { background: #27272a; border: 1px solid var(--border); padding: 0.85rem; text-align: center; border-radius: 8px; cursor: pointer; transition: all 0.2s; font-size: 0.9rem; }
     .sync-btn:hover { border-color: var(--accent); background: #1e1e24; }
-    .log-box { background: #090d16; border: 1px solid var(--border); border-radius: 8px; padding: 1rem; font-family: monospace; font-size: 0.85rem; height: 200px; overflow-y: auto; color: var(--text-muted); white-space: pre-wrap; }
-    .badge-pill { padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
-    .badge-success { background: #064e3b; color: #34d399; }
-    .badge-error { background: #7f1d1d; color: #f87171; }
+    .fetch-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
+    .fetch-btn { background: #334155; color: #a5b4fc; padding: 0.25rem 0.6rem; font-size: 0.75rem; border-radius: 4px; border: none; cursor: pointer; }
+    .fetch-btn:hover { background: #475569; color: #fff; }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
       <div>
-        <h1>RentAsst Middleware <span style="font-size: 0.9rem; font-weight: 400; color: var(--text-muted);"></span></h1>
-        <!-- <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 0.2rem;" id="machine_info">Standalone Integration Gateway</p> -->
+        <h1>RentAsst Middleware Gateway</h1>
       </div>
       <div class="status-badge" id="service_status"><span class="pulse"></span> Service Active</div>
     </header>
@@ -95,6 +89,14 @@
           <label>API Key / Token</label>
           <input type="password" id="rentasst_api_key" placeholder="Enter RentAsst API Token">
         </div>
+        <div class="form-group">
+          <div class="fetch-header">
+            <label style="margin-bottom:0;">Business Code / Tenant ID</label>
+            <button class="fetch-btn" onclick="fetchRentAsstCompanies()">🔄 Fetch Companies</button>
+          </div>
+          <input type="text" id="rentasst_tenant_id" placeholder="e.g. B100001" list="rentasst_tenant_list">
+          <datalist id="rentasst_tenant_list"></datalist>
+        </div>
         <div class="btn-group">
           <button onclick="testConnection('rentasst')">Test RentAsst API</button>
         </div>
@@ -105,6 +107,15 @@
         <div class="form-group">
           <label>External System Target URL (Tally / ERP)</label>
           <input type="text" id="external_url" value="http://localhost:9000">
+        </div>
+        <div class="form-group">
+          <div class="fetch-header">
+            <label style="margin-bottom:0;">Target Tally Company Name</label>
+            <button class="fetch-btn" onclick="fetchTallyCompanies()">🔄 Fetch Open Companies</button>
+          </div>
+          <select id="tally_company_name">
+            <option value="">-- Select or Open Tally Company --</option>
+          </select>
         </div>
         <div class="form-group">
           <label>Target API Key (Optional)</label>
@@ -128,7 +139,7 @@
         <div class="sync-btn" onclick="triggerSync('payments')">💳 Payments & Deposits</div>
       </div>
     </div>
-
+  </div>
 
   <script>
     async function loadStatus() {
@@ -137,12 +148,64 @@
         if (!res.ok) return;
         const data = await res.json();
         
-        //document.getElementById('machine_info').innerText = `Host: ${data.machine_name} | Memory: ${data.resource_metrics.memory_usage_mb} MB | Sched: ${data.system_health.scheduler_status}`;
         document.getElementById('metric_pending').innerText = data.queue_metrics.pending_jobs;
         document.getElementById('metric_retry').innerText = data.queue_metrics.running_jobs;
         document.getElementById('metric_completed').innerText = data.queue_metrics.completed_jobs;
         document.getElementById('metric_failed').innerText = data.queue_metrics.failed_jobs;
-        // Running job info removed
+      } catch(e) {}
+    }
+
+    async function fetchTallyCompanies() {
+      const select = document.getElementById('tally_company_name');
+      const savedValue = select.getAttribute('data-saved-value') || select.value;
+      try {
+        const res = await fetch('/api/companies/tally');
+        if (res.ok) {
+          const data = await res.json();
+          select.innerHTML = '<option value="">-- Select Company --</option>';
+
+          if (data.companies && data.companies.length > 0) {
+            data.companies.forEach(c => {
+              const opt = document.createElement('option');
+              opt.value = c.name;
+              opt.textContent = c.name;
+              select.appendChild(opt);
+            });
+            if (savedValue) {
+              const matchingOpt = Array.from(select.options).find(o => o.value === savedValue);
+              if (matchingOpt) select.value = savedValue;
+            }
+            if (data.companies.length === 1 && !savedValue) {
+              select.value = data.companies[0].name;
+            }
+          } else {
+            const opt = document.createElement('option');
+            opt.value = savedValue || '';
+            opt.textContent = savedValue ? savedValue + ' (Saved)' : '-- No open Tally company detected --';
+            select.appendChild(opt);
+          }
+        }
+      } catch(e) {
+        console.error('Error fetching Tally companies:', e);
+      }
+    }
+
+    async function fetchRentAsstCompanies() {
+      try {
+        const res = await fetch('/api/companies/rentasst');
+        if (res.ok) {
+          const data = await res.json();
+          const datalist = document.getElementById('rentasst_tenant_list');
+          datalist.innerHTML = '';
+          if (data.companies && data.companies.length > 0) {
+            data.companies.forEach(c => {
+              const opt = document.createElement('option');
+              opt.value = c.business_code || c.id || c.code;
+              opt.innerText = c.business_name || c.name || opt.value;
+              datalist.appendChild(opt);
+            });
+          }
+        }
       } catch(e) {}
     }
 
@@ -153,27 +216,35 @@
           const cfg = await res.json();
           if (cfg.rentasst_url) document.getElementById('rentasst_url').value = cfg.rentasst_url;
           if (cfg.rentasst_api_key) document.getElementById('rentasst_api_key').value = cfg.rentasst_api_key;
+          if (cfg.rentasst_tenant_id) document.getElementById('rentasst_tenant_id').value = cfg.rentasst_tenant_id;
           if (cfg.external_url) document.getElementById('external_url').value = cfg.external_url;
+          if (cfg.tally_company_name) {
+            const select = document.getElementById('tally_company_name');
+            select.setAttribute('data-saved-value', cfg.tally_company_name);
+            const opt = document.createElement('option');
+            opt.value = cfg.tally_company_name;
+            opt.textContent = cfg.tally_company_name;
+            opt.selected = true;
+            select.appendChild(opt);
+          }
           if (cfg.external_api_key) document.getElementById('external_api_key').value = cfg.external_api_key;
+
+          // Automatically fetch open companies from Tally XML Server
+          fetchTallyCompanies();
+          fetchRentAsstCompanies();
         }
       } catch(e) {}
-    }
-
-
-    async function autoDetectConfig() {
-      const res = await fetch('/api/config/auto-detect', { method: 'POST' });
-      const data = await res.json();
-      alert(data.message || 'Auto-detection complete');
-      loadConfig();
-      loadStatus();
     }
 
     async function saveConfig() {
       const cfg = {
         rentasst_url: document.getElementById('rentasst_url').value,
         rentasst_api_key: document.getElementById('rentasst_api_key').value,
+        rentasst_tenant_id: document.getElementById('rentasst_tenant_id').value,
         external_url: document.getElementById('external_url').value,
+        tally_company_name: document.getElementById('tally_company_name').value,
         external_api_key: document.getElementById('external_api_key').value,
+        external_system_type: 'tally',
         auto_sync_enabled: true
       };
       const res = await fetch('/api/config', {
@@ -182,7 +253,7 @@
         body: JSON.stringify(cfg)
       });
       const data = await res.json();
-      alert(data.message || 'Config Saved');
+      alert(data.message || 'Configuration Saved Successfully');
       loadStatus();
     }
 
@@ -195,15 +266,13 @@
     async function triggerSync(entity) {
       const res = await fetch(`/api/sync/${entity}`, { method: 'POST' });
       const data = await res.json();
-      alert(`Sync triggered for ${entity}: ` + (data.message || JSON.stringify(data)));
+      alert(`Sync completed for ${entity}: ` + (data.message || JSON.stringify(data)));
       loadStatus();
     }
 
-    // Engine operations and queue control helper functions removed
-
     loadConfig();
     loadStatus();
-    setInterval(loadStatus, 3000);
+    setInterval(loadStatus, 4000);
   </script>
 </body>
 </html>
