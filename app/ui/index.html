@@ -117,22 +117,9 @@
       </div>
     </div>
 
-    <!-- Management Toolbar & Queue Controls -->
+    <!-- Manual Entity Synchronization -->
     <div class="card" style="margin-bottom: 2rem;">
-      <h2>
-        Engine Operations & Queue Control
-        <span id="running_job_info" style="font-size: 0.8rem; font-weight: 400; color: var(--text-muted);">Current Job: Idle</span>
-      </h2>
-      <div class="btn-group" style="margin-bottom: 1.25rem;">
-        <button class="warning" onclick="controlScheduler('pause')">Pause Scheduler</button>
-        <button class="secondary" onclick="controlScheduler('resume')">Resume Scheduler</button>
-        <button onclick="retryFailedJobs()">Retry Failed</button>
-        <button class="secondary" onclick="downloadLogs()">Download Logs</button>
-        <button class="danger" onclick="clearDeadLetters()">Clear Dead Letters</button>
-        <button class="secondary" onclick="triggerBackup()">Trigger Backup</button>
-      </div>
-
-      <h3 style="font-size: 0.95rem; margin-bottom: 0.75rem; color: var(--text-muted);">Manual Entity Synchronization</h3>
+      <h2>Manual Entity Synchronization</h2>
       <div class="sync-actions">
         <div class="sync-btn" onclick="triggerSync('customers')">👥 Customers Sync</div>
         <div class="sync-btn" onclick="triggerSync('equipment')">🚜 Equipment & Assets</div>
@@ -161,7 +148,7 @@
         document.getElementById('metric_retry').innerText = data.queue_metrics.running_jobs;
         document.getElementById('metric_completed').innerText = data.queue_metrics.completed_jobs;
         document.getElementById('metric_failed').innerText = data.queue_metrics.failed_jobs;
-        document.getElementById('running_job_info').innerText = `Current Job: ${data.system_health.running_job || 'Idle'}`;
+        // Running job info removed
       } catch(e) {}
     }
 
@@ -229,36 +216,7 @@
       loadStatus();
     }
 
-    async function controlScheduler(action) {
-      const res = await fetch(`/api/scheduler/${action}`, { method: 'POST' });
-      const data = await res.json();
-      alert(data.message || `Scheduler ${action}`);
-      loadStatus();
-    }
-
-    async function retryFailedJobs() {
-      const res = await fetch('/api/queue/retry-failed', { method: 'POST' });
-      const data = await res.json();
-      alert(`Requeued ${data.requeued_count} failed jobs.`);
-      loadStatus();
-    }
-
-    async function clearDeadLetters() {
-      const res = await fetch('/api/deadletters/clear', { method: 'POST' });
-      const data = await res.json();
-      alert(`Cleared ${data.cleared_count} dead letters.`);
-      loadStatus();
-    }
-
-    async function triggerBackup() {
-      const res = await fetch('/api/backups', { method: 'POST' });
-      const data = await res.json();
-      alert(`Backup completed: ${data.db_backup}`);
-    }
-
-    function downloadLogs() {
-      window.location.href = '/api/logs/download';
-    }
+    // Engine operations and queue control helper functions removed
 
     loadConfig();
     loadStatus();

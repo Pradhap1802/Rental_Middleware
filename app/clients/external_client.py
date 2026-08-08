@@ -30,19 +30,29 @@ def normalize_state_name(state_raw: str) -> str:
 
 
 def format_tally_date(raw_date: Optional[str]) -> str:
-    """Converts dates to Tally YYYYMMDD string format."""
+    """Converts dates to Tally YYYYMMDD string format.
+    Handles formats: YYYY-MM-DD, YYYY-MM-DDTHH:MM:SS, DD.MM.YYYY, DD.MM.YYYY HH:MM
+    """
     if not raw_date:
         return datetime.now().strftime("%Y%m%d")
     try:
-        dt_str = str(raw_date).split("T")[0].replace("-", "")
-        if len(dt_str) == 8 and dt_str.isdigit():
-            return dt_str
-        parts = re.split(r"[./-]", str(raw_date).split("T")[0])
+        raw_str = str(raw_date).strip()
+        # Strip time portion if present (handles "07.08.2026 00:00" and "2026-08-07T10:15:39")
+        date_only = raw_str.split(" ")[0].split("T")[0]
+
+        # Already in YYYYMMDD compact form
+        clean = date_only.replace("-", "")
+        if len(clean) == 8 and clean.isdigit():
+            return clean
+
+        # Split on . / or -
+        parts = re.split(r"[./-]", date_only)
         if len(parts) == 3:
-            if len(parts[0]) == 4:
-                return f"{parts[0]}{parts[1].zfill(2)}{parts[2].zfill(2)}"
-            elif len(parts[2]) == 4:
-                return f"{parts[2]}{parts[1].zfill(2)}{parts[0].zfill(2)}"
+            p0, p1, p2 = parts[0].strip(), parts[1].strip(), parts[2].strip()
+            if len(p0) == 4:  # YYYY-MM-DD
+                return f"{p0}{p1.zfill(2)}{p2.zfill(2)}"
+            elif len(p2) == 4:  # DD.MM.YYYY or DD/MM/YYYY
+                return f"{p2}{p1.zfill(2)}{p0.zfill(2)}"
     except Exception:
         pass
     return datetime.now().strftime("%Y%m%d")
@@ -70,6 +80,50 @@ class ExternalClient:
             return r.status_code in (200, 204, 404, 405)
         except Exception:
             return False
+
+    def check_exists_in_tally(self, entity_type: str, identifier: str) -> bool:
+        """Checks if a record (Ledger, StockItem, or Voucher) exists in Tally DB."""
+        if self.cfg.external_system_type != "tally" or not identifier:
+            return True
+
+        tally_type = "LEDGER"
+        if entity_type == "equipment":
+            tally_type = "STOCKITEM"
+        elif entity_type in ("rental_orders", "invoices", "payments"):
+            tally_type = "VOUCHER"
+
+        xml = f"""<ENVELOPE>
+   <HEADER>
+      <VERSION>1</VERSION>
+      <TALLYREQUEST>EXPORT</TALLYREQUEST>
+      <TYPE>COLLECTION</TYPE>
+      <ID>CheckExistence</ID>
+   </HEADER>
+   <BODY>
+      <DESC>
+         <STATICVARIABLES>
+            <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+         </STATICVARIABLES>
+         <TDL>
+            <TDLMESSAGE>
+               <COLLECTION NAME="CheckExistence" ISMODIFY="No">
+                  <TYPE>{tally_type}</TYPE>
+                  <NATIVEMETHOD>NAME</NATIVEMETHOD>
+                  <NATIVEMETHOD>VOUCHERNUMBER</NATIVEMETHOD>
+               </COLLECTION>
+            </TDLMESSAGE>
+         </TDL>
+      </DESC>
+   </BODY>
+</ENVELOPE>"""
+        try:
+            r = self.session.post(self.base_url, data=xml.encode("utf-8"), headers={"Content-Type": "text/xml"}, timeout=10)
+            if r.status_code == 200:
+                clean = sanitize_tally_xml(r.content)
+                return (identifier.lower() in clean.lower())
+        except Exception:
+            pass
+        return True
 
     def _post_tally_xml(self, xml_string: str) -> str:
         headers = {"Content-Type": "text/xml"}
@@ -133,6 +187,11 @@ class ExternalClient:
               <GSTIN>{gst}</GSTIN>
             </LEDGSTREGDETAILS.LIST>"""
 
+            # Use ACTION="Alter" if customer already exists in Tally to push all field updates
+            # (email, mobile, address, GST). Use ACTION="Create" only for brand new customers.
+            already_in_tally = self.check_exists_in_tally("customer", name)
+            action = "Alter" if already_in_tally else "Create"
+
             xml = f"""<ENVELOPE>
   <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
   <BODY>
@@ -140,7 +199,7 @@ class ExternalClient:
       <REQUESTDESC><REPORTNAME>All Masters</REPORTNAME></REQUESTDESC>
       <REQUESTDATA>
         <TALLYMESSAGE xmlns:UDF="TallyUDF">
-          <LEDGER NAME="{name}" ACTION="Create">
+          <LEDGER NAME="{name}" ACTION="{action}">
             <NAME>{name}</NAME>
             <PARENT>Sundry Debtors</PARENT>
             <MAILINGNAME>{mailing_name}</MAILINGNAME>
@@ -187,6 +246,9 @@ class ExternalClient:
             purchase_price = data.get("purchase_price") or 0
             rent_price = data.get("rent_price") or data.get("day_based_rent_price") or 0
 
+            # Use ACTION="Alter" if stock item already exists in Tally to push price/category updates
+            item_action = "Alter" if self.check_exists_in_tally("equipment", name) else "Create"
+
             xml = f"""<ENVELOPE>
   <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
   <BODY>
@@ -201,7 +263,7 @@ class ExternalClient:
           <STOCKGROUP NAME="{group}" ACTION="Create">
             <NAME>{group}</NAME>
           </STOCKGROUP>
-          <STOCKITEM NAME="{name}" ACTION="Create">
+          <STOCKITEM NAME="{name}" ACTION="{item_action}">
             <NAME>{name}</NAME>
             <PARENT>{group}</PARENT>
             <BASEUNITS>{unit}</BASEUNITS>
@@ -281,9 +343,11 @@ class ExternalClient:
 
     def sync_invoice(self, data: Dict[str, Any]) -> str:
         if self.cfg.external_system_type == "tally":
-            num = data.get("number") or data.get("invoice_number") or f"INV-{data.get('id')}"
-            cust_name = data.get("customer_name") or data.get("customer", {}).get("name") or f"Customer-{data.get('customer_id')}"
-            amount = data.get("amount") or data.get("total_amount") or data.get("net_amount") or 0
+            # Use invoice id as fallback number if number is missing/"0"
+            raw_num = str(data.get("number") or data.get("invoice_number") or "").strip()
+            num = raw_num if raw_num and raw_num != "0" else f"INV-{data.get('id')}"
+            cust_name = (data.get("customer") or {}).get("name") or data.get("customer_name") or f"Customer-{data.get('customer_id')}"
+            amount = data.get("total_amount") or data.get("grand_total") or data.get("amount") or data.get("net_amount") or 0
             vtype = "Credit Note" if data.get("document_type") == "credit_note" else "Sales"
             date_str = format_tally_date(data.get("invoice_date") or data.get("date") or data.get("created_at"))
 
@@ -334,13 +398,17 @@ class ExternalClient:
 
     def sync_payment(self, data: Dict[str, Any]) -> str:
         if self.cfg.external_system_type == "tally":
-            ref = data.get("reference_id") or data.get("payment_number") or f"PAY-{data.get('id')}"
-            cust_name = data.get("customer_name") or data.get("customer", {}).get("name") or "Bank/Cash Customer"
+            # Use number or id as fallback for reference
+            raw_ref = str(data.get("reference_id") or data.get("number") or data.get("payment_number") or "").strip()
+            ref = raw_ref if raw_ref else f"PAY-{data.get('id')}"
+            # Get customer name from paid_by or nested rent.customer
+            cust_name = (data.get("paid_by") or (data.get("rent") or {}).get("customer_name") or data.get("customer_name") or "Cash Customer")
             amount = data.get("amount") or data.get("paid_amount") or 0
-            date_str = format_tally_date(data.get("payment_date") or data.get("date") or data.get("created_at"))
+            date_str = format_tally_date(data.get("payment_date") or data.get("created_at") or data.get("date"))
 
-            pay_method = str(data.get("payment_method") or data.get("mode") or "").lower()
-            cash_bank_ledger = "Bank Account" if any(w in pay_method for w in ["bank", "online", "card", "upi", "cheque", "transfer"]) else "Cash"
+            # Use payment_type_label if available (e.g. "Cash", "Bank Transfer", "UPI")
+            pay_label = str(data.get("payment_type_label") or data.get("payment_method") or data.get("mode") or "").lower()
+            cash_bank_ledger = "Bank Account" if any(w in pay_label for w in ["bank", "online", "card", "upi", "cheque", "transfer", "neft", "rtgs"]) else "Cash"
             parent_group = "Bank Accounts" if cash_bank_ledger == "Bank Account" else "Cash-in-Hand"
 
             xml = f"""<ENVELOPE>

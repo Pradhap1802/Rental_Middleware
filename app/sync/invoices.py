@@ -14,4 +14,5 @@ def sync_invoices(rentasst_client: RentAsstClient, external_client: ExternalClie
         fetch_func=rentasst_client.fetch_invoices,
         sync_func=external_client.sync_invoice,
         store=store,
+        external_client=external_client,
     )
