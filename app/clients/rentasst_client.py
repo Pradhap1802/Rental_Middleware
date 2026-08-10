@@ -71,13 +71,25 @@ class RentAsstClient:
         if isinstance(customers, list):
             enriched = []
             for cust in customers:
-                if isinstance(cust, dict) and "id" in cust and "address" not in cust:
-                    try:
-                        detail = self._request_with_fallback([f"customer/{cust['id']}"])
-                        if isinstance(detail, dict) and "id" in detail:
-                            cust = detail
-                    except Exception:
-                        pass
+                if isinstance(cust, dict) and "id" in cust:
+                    if "address" not in cust or "bank_accounts" not in cust:
+                        try:
+                            detail = self._request_with_fallback([f"customer/{cust['id']}"])
+                            if isinstance(detail, dict) and "id" in detail:
+                                for k, v in detail.items():
+                                    if v is not None or k not in cust:
+                                        cust[k] = v
+                        except Exception:
+                            pass
+                    if "bank_accounts" not in cust and "bankAccounts" not in cust:
+                        try:
+                            banks = self._request_with_fallback([f"customer/{cust['id']}/bank-accounts", f"customer/{cust['id']}/bank-account"])
+                            if isinstance(banks, list):
+                                cust["bank_accounts"] = banks
+                            elif isinstance(banks, dict) and "data" in banks and isinstance(banks["data"], list):
+                                cust["bank_accounts"] = banks["data"]
+                        except Exception:
+                            pass
                 enriched.append(cust)
             return enriched
         return customers

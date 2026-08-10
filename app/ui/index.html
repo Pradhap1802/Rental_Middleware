@@ -41,7 +41,7 @@
     button:hover { background: var(--accent-hover); }
     button.secondary { background: #334155; }
     button.secondary:hover { background: #475569; }
-    .sync-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; }
+    .sync-actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem; }
     .sync-btn { background: #27272a; border: 1px solid var(--border); padding: 0.85rem; text-align: center; border-radius: 8px; cursor: pointer; transition: all 0.2s; font-size: 0.9rem; }
     .sync-btn:hover { border-color: var(--accent); background: #1e1e24; }
     .fetch-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
@@ -132,11 +132,10 @@
     <div class="card" style="margin-bottom: 2rem;">
       <h2>Manual Entity Synchronization</h2>
       <div class="sync-actions">
-        <div class="sync-btn" onclick="triggerSync('customers')">👥 Customers Sync</div>
-        <div class="sync-btn" onclick="triggerSync('equipment')">🚜 Equipment & Assets</div>
-        <div class="sync-btn" onclick="triggerSync('rental_orders')">📄 Rental Contracts</div>
-        <div class="sync-btn" onclick="triggerSync('invoices')">🧾 Invoices & Billing</div>
-        <div class="sync-btn" onclick="triggerSync('payments')">💳 Payments & Deposits</div>
+        <div class="sync-btn" onclick="triggerSync('customers')">👥 Customers</div>
+        <div class="sync-btn" onclick="triggerSync('equipment')">🚜 Assets</div>
+        <div class="sync-btn" onclick="triggerSync('invoices')">🧾 Invoices </div>
+        <div class="sync-btn" onclick="triggerSync('payments')">💳 Payments </div>
       </div>
     </div>
   </div>

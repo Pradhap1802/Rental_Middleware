@@ -1,3 +1,4 @@
+import html
 import re
 import xml.etree.ElementTree as ET
 import requests
@@ -22,11 +23,19 @@ def sanitize_tally_xml(raw: Any) -> str:
     return txt.strip()
 
 
+def escape_xml(text: Any) -> str:
+    """Safely escapes text for inclusion in Tally XML templates."""
+    if text is None:
+        return ""
+    return html.escape(str(text), quote=True)
+
+
 def normalize_state_name(state_raw: str) -> str:
-    """Passes state name directly as it is from RentAsst to Tally."""
+    """Extracts state/province name directly from RentAsst database record without predefined hardcoded dictionary."""
     if not state_raw:
         return ""
-    return str(state_raw).strip().title()
+    clean = str(state_raw).strip()
+    return clean.title() if clean.islower() else clean
 
 
 def format_tally_date(raw_date: Optional[str]) -> str:
@@ -195,48 +204,139 @@ class ExternalClient:
 
     def sync_customer(self, data: Dict[str, Any]) -> str:
         if self.cfg.external_system_type == "tally":
-            name = data.get("name") or data.get("business_name") or f"Customer-{data.get('id')}"
-            mailing_name = data.get("business_name") or name
-            mobile = data.get("mobile") or data.get("phone") or ""
-            email = data.get("email") or ""
-            gst = data.get("customer_gst_number") or data.get("gst_number") or ""
+            name = (data.get("name") or data.get("business_name") or f"Customer-{data.get('id')}").strip()
+            
+            # Determine Parent Group (Sundry Creditors vs Sundry Debtors)
+            is_supplier = data.get("is_supplier")
+            is_customer = data.get("is_customer")
+            if is_supplier and not is_customer:
+                parent_group = "Sundry Creditors"
+            else:
+                parent_group = "Sundry Debtors"
+
+            # Mailing Name (uses business_name if present, otherwise name)
+            business_name = (data.get("business_name") or "").strip()
+            mailing_name = business_name if business_name else name
+
+            # Contact Details (Mobile, Alternate Mobiles, Email)
+            mobile = (data.get("mobile") or data.get("phone") or "").strip()
+            alt_mobile1 = (data.get("alternate_mobile") or "").strip()
+            alt_mobile2 = (data.get("alternate_mobile_2") or "").strip()
+
+            all_mobiles = [m for m in [mobile, alt_mobile1, alt_mobile2] if m]
+            phone_str = ", ".join(all_mobiles) if all_mobiles else ""
+            primary_mobile = mobile or (all_mobiles[0] if all_mobiles else "")
+
+            email = (data.get("email") or "").strip()
+
+            # Addresses (Address 1, Address 2, Landmark, City, State, Country, Zip Code) purely from RentAsst DB
+            addr1, addr2, landmark, city, state, country, pincode = "", "", "", "", "", "", ""
+            addresses = data.get("address") or data.get("addresses")
+            default_addr = None
+            if isinstance(addresses, list) and len(addresses) > 0:
+                default_addr = next((a for a in addresses if a.get("is_default") or a.get("is_billing")), addresses[0])
+            elif isinstance(addresses, dict):
+                default_addr = addresses
+
+            if default_addr and isinstance(default_addr, dict):
+                addr1 = (default_addr.get("address1") or "").strip()
+                addr2 = (default_addr.get("address2") or "").strip()
+                landmark = (default_addr.get("landmark") or "").strip()
+                city = (default_addr.get("city") or "").strip()
+                state = normalize_state_name(default_addr.get("state") or data.get("state") or "")
+                country = (default_addr.get("country") or data.get("country") or "").strip()
+                pincode = (default_addr.get("zipcode") or default_addr.get("pincode") or data.get("pincode") or "").strip()
+            else:
+                state = normalize_state_name(data.get("state") or "")
+                country = (data.get("country") or "").strip()
+                pincode = (data.get("zipcode") or data.get("pincode") or "").strip()
+
+            addr_lines = [line for line in [addr1, addr2, landmark, city] if line]
+            if not addr_lines and default_addr and isinstance(default_addr, dict) and default_addr.get("full_address"):
+                addr_lines = [default_addr.get("full_address").strip()]
+
+            addr_nodes = "\n".join([f"              <ADDRESS>{escape_xml(line)}</ADDRESS>" for line in addr_lines]) if addr_lines else ""
+
+            # GST Details
+            gst = (data.get("customer_gst_number") or data.get("gst_number") or "").strip().upper()
             gst_type = "Regular" if gst else "Unregistered"
 
-            addr1, addr2, city, state, country, pincode = "", "", "", "", "India", ""
-            addresses = data.get("address")
-            if isinstance(addresses, list) and len(addresses) > 0:
-                default_addr = next((a for a in addresses if a.get("is_default")), addresses[0])
-                addr1 = default_addr.get("address1") or ""
-                addr2 = default_addr.get("address2") or ""
-                city = default_addr.get("city") or ""
-                state = normalize_state_name(default_addr.get("state") or "")
-                country = default_addr.get("country") or "India"
-                pincode = default_addr.get("zipcode") or default_addr.get("pincode") or ""
-            elif isinstance(addresses, dict):
-                addr1 = addresses.get("address1") or ""
-                addr2 = addresses.get("address2") or ""
-                city = addresses.get("city") or ""
-                state = normalize_state_name(addresses.get("state") or "")
-                country = addresses.get("country") or "India"
-                pincode = addresses.get("zipcode") or addresses.get("pincode") or ""
+            # PAN Number (extract 10-char PAN from 15-char GSTIN or pan_number)
+            pan = ""
+            if gst and len(gst) == 15:
+                pan = gst[2:12]
+            else:
+                raw_pan = (data.get("pan_number") or data.get("pan") or data.get("aadhaar_number") or "").strip().upper()
+                if len(raw_pan) == 10 and raw_pan.isalnum():
+                    pan = raw_pan
 
-            addr_nodes = ""
-            for line in [addr1, addr2, city]:
-                if line:
-                    addr_nodes += f"<ADDRESS>{line}</ADDRESS>\n"
-            if not addr_nodes:
-                addr_nodes = f"<ADDRESS>{name}</ADDRESS>\n"
+            # Bank Account Details (Account Holder, Account No, IFSC, Bank Name, Branch)
+            bank_acc = None
+            bank_accounts = data.get("bank_accounts") or data.get("bankAccounts") or data.get("bank_account")
+            if isinstance(bank_accounts, list) and len(bank_accounts) > 0:
+                bank_acc = next((b for b in bank_accounts if b.get("is_default")), bank_accounts[0])
+            elif isinstance(bank_accounts, dict):
+                bank_acc = bank_accounts
 
+            bank_xml = ""
+            if bank_acc and isinstance(bank_acc, dict):
+                bank_name = (bank_acc.get("bank_name") or "").strip()
+                branch_name = (bank_acc.get("branch_name") or "").strip()
+                account_num = (bank_acc.get("account_number") or "").strip()
+                ifsc_code = (bank_acc.get("ifsc_code") or bank_acc.get("ifsc") or "").strip()
+                account_holder = (bank_acc.get("account_holder_name") or name).strip()
+
+                if account_num or ifsc_code or bank_name:
+                    bank_xml = f"""
+            <BANKDETAILS.LIST>
+              <PAYMENTFAVOURING>{escape_xml(account_holder)}</PAYMENTFAVOURING>
+              <ACCOUNTNUMBER>{escape_xml(account_num)}</ACCOUNTNUMBER>
+              <IFSCODE>{escape_xml(ifsc_code)}</IFSCODE>
+              <BANKNAME>{escape_xml(bank_name)}</BANKNAME>
+              <BRANCHNAME>{escape_xml(branch_name)}</BRANCHNAME>
+              <TRANSACTIONTYPE>e-Fund Transfer</TRANSACTIONTYPE>
+            </BANKDETAILS.LIST>
+            <PAYMENTDETAILS.LIST>
+              <PAYMENTFAVOURING>{escape_xml(account_holder)}</PAYMENTFAVOURING>
+              <ACCOUNTNUMBER>{escape_xml(account_num)}</ACCOUNTNUMBER>
+              <IFSCODE>{escape_xml(ifsc_code)}</IFSCODE>
+              <BANKNAME>{escape_xml(bank_name)}</BANKNAME>
+              <BRANCHNAME>{escape_xml(branch_name)}</BRANCHNAME>
+              <TRANSACTIONTYPE>e-Fund Transfer</TRANSACTIONTYPE>
+            </PAYMENTDETAILS.LIST>"""
+
+            # GST XML Block
             gst_block = ""
             if gst:
-                gst_block = f"""<LEDGSTREGDETAILS.LIST>
-              <APPLICABLEFROM>20260401</APPLICABLEFROM>
+                gst_block = f"""
+            <LEDGSTREGDETAILS.LIST>
+              <APPLICABLEFROM>20240401</APPLICABLEFROM>
               <GSTREGISTRATIONTYPE>{gst_type}</GSTREGISTRATIONTYPE>
-              <GSTIN>{gst}</GSTIN>
+              <GSTIN>{escape_xml(gst)}</GSTIN>
+              <STATE>{escape_xml(state)}</STATE>
             </LEDGSTREGDETAILS.LIST>"""
 
-            # Use ACTION="Alter" if customer already exists in Tally to push all field updates
-            # (email, mobile, address, GST). Use ACTION="Create" only for brand new customers.
+            # Mailing Details XML Block
+            mailing_block = f"""
+            <LEDMAILINGDETAILS.LIST>
+              <APPLICABLEFROM>20240401</APPLICABLEFROM>
+              <MAILINGNAME>{escape_xml(mailing_name)}</MAILINGNAME>
+              <ADDRESS.LIST TYPE="String">
+{addr_nodes}
+              </ADDRESS.LIST>
+              <STATE>{escape_xml(state)}</STATE>
+              <COUNTRY>{escape_xml(country)}</COUNTRY>
+              <PINCODE>{escape_xml(pincode)}</PINCODE>
+            </LEDMAILINGDETAILS.LIST>"""
+
+            # PAN XML Block
+            pan_block = ""
+            if pan:
+                pan_block = f"""
+            <PANNUMBER>{escape_xml(pan)}</PANNUMBER>
+            <INCOMETAXPAN>{escape_xml(pan)}</INCOMETAXPAN>"""
+
+            # Action selection for duplicate prevention
             already_in_tally = self.check_exists_in_tally("customer", name)
             action = "Alter" if already_in_tally else "Create"
 
@@ -247,23 +347,24 @@ class ExternalClient:
       <REQUESTDESC><REPORTNAME>All Masters</REPORTNAME></REQUESTDESC>
       <REQUESTDATA>
         <TALLYMESSAGE xmlns:UDF="TallyUDF">
-          <LEDGER NAME="{name}" ACTION="{action}">
-            <NAME>{name}</NAME>
-            <PARENT>Sundry Debtors</PARENT>
-            <MAILINGNAME>{mailing_name}</MAILINGNAME>
-            <LEDGERPHONE>{mobile}</LEDGERPHONE>
-            <LEDGERMOBILE>{mobile}</LEDGERMOBILE>
-            <PHONE>{mobile}</PHONE>
-            <EMAIL>{email}</EMAIL>
-            <ADDRESS.LIST>
-              {addr_nodes}
+          <LEDGER NAME="{escape_xml(name)}" ACTION="{action}">
+            <NAME>{escape_xml(name)}</NAME>
+            <PARENT>{escape_xml(parent_group)}</PARENT>
+            <MAILINGNAME>{escape_xml(mailing_name)}</MAILINGNAME>
+            <LEDGERPHONE>{escape_xml(phone_str or primary_mobile)}</LEDGERPHONE>
+            <LEDGERMOBILE>{escape_xml(primary_mobile)}</LEDGERMOBILE>
+            <PHONE>{escape_xml(primary_mobile)}</PHONE>
+            <MOBILE>{escape_xml(primary_mobile)}</MOBILE>
+            <EMAIL>{escape_xml(email)}</EMAIL>
+            <ADDRESS.LIST TYPE="String">
+{addr_nodes}
             </ADDRESS.LIST>
-            <LEDSTATENAME>{state}</LEDSTATENAME>
-            <COUNTRYNAME>{country}</COUNTRYNAME>
-            <PINCODE>{pincode}</PINCODE>
+            <STATENAME>{escape_xml(state)}</STATENAME>
+            <LEDSTATENAME>{escape_xml(state)}</LEDSTATENAME>
+            <COUNTRYNAME>{escape_xml(country)}</COUNTRYNAME>
+            <PINCODE>{escape_xml(pincode)}</PINCODE>
             <GSTREGISTRATIONTYPE>{gst_type}</GSTREGISTRATIONTYPE>
-            <PARTYGSTIN>{gst}</PARTYGSTIN>
-            {gst_block}
+            <PARTYGSTIN>{escape_xml(gst)}</PARTYGSTIN>{gst_block}{mailing_block}{pan_block}{bank_xml}
           </LEDGER>
         </TALLYMESSAGE>
       </REQUESTDATA>
