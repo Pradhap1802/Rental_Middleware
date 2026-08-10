@@ -98,6 +98,12 @@ class ExternalClient:
         tally_type = "LEDGER"
         if entity_type == "equipment":
             tally_type = "STOCKITEM"
+        elif entity_type == "unit":
+            tally_type = "UNIT"
+        elif entity_type == "stockgroup":
+            tally_type = "STOCKGROUP"
+        elif entity_type == "stockcategory":
+            tally_type = "STOCKCATEGORY"
         elif entity_type in ("rental_orders", "invoices", "payments"):
             tally_type = "VOUCHER"
 
@@ -381,21 +387,151 @@ class ExternalClient:
 
     def sync_equipment(self, data: Dict[str, Any]) -> str:
         if self.cfg.external_system_type == "tally":
-            name = data.get("name") or f"Item-{data.get('id')}"
-            unit = "Nos"
-            if isinstance(data.get("asset_unit"), dict) and data.get("asset_unit", {}).get("name"):
-                unit = data["asset_unit"]["name"]
-            elif data.get("asset_unit_name"):
-                unit = data.get("asset_unit_name").split("(")[0].strip()
+            name = (data.get("name") or f"Item-{data.get('id')}").strip()
 
+            # Unit of Measure & Symbol (Meter / m, Piece / pc, Nos / nos)
+            unit_name = "Nos"
+            unit_symbol = ""
+            if isinstance(data.get("asset_unit"), dict):
+                unit_name = (data["asset_unit"].get("name") or "Nos").strip()
+                unit_symbol = (data["asset_unit"].get("symbol") or "").strip()
+            elif data.get("asset_unit_name"):
+                raw_u = data.get("asset_unit_name").strip()
+                unit_name = raw_u.split("(")[0].strip()
+                if "(" in raw_u and ")" in raw_u:
+                    unit_symbol = raw_u.split("(")[1].split(")")[0].strip()
+
+            unit = unit_name if unit_name else (unit_symbol or "Nos")
+            symbol_tag = f"\n            <SYMBOL>{escape_xml(unit_symbol)}</SYMBOL>" if unit_symbol else ""
+
+            # Stock Group (Category e.g. Mobile, Laptop)
             group = "Primary"
             if isinstance(data.get("asset_category"), dict) and data.get("asset_category", {}).get("name"):
-                group = data["asset_category"]["name"]
+                group = data["asset_category"]["name"].strip()
+            elif data.get("asset_categories_names"):
+                group = str(data.get("asset_categories_names")).split(",")[0].strip()
 
-            purchase_price = data.get("purchase_price") or 0
-            rent_price = data.get("rent_price") or data.get("day_based_rent_price") or 0
+            # Stock Category (Brand e.g. Moto, Dell)
+            category = ""
+            if isinstance(data.get("asset_brand"), dict) and data.get("asset_brand", {}).get("name"):
+                category = data["asset_brand"]["name"].strip()
+            elif data.get("asset_brand_name"):
+                category = str(data.get("asset_brand_name")).strip()
 
-            # Use ACTION="Alter" if stock item already exists in Tally to push price/category updates
+            # Asset Code / SKU / Barcode / Model / Description
+            asset_code = (data.get("asset_code") or data.get("sku") or "").strip()
+            barcode = (data.get("bar_code") or data.get("barcode") or "").strip()
+            model_name = (data.get("asset_model_name") or "").strip()
+            raw_desc = (data.get("description") or "").strip()
+
+            # Store Asset Code and Barcode in Description so Tally doesn't create duplicate alias list entries
+            desc_parts = []
+            if asset_code:
+                desc_parts.append(f"Asset Code: {asset_code}")
+            if barcode:
+                desc_parts.append(f"Barcode: {barcode}")
+            if raw_desc:
+                desc_parts.append(raw_desc)
+            full_description = " | ".join(desc_parts)
+
+            # Prices & Quantities
+            purchase_price = float(data.get("purchase_price") or 0)
+            rent_price = float(data.get("rent_price") or data.get("day_based_rent_price") or 0)
+            available_qty = data.get("available_quantity") or data.get("original_quantity") or 0
+
+            # GST Rate & HSN Code
+            gst_rate = float(data.get("gst_rate") or data.get("gst_percentage") or 0)
+            cgst_rate = round(gst_rate / 2.0, 2) if gst_rate else 0
+            sgst_rate = cgst_rate
+            hsn_code = (data.get("hsn_code") or data.get("hsn_sac_code") or data.get("hsn") or "").strip()
+
+            desc_tag = f"\n            <DESCRIPTION>{escape_xml(full_description)}</DESCRIPTION>" if full_description else ""
+
+            opening_balance_tag = f"\n            <OPENINGBALANCE>{available_qty} {escape_xml(unit)}</OPENINGBALANCE>" if available_qty else ""
+            opening_rate_tag = f"\n            <OPENINGRATE>{purchase_price:.2f}/{escape_xml(unit)}</OPENINGRATE>" if purchase_price else ""
+            opening_val_tag = f"\n            <OPENINGVALUE>-{purchase_price:.2f}</OPENINGVALUE>" if purchase_price else ""
+
+            gst_block = ""
+            if gst_rate or hsn_code:
+                hsn_tag = f"\n              <HSNCODE>{escape_xml(hsn_code)}</HSNCODE>\n              <HSN>{escape_xml(hsn_code)}</HSN>" if hsn_code else ""
+                rate_of_vat_tag = f"\n            <RATEOFVAT>{gst_rate}</RATEOFVAT>" if gst_rate else ""
+                gst_block = f"""{rate_of_vat_tag}
+            <GSTAPPLICABLE>Applicable</GSTAPPLICABLE>
+            <GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
+            <GSTDETAILS.LIST>
+              <APPLICABLEFROM>20240401</APPLICABLEFROM>
+              <SRCOFGSTDETAILS>Specify Details Here</SRCOFGSTDETAILS>
+              <CALCULATIONTYPE>On Value</CALCULATIONTYPE>
+              <TAXABILITY>Taxable</TAXABILITY>{hsn_tag}
+              <STATEWISEDETAILS.LIST>
+                <STATENAME>Any</STATENAME>
+                <RATEDETAILS.LIST>
+                  <GSTRATEDUTYHEAD>IGST</GSTRATEDUTYHEAD>
+                  <GSTRATE>{gst_rate}</GSTRATE>
+                </RATEDETAILS.LIST>
+                <RATEDETAILS.LIST>
+                  <GSTRATEDUTYHEAD>CGST</GSTRATEDUTYHEAD>
+                  <GSTRATE>{cgst_rate}</GSTRATE>
+                </RATEDETAILS.LIST>
+                <RATEDETAILS.LIST>
+                  <GSTRATEDUTYHEAD>SGST/UTGST</GSTRATEDUTYHEAD>
+                  <GSTRATE>{sgst_rate}</GSTRATE>
+                </RATEDETAILS.LIST>
+              </STATEWISEDETAILS.LIST>
+            </GSTDETAILS.LIST>"""
+                if hsn_code:
+                    gst_block += f"""
+            <HSNDETAILS.LIST>
+              <APPLICABLEFROM>20240401</APPLICABLEFROM>
+              <SRCOFHSNDETAILS>Specify Details Here</SRCOFHSNDETAILS>
+              <HSNCODE>{escape_xml(hsn_code)}</HSNCODE>
+              <HSN>{escape_xml(hsn_code)}</HSN>
+              <HSNDESCRIPTION>{escape_xml(hsn_code)}</HSNDESCRIPTION>
+            </HSNDETAILS.LIST>"""
+
+            # Price List blocks (using exact Tally tags STANDARDPRICELIST.LIST & STANDARDCOSTLIST.LIST)
+            price_xml = ""
+            if rent_price:
+                price_xml = f"""
+            <STANDARDPRICELIST.LIST>
+              <DATE>20240401</DATE>
+              <RATE>{rent_price:.2f}/{escape_xml(unit)}</RATE>
+            </STANDARDPRICELIST.LIST>"""
+
+            cost_xml = ""
+            if purchase_price:
+                cost_xml = f"""
+            <STANDARDCOSTLIST.LIST>
+              <DATE>20240401</DATE>
+              <RATE>{purchase_price:.2f}/{escape_xml(unit)}</RATE>
+            </STANDARDCOSTLIST.LIST>"""
+
+            # Only send master creation XML for Unit, Stock Group, and Stock Category if they don't already exist in Tally
+            unit_xml = ""
+            if not self.check_exists_in_tally("unit", unit):
+                unit_xml = f"""
+          <UNIT NAME="{escape_xml(unit)}" ACTION="Create">
+            <NAME>{escape_xml(unit)}</NAME>{symbol_tag}
+            <ISSIMPLEUNIT>YES</ISSIMPLEUNIT>
+          </UNIT>"""
+
+            group_xml = ""
+            if group and group != "Primary" and not self.check_exists_in_tally("stockgroup", group):
+                group_xml = f"""
+          <STOCKGROUP NAME="{escape_xml(group)}" ACTION="Create">
+            <NAME>{escape_xml(group)}</NAME>
+          </STOCKGROUP>"""
+
+            category_master_xml = ""
+            category_item_tag = ""
+            if category:
+                if not self.check_exists_in_tally("stockcategory", category):
+                    category_master_xml = f"""
+          <STOCKCATEGORY NAME="{escape_xml(category)}" ACTION="Create">
+            <NAME>{escape_xml(category)}</NAME>
+          </STOCKCATEGORY>"""
+                category_item_tag = f"\n            <CATEGORY>{escape_xml(category)}</CATEGORY>"
+
             item_action = "Alter" if self.check_exists_in_tally("equipment", name) else "Create"
 
             xml = f"""<ENVELOPE>
@@ -404,26 +540,12 @@ class ExternalClient:
     <IMPORTDATA>
       <REQUESTDESC><REPORTNAME>All Masters</REPORTNAME></REQUESTDESC>
       <REQUESTDATA>
-        <TALLYMESSAGE xmlns:UDF="TallyUDF">
-          <UNIT NAME="{unit}" ACTION="Create">
-            <NAME>{unit}</NAME>
-            <ISSIMPLEUNIT>YES</ISSIMPLEUNIT>
-          </UNIT>
-          <STOCKGROUP NAME="{group}" ACTION="Create">
-            <NAME>{group}</NAME>
-          </STOCKGROUP>
-          <STOCKITEM NAME="{name}" ACTION="{item_action}">
-            <NAME>{name}</NAME>
-            <PARENT>{group}</PARENT>
-            <BASEUNITS>{unit}</BASEUNITS>
-            <OPENINGRATE>{rent_price}/{unit}</OPENINGRATE>
-            <OPENINGVALUE>{purchase_price}</OPENINGVALUE>
-            <STANDARDPRICE.LIST>
-              <RATE>{rent_price}/{unit}</RATE>
-            </STANDARDPRICE.LIST>
-            <STANDARDCOST.LIST>
-              <RATE>{purchase_price}/{unit}</RATE>
-            </STANDARDCOST.LIST>
+        <TALLYMESSAGE xmlns:UDF="TallyUDF">{unit_xml}{group_xml}{category_master_xml}
+          <STOCKITEM NAME="{escape_xml(name)}" ACTION="{item_action}">
+            <NAME>{escape_xml(name)}</NAME>
+            <MAILINGNAME.LIST ISMODIFY="Yes" ACTION="Delete"/>
+            <PARENT>{escape_xml(group)}</PARENT>{category_item_tag}
+            <BASEUNITS>{escape_xml(unit)}</BASEUNITS>{desc_tag}{opening_balance_tag}{opening_rate_tag}{opening_val_tag}{gst_block}{price_xml}{cost_xml}
           </STOCKITEM>
         </TALLYMESSAGE>
       </REQUESTDATA>

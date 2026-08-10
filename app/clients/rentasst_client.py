@@ -95,7 +95,23 @@ class RentAsstClient:
         return customers
 
     def fetch_equipment(self) -> List[Dict[str, Any]]:
-        return self._request_with_fallback(["asset", "equipment"])
+        assets = self._request_with_fallback(["asset", "equipment"])
+        if isinstance(assets, list):
+            enriched = []
+            for item in assets:
+                if isinstance(item, dict) and "id" in item:
+                    if not item.get("hsn_code"):
+                        try:
+                            detail = self._request_with_fallback([f"asset/{item['id']}", f"equipment/{item['id']}"])
+                            if isinstance(detail, dict) and "id" in detail:
+                                for k, v in detail.items():
+                                    if v is not None or k not in item:
+                                        item[k] = v
+                        except Exception:
+                            pass
+                enriched.append(item)
+            return enriched
+        return assets
 
     def fetch_rental_orders(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
         params = {}
