@@ -12,16 +12,20 @@ def compute_payload_hash(payload: Dict[str, Any]) -> str:
 
 
 def extract_identifier(entity_type: str, item: Dict[str, Any]) -> str:
-    if entity_type == "customer":
-        return str(item.get("name") or item.get("business_name") or "")
-    elif entity_type == "equipment":
-        return str(item.get("name") or "")
-    elif entity_type == "rental_orders":
-        return str(item.get("number") or item.get("rent_code") or f"ORD-{item.get('id')}")
-    elif entity_type == "invoices":
-        return str(item.get("number") or item.get("invoice_number") or f"INV-{item.get('id')}")
-    elif entity_type == "payments":
-        return str(item.get("reference_id") or item.get("payment_number") or f"PAY-{item.get('id')}")
+    ent = (entity_type or "").lower().strip()
+    if ent in ("customer", "customers"):
+        return str(item.get("name") or item.get("business_name") or "").strip()
+    elif ent in ("equipment", "product", "products"):
+        return str(item.get("name") or "").strip()
+    elif ent in ("rental_orders", "rental_order", "order", "orders"):
+        raw_num = str(item.get("number") or item.get("rent_code") or "").strip()
+        return raw_num if raw_num and raw_num != "0" else f"ORD-{item.get('id')}"
+    elif ent in ("invoices", "invoice"):
+        raw_num = str(item.get("number") or item.get("invoice_number") or "").strip()
+        return raw_num if raw_num and raw_num != "0" else f"INV-{item.get('id')}"
+    elif ent in ("payments", "payment"):
+        raw_ref = str(item.get("reference_id") or item.get("payment_number") or item.get("number") or "").strip()
+        return raw_ref if raw_ref and raw_ref != "0" else f"PAY-{item.get('id')}"
     return ""
 
 

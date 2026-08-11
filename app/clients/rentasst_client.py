@@ -29,7 +29,7 @@ class RentAsstClient:
         for endpoint in endpoints:
             url = f"{self.base_url}/{endpoint.lstrip('/')}"
             try:
-                r = self.session.get(url, headers=self.headers, params=params or {}, timeout=10, verify=self.cfg.verify_ssl)
+                r = self.session.get(url, headers=self.headers, params=params or {}, timeout=30, verify=self.cfg.verify_ssl)
                 if r.status_code in (401, 403):
                     raise NonRetryableException(f"RentAsst API 401 Unauthorized at {url}. Check your API Key/Token.")
                 if r.status_code in (404, 405):

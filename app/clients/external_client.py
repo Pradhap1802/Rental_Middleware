@@ -38,33 +38,37 @@ def normalize_state_name(state_raw: str) -> str:
     return clean.title() if clean.islower() else clean
 
 
-def format_tally_date(raw_date: Optional[str]) -> str:
+def format_tally_date(raw_date: Optional[str], edu_mode: bool = True) -> str:
     """Converts dates to Tally YYYYMMDD string format.
     Handles formats: YYYY-MM-DD, YYYY-MM-DDTHH:MM:SS, DD.MM.YYYY, DD.MM.YYYY HH:MM
+    In Tally Educational Edition (EDU mode), dates other than 1st, 2nd, 31st are rejected by Tally.
     """
     if not raw_date:
-        return datetime.now().strftime("%Y%m%d")
+        return datetime.now().strftime("%Y%m01") if edu_mode else datetime.now().strftime("%Y%m%d")
     try:
         raw_str = str(raw_date).strip()
-        # Strip time portion if present (handles "07.08.2026 00:00" and "2026-08-07T10:15:39")
         date_only = raw_str.split(" ")[0].split("T")[0]
-
-        # Already in YYYYMMDD compact form
+        
+        parsed_yyyy, parsed_mm, parsed_dd = "", "", ""
         clean = date_only.replace("-", "")
         if len(clean) == 8 and clean.isdigit():
-            return clean
+            parsed_yyyy, parsed_mm, parsed_dd = clean[:4], clean[4:6], clean[6:8]
+        else:
+            parts = re.split(r"[./-]", date_only)
+            if len(parts) == 3:
+                p0, p1, p2 = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                if len(p0) == 4:  # YYYY-MM-DD
+                    parsed_yyyy, parsed_mm, parsed_dd = p0, p1.zfill(2), p2.zfill(2)
+                elif len(p2) == 4:  # DD.MM.YYYY or DD/MM/YYYY
+                    parsed_yyyy, parsed_mm, parsed_dd = p2, p1.zfill(2), p0.zfill(2)
 
-        # Split on . / or -
-        parts = re.split(r"[./-]", date_only)
-        if len(parts) == 3:
-            p0, p1, p2 = parts[0].strip(), parts[1].strip(), parts[2].strip()
-            if len(p0) == 4:  # YYYY-MM-DD
-                return f"{p0}{p1.zfill(2)}{p2.zfill(2)}"
-            elif len(p2) == 4:  # DD.MM.YYYY or DD/MM/YYYY
-                return f"{p2}{p1.zfill(2)}{p0.zfill(2)}"
+        if parsed_yyyy and parsed_mm and parsed_dd:
+            if edu_mode and parsed_dd not in ("01", "02", "31"):
+                parsed_dd = "01"
+            return f"{parsed_yyyy}{parsed_mm}{parsed_dd}"
     except Exception:
         pass
-    return datetime.now().strftime("%Y%m%d")
+    return datetime.now().strftime("%Y%m01") if edu_mode else datetime.now().strftime("%Y%m%d")
 
 
 class ExternalClient:
@@ -91,20 +95,23 @@ class ExternalClient:
             return False
 
     def check_exists_in_tally(self, entity_type: str, identifier: str) -> bool:
-        """Checks if a record (Ledger, StockItem, or Voucher) exists in Tally DB."""
-        if self.cfg.external_system_type != "tally" or not identifier:
+        if self.cfg.external_system_type != "tally":
             return True
 
+        if not identifier:
+            return True
+
+        ent = (entity_type or "").lower().strip()
         tally_type = "LEDGER"
-        if entity_type == "equipment":
+        if ent in ("equipment", "product", "products"):
             tally_type = "STOCKITEM"
-        elif entity_type == "unit":
+        elif ent == "unit":
             tally_type = "UNIT"
-        elif entity_type == "stockgroup":
+        elif ent == "stockgroup":
             tally_type = "STOCKGROUP"
-        elif entity_type == "stockcategory":
+        elif ent == "stockcategory":
             tally_type = "STOCKCATEGORY"
-        elif entity_type in ("rental_orders", "invoices", "payments"):
+        elif ent in ("rental_orders", "rental_order", "invoices", "invoice", "payments", "payment", "voucher"):
             tally_type = "VOUCHER"
 
         xml = f"""<ENVELOPE>
@@ -118,13 +125,14 @@ class ExternalClient:
       <DESC>
          <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            <SVFROMDATE>20000101</SVFROMDATE>
+            <SVTODATE>20991231</SVTODATE>
          </STATICVARIABLES>
          <TDL>
             <TDLMESSAGE>
                <COLLECTION NAME="CheckExistence" ISMODIFY="No">
                   <TYPE>{tally_type}</TYPE>
-                  <NATIVEMETHOD>NAME</NATIVEMETHOD>
-                  <NATIVEMETHOD>VOUCHERNUMBER</NATIVEMETHOD>
+                  <FETCH>NAME, VOUCHERNUMBER, REMOTEID</FETCH>
                </COLLECTION>
             </TDLMESSAGE>
          </TDL>
@@ -138,7 +146,7 @@ class ExternalClient:
                 return (identifier.lower() in clean.lower())
         except Exception:
             pass
-        return True
+        return False
 
     def fetch_tally_companies(self) -> List[Dict[str, str]]:
         """Queries Tally Prime XML server to get all currently loaded/open companies."""
@@ -582,7 +590,8 @@ class ExternalClient:
             <NAME>Sales Account</NAME>
             <PARENT>Sales Accounts</PARENT>
           </LEDGER>
-          <VOUCHER VTYPE="Sales Order" ACTION="Create">
+          <VOUCHER VTYPE="Sales Order" ACTION="Create" REMOTEID="RENTAL-ORD-{data.get('id')}">
+            <REMOTEID>RENTAL-ORD-{data.get('id')}</REMOTEID>
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
             <VOUCHERTYPENAME>Sales Order</VOUCHERTYPENAME>
@@ -614,13 +623,124 @@ class ExternalClient:
 
     def sync_invoice(self, data: Dict[str, Any]) -> str:
         if self.cfg.external_system_type == "tally":
-            # Use invoice id as fallback number if number is missing/"0"
             raw_num = str(data.get("number") or data.get("invoice_number") or "").strip()
             num = raw_num if raw_num and raw_num != "0" else f"INV-{data.get('id')}"
             cust_name = (data.get("customer") or {}).get("name") or data.get("customer_name") or f"Customer-{data.get('customer_id')}"
-            amount = data.get("total_amount") or data.get("grand_total") or data.get("amount") or data.get("net_amount") or 0
+            
+            grand_total = float(data.get("grand_total") or data.get("total_amount") or data.get("amount") or 0)
+            subtotal = float(data.get("subtotal") or 0)
+            if not subtotal:
+                subtotal = grand_total
+
+            tax_amount = round(grand_total - subtotal, 2)
+            if tax_amount < 0:
+                tax_amount = 0
+
+            # Determine intra-state vs inter-state for CGST/SGST vs IGST
+            cust_state = ((data.get("customer_address") or {}).get("state") or "").strip().lower()
+            comp_state = (getattr(self.cfg, "company_state", "") or "").strip().lower()
+            is_igst = bool(cust_state and comp_state and cust_state != comp_state)
+
             vtype = "Credit Note" if data.get("document_type") == "credit_note" else "Sales"
             date_str = format_tally_date(data.get("invoice_date") or data.get("date") or data.get("created_at"))
+
+            # Build Duty ledgers creation XML
+            prereq_ledgers = f"""
+          <LEDGER NAME="{escape_xml(cust_name)}" ACTION="Create">
+            <NAME>{escape_xml(cust_name)}</NAME>
+            <PARENT>Sundry Debtors</PARENT>
+          </LEDGER>
+          <LEDGER NAME="Rental Income" ACTION="Create">
+            <NAME>Rental Income</NAME>
+            <PARENT>Sales Accounts</PARENT>
+          </LEDGER>
+          <LEDGER NAME="CGST" ACTION="Create">
+            <NAME>CGST</NAME>
+            <PARENT>Duties &amp; Taxes</PARENT>
+            <TAXTYPE>GST</TAXTYPE>
+            <GSTDUTYHEAD>Central Tax</GSTDUTYHEAD>
+          </LEDGER>
+          <LEDGER NAME="SGST" ACTION="Create">
+            <NAME>SGST</NAME>
+            <PARENT>Duties &amp; Taxes</PARENT>
+            <TAXTYPE>GST</TAXTYPE>
+            <GSTDUTYHEAD>State Tax</GSTDUTYHEAD>
+          </LEDGER>
+          <LEDGER NAME="IGST" ACTION="Create">
+            <NAME>IGST</NAME>
+            <PARENT>Duties &amp; Taxes</PARENT>
+            <TAXTYPE>GST</TAXTYPE>
+            <GSTDUTYHEAD>Integrated Tax</GSTDUTYHEAD>
+          </LEDGER>"""
+
+            # Build Party Ledger Entry (Debit)
+            party_entry = f"""
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>{escape_xml(cust_name)}</LEDGERNAME>
+              <ISPARTYLEDGER>YES</ISPARTYLEDGER>
+              <ISDEEMEDPOSITIVE>YES</ISDEEMEDPOSITIVE>
+              <AMOUNT>-{grand_total:.2f}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>"""
+
+            # Build Inventory Allocations under Income Ledger
+            items = data.get("items") or []
+            inventory_allocations = ""
+            if isinstance(items, list) and len(items) > 0:
+                for item in items:
+                    raw_item_name = item.get("name") or "Equipment"
+                    item_name = raw_item_name.split(" - ")[0].strip() if " - " in raw_item_name else raw_item_name.strip()
+                    qty = item.get("quantity") or 1
+                    price = float(item.get("price") or 0)
+                    total = float(item.get("total_price") or item.get("grand_total") or (price * qty))
+                    unit = item.get("unit") or "Piece"
+
+                    inventory_allocations += f"""
+              <INVENTORYALLOCATIONS.LIST>
+                <STOCKITEMNAME>{escape_xml(item_name)}</STOCKITEMNAME>
+                <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+                <RATE>{price:.2f}/{escape_xml(unit)}</RATE>
+                <AMOUNT>{total:.2f}</AMOUNT>
+                <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
+                <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
+                <BATCHALLOCATIONS.LIST>
+                  <GODOWNNAME>Main Location</GODOWNNAME>
+                  <BATCHNAME>Primary Batch</BATCHNAME>
+                  <AMOUNT>{total:.2f}</AMOUNT>
+                  <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
+                  <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
+                </BATCHALLOCATIONS.LIST>
+              </INVENTORYALLOCATIONS.LIST>"""
+
+            income_entry = f"""
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Rental Income</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+              <AMOUNT>{subtotal:.2f}</AMOUNT>{inventory_allocations}
+            </ALLLEDGERENTRIES.LIST>"""
+
+            tax_entries = ""
+            if tax_amount > 0:
+                if is_igst:
+                    tax_entries += f"""
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>IGST</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+              <AMOUNT>{tax_amount:.2f}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>"""
+                else:
+                    cgst_val = round(tax_amount / 2.0, 2)
+                    sgst_val = round(tax_amount - cgst_val, 2)
+                    tax_entries += f"""
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>CGST</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+              <AMOUNT>{cgst_val:.2f}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>SGST</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+              <AMOUNT>{sgst_val:.2f}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>"""
 
             xml = f"""<ENVELOPE>
   <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
@@ -628,31 +748,14 @@ class ExternalClient:
     <IMPORTDATA>
       <REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME></REQUESTDESC>
       <REQUESTDATA>
-        <TALLYMESSAGE xmlns:UDF="TallyUDF">
-          <LEDGER NAME="{cust_name}" ACTION="Create">
-            <NAME>{cust_name}</NAME>
-            <PARENT>Sundry Debtors</PARENT>
-          </LEDGER>
-          <LEDGER NAME="Rental Income" ACTION="Create">
-            <NAME>Rental Income</NAME>
-            <PARENT>Sales Accounts</PARENT>
-          </LEDGER>
-          <VOUCHER VTYPE="{vtype}" ACTION="Create">
+        <TALLYMESSAGE xmlns:UDF="TallyUDF">{prereq_ledgers}
+          <VOUCHER VTYPE="{vtype}" ACTION="Create" REMOTEID="RENTAL-INV-{data.get('id')}">
+            <REMOTEID>RENTAL-INV-{data.get('id')}</REMOTEID>
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
             <VOUCHERTYPENAME>{vtype}</VOUCHERTYPENAME>
             <VOUCHERNUMBER>{num}</VOUCHERNUMBER>
-            <PARTYLEDGERNAME>{cust_name}</PARTYLEDGERNAME>
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>{cust_name}</LEDGERNAME>
-              <ISDEEMEDPOSITIVE>YES</ISDEEMEDPOSITIVE>
-              <AMOUNT>-{amount}</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>Rental Income</LEDGERNAME>
-              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
-              <AMOUNT>{amount}</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>
+            <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{party_entry}{income_entry}{tax_entries}
           </VOUCHER>
         </TALLYMESSAGE>
       </REQUESTDATA>
@@ -697,7 +800,8 @@ class ExternalClient:
             <NAME>{cash_bank_ledger}</NAME>
             <PARENT>{parent_group}</PARENT>
           </LEDGER>
-          <VOUCHER VTYPE="Receipt" ACTION="Create">
+          <VOUCHER VTYPE="Receipt" ACTION="Create" REMOTEID="RENTAL-PAY-{data.get('id')}">
+            <REMOTEID>RENTAL-PAY-{data.get('id')}</REMOTEID>
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
             <VOUCHERTYPENAME>Receipt</VOUCHERTYPENAME>
