@@ -14,4 +14,5 @@ def sync_rental_orders(rentasst_client: RentAsstClient, external_client: Externa
         fetch_func=rentasst_client.fetch_rental_orders,
         sync_func=external_client.sync_rental_order,
         store=store,
+        external_client=external_client,
     )

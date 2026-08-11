@@ -14,4 +14,5 @@ def sync_customers(rentasst_client: RentAsstClient, external_client: ExternalCli
         fetch_func=rentasst_client.fetch_customers,
         sync_func=external_client.sync_customer,
         store=store,
+        external_client=external_client,
     )

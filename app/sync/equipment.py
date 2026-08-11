@@ -14,4 +14,5 @@ def sync_equipment(rentasst_client: RentAsstClient, external_client: ExternalCli
         fetch_func=rentasst_client.fetch_equipment,
         sync_func=external_client.sync_equipment,
         store=store,
+        external_client=external_client,
     )

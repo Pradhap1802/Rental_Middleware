@@ -3,7 +3,6 @@ from .config_service import ConfigService
 from .test_service import TestService
 from .queue_service import QueueService
 from .status_service import StatusService
-from .log_service import LogService
 from .backup_service import BackupService
 
 __all__ = [
@@ -12,6 +11,6 @@ __all__ = [
     "TestService",
     "QueueService",
     "StatusService",
-    "LogService",
     "BackupService",
 ]
+

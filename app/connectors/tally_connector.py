@@ -5,17 +5,18 @@ from ..clients.external_client import ExternalClient
 from ..models.domain import AppConfig
 
 
-@functools.lru_cache(maxsize=512)
-def generate_tally_xml_envelope(action: str, entity_type: str, voucher_type: str) -> str:
-    """LRU cached template generator for Tally XML envelopes."""
+def generate_tally_xml_envelope(action: str, entity_type: str, voucher_type: str, company_name: str = "") -> str:
+    """Template generator for Tally XML envelopes with dynamic target company injection."""
+    company_var = f"<STATICVARIABLES><SVCURRENTCOMPANY>{company_name}</SVCURRENTCOMPANY></STATICVARIABLES>" if company_name else ""
     return (
         f'<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>'
         f'<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME>'
-        f'<STATICVARIABLES><SVCURRENTCOMPANY>Default</SVCURRENTCOMPANY></STATICVARIABLES>'
+        f'{company_var}'
         f'</REQUESTDESC><REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">'
         f'<!-- {action} {entity_type} {voucher_type} -->'
         f'</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>'
     )
+
 
 
 class TallyConnector(BaseConnector):

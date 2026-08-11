@@ -12,6 +12,16 @@ try:
 except ImportError:
     WIN32_AVAILABLE = False
 
+if getattr(sys, "frozen", False):
+    app_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+else:
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+
+if app_dir not in sys.path:
+    sys.path.insert(0, app_dir)
+
+from app.main import app
+
 
 if WIN32_AVAILABLE:
     class RentAsstMiddlewareService(win32serviceutil.ServiceFramework):
@@ -33,13 +43,13 @@ if WIN32_AVAILABLE:
                 servicemanager.PYS_SERVICE_STARTED,
                 (self._svc_name_, ""),
             )
-            app_dir = os.path.dirname(os.path.abspath(__file__))
-            sys.path.insert(0, app_dir)
-            uvicorn.run("app.main:app", host="0.0.0.0", port=8088, log_level="info")
+            uvicorn.run(app, host="0.0.0.0", port=8088, log_level="info")
 
 if __name__ == "__main__":
     if WIN32_AVAILABLE and len(sys.argv) > 1:
         win32serviceutil.HandleCommandLine(RentAsstMiddlewareService)
     else:
         print("Starting RentAsst Middleware in standalone mode...")
-        uvicorn.run("app.main:app", host="0.0.0.0", port=8088, reload=True)
+        is_frozen = getattr(sys, "frozen", False)
+        uvicorn.run(app, host="0.0.0.0", port=8088, reload=not is_frozen)
+

@@ -32,19 +32,13 @@ def setup_centralized_logger() -> logging.Logger:
     logger = logging.getLogger("RentalMiddleware")
     logger.setLevel(logging.INFO)
     if not logger.handlers:
-        # Daily rotating file handler
-        file_handler = logging.handlers.TimedRotatingFileHandler(
-            MAIN_LOG_PATH, when="midnight", interval=1, backupCount=30, encoding="utf-8"
-        )
-        file_handler.setFormatter(StructuredJsonFormatter())
-        logger.addHandler(file_handler)
-
-        # Standard console handler
+        # Standard console handler only
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s"))
         logger.addHandler(console_handler)
 
     return logger
+
 
 
 main_logger = setup_centralized_logger()
