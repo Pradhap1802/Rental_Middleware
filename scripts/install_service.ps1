@@ -1,4 +1,13 @@
 # PowerShell script to install RentAsst Middleware Executable as a Windows Service
+
+# Require Administrator Elevation
+$IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $IsAdmin) {
+    Write-Host "Elevating privileges to Administrator..." -ForegroundColor Yellow
+    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    exit
+}
+
 $ServiceName = "RentAsstMiddlewareService"
 $DisplayName = "RentAsst Standalone Middleware Service"
 $ExePath = "$PSScriptRoot\..\dist\RentalMiddleware\RentalMiddleware.exe"
@@ -12,6 +21,7 @@ if (Test-Path $ExePath) {
     $BinaryPath = "`"$PythonPath`" `"$ScriptPath`""
     Write-Host "Installing $DisplayName using Python script: $ScriptPath" -ForegroundColor Yellow
 }
+
 
 # Check if service already exists
 $Service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue

@@ -1,4 +1,5 @@
 import os
+import sys
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -10,8 +11,14 @@ from .services.sync_service import SyncService
 from .dashboard import dashboard_router
 from .api import all_routers
 
-DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".data"))
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+DATA_DIR = os.path.join(BASE_DIR, ".data")
 os.makedirs(DATA_DIR, exist_ok=True)
+
 
 # Shared instance singletons
 sync_service = SyncService(DATA_DIR)
