@@ -63,6 +63,43 @@ class RentAsstClient:
         except Exception:
             return False
 
+    def login(self, email: str, password: str, target_url: Optional[str] = None) -> Dict[str, Any]:
+        """Authenticates user credentials against RentAsst API and returns token and business list."""
+        base_url = (target_url or self.base_url).rstrip("/")
+        endpoints = ["business-login", "admin/login", "user/business-login"]
+        payload = {
+            "email": str(email).strip(),
+            "password": str(password).strip(),
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        last_error = None
+        for endpoint in endpoints:
+            url = f"{base_url}/{endpoint.lstrip('/')}"
+            try:
+                r = self.session.post(url, json=payload, headers=headers, timeout=15, verify=self.cfg.verify_ssl)
+                if r.status_code in (200, 201):
+                    data = r.json()
+                    if isinstance(data, dict):
+                        return data
+                elif r.status_code in (401, 403, 422):
+                    try:
+                        err_json = r.json()
+                        msg = err_json.get("message") or err_json.get("error") or "Invalid email or password."
+                        raise Exception(f"RentAsst Authentication Failed ({r.status_code}): {msg}")
+                    except requests.exceptions.JSONDecodeError:
+                        raise Exception(f"RentAsst Authentication Failed ({r.status_code}).")
+            except Exception as e:
+                last_error = e
+                if "Authentication Failed" in str(e):
+                    raise e
+        if last_error:
+            raise last_error
+        raise Exception("Failed to connect to RentAsst login endpoint. Check your RentAsst API URL.")
+
+
     def check_exists_in_rentasst(self, entity_type: str, rentasst_id: str) -> bool:
         """Verifies if a record still exists on the RentAsst Cloud API server."""
         if not rentasst_id:

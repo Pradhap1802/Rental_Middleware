@@ -58,3 +58,20 @@ Integrate with Kubernetes or load balancer health probes:
 - **Backup Verification**: Validates SQLite magic header bytes and executes `PRAGMA quick_check;`.
 - **Pre-Restore Safety Snapshot**: Before restoring a database snapshot (`POST /api/backups/restore/{filename}`), a safety snapshot (`state_prerestore_<timestamp>.db`) is created automatically.
 - **Retention**: Purges backups older than 30 days or exceeding 10 files.
+
+---
+
+## 5. Windows Standalone Executable Packaging
+
+You can build the standalone Windows executable package (`RentalMiddleware.exe`) using the included build tool:
+
+```cmd
+python build.py
+```
+
+### Output
+
+- **Binary Output**: `RentalMiddleware.exe`
+- **Output Package**: `dist/RentAsstMiddleware_Windows_v1.0.0.zip`
+
+

@@ -134,8 +134,24 @@
           <label>RentAsst API Endpoint</label>
           <input type="text" id="rentasst_url" value="http://localhost:8000/api">
         </div>
+
+        <!-- Automated Solution 1: Account Login Section -->
+        <div style="background: #111827; border: 1px dashed var(--accent); border-radius: 8px; padding: 0.85rem; margin-bottom: 1rem;">
+          <div style="font-size: 0.85rem; font-weight: 600; color: #a5b4fc; margin-bottom: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+            <span>🔐 Login & Connect RentAsst</span>
+          </div>
+          <div class="form-group" style="margin-bottom: 0.5rem;">
+            <input type="email" id="rentasst_email" placeholder="Email / Username (e.g. admin@example.com)">
+          </div>
+          <div class="form-group" style="margin-bottom: 0.5rem;">
+            <input type="password" id="rentasst_password" placeholder="Account Password">
+          </div>
+          <button style="width: 100%; background: linear-gradient(135deg, #6366f1, #4f46e5); font-size: 0.85rem;" onclick="loginRentAsst()">🔑 Login</button>
+          <div id="login_status_msg" style="font-size: 0.75rem; margin-top: 0.4rem; display: none;"></div>
+        </div>
+
         <div class="form-group">
-          <label>API Key / Token</label>
+          <label>Bearer Token</label>
           <input type="password" id="rentasst_api_key" placeholder="Enter RentAsst API Token">
         </div>
         <div class="form-group">
@@ -152,9 +168,9 @@
       </div>
 
       <div class="card">
-        <h2>External Target System Settings</h2>
+        <h2> Target System Settings</h2>
         <div class="form-group">
-          <label>External System Target URL (Tally / ERP)</label>
+          <label>External System Target URL</label>
           <input type="text" id="external_url" value="http://localhost:9000">
         </div>
         <div class="form-group">
@@ -178,7 +194,7 @@
       <h2>Manual Entity Synchronization</h2>
       <div class="sync-actions">
         <div class="sync-btn" onclick="triggerSync('customers')">👥 Customers</div>
-        <div class="sync-btn" onclick="triggerSync('equipment')">🚜 Equipment / Assets</div>
+        <div class="sync-btn" onclick="triggerSync('equipment')">🚜 Assets</div>
         <div class="sync-btn" onclick="triggerSync('rental_orders')">📋 Rental Orders</div>
         <div class="sync-btn" onclick="triggerSync('invoices')">🧾 Invoices</div>
         <div class="sync-btn" onclick="triggerSync('payments')">💳 Payments</div>
@@ -279,6 +295,47 @@
           }
         }
       } catch(e) {}
+    }
+
+    async function loginRentAsst() {
+      const email = document.getElementById('rentasst_email').value;
+      const password = document.getElementById('rentasst_password').value;
+      const url = document.getElementById('rentasst_url').value;
+      const msgEl = document.getElementById('login_status_msg');
+      
+      if (!email || !password) {
+        msgEl.style.display = 'block';
+        msgEl.style.color = '#ef4444';
+        msgEl.innerText = '❌ Please enter both Email and Password.';
+        return;
+      }
+      
+      msgEl.style.display = 'block';
+      msgEl.style.color = '#a5b4fc';
+      msgEl.innerText = '⏳ Authenticating with RentAsst...';
+      
+      try {
+        const res = await fetch('/api/rentasst/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password, url })
+        });
+        const data = await res.json();
+        if (res.ok && data.status === 'success') {
+          msgEl.style.color = '#10b981';
+          msgEl.innerText = `✅ ${data.message}`;
+          if (data.token) document.getElementById('rentasst_api_key').value = data.token;
+          if (data.tenant_id) document.getElementById('rentasst_tenant_id').value = data.tenant_id;
+          fetchRentAsstCompanies();
+          loadStatus();
+        } else {
+          msgEl.style.color = '#ef4444';
+          msgEl.innerText = `❌ ${data.message || 'Authentication failed.'}`;
+        }
+      } catch (e) {
+        msgEl.style.color = '#ef4444';
+        msgEl.innerText = `❌ Error: ${e.message}`;
+      }
     }
 
     async function loadConfig() {
