@@ -1,12 +1,11 @@
 from typing import Dict, Any, Optional
 from .base_connector import BaseConnector, ConnectorResponse
-from ..clients.external_client import ExternalClient
 from ..models.domain import AppConfig
-
 
 class RestConnector(BaseConnector):
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
+        from ..clients.external_client import ExternalClient
         self.client = ExternalClient(cfg)
 
     def connect(self) -> bool:

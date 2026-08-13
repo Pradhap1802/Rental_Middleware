@@ -1,8 +1,11 @@
 import json
 import os
-from typing import Optional
+import base64
+import hashlib
+from typing import Optional, Dict, Any
 from cryptography.fernet import Fernet
 from ..models.domain import AppConfig
+from ..security.masking import mask_secret
 
 
 class ConfigStore:
@@ -13,6 +16,17 @@ class ConfigStore:
         os.makedirs(self.data_dir, exist_ok=True)
 
     def _get_fernet(self) -> Fernet:
+        # Priority 1: Environment variable secret key
+        env_key = os.environ.get("RENTAL_MIDDLEWARE_SECRET_KEY")
+        if env_key:
+            try:
+                return Fernet(env_key.encode("utf-8"))
+            except Exception:
+                key_bytes = hashlib.sha256(env_key.encode("utf-8")).digest()
+                b64_key = base64.urlsafe_b64encode(key_bytes)
+                return Fernet(b64_key)
+
+        # Priority 2: Protected persistent key file
         if not os.path.exists(self.key_path):
             key = Fernet.generate_key()
             with open(self.key_path, "wb") as f:
@@ -27,20 +41,39 @@ class ConfigStore:
 
     def load_safe(self) -> Optional[AppConfig]:
         from ..services.discovery_service import DiscoveryService
+        cfg = None
         if not os.path.exists(self.cfg_path):
-            # Auto-discover RentAsst setup automatically on first run
             auto_cfg = DiscoveryService.auto_discover_rentasst()
             self.save(auto_cfg)
-            return auto_cfg
-        try:
-            fernet = self._get_fernet()
-            with open(self.cfg_path, "rb") as f:
-                enc = f.read()
-            raw = fernet.decrypt(enc)
-            data = json.loads(raw.decode("utf-8"))
-            return AppConfig(**data)
-        except Exception:
-            return DiscoveryService.auto_discover_rentasst()
+            cfg = auto_cfg
+        else:
+            try:
+                fernet = self._get_fernet()
+                with open(self.cfg_path, "rb") as f:
+                    enc = f.read()
+                raw = fernet.decrypt(enc)
+                data = json.loads(raw.decode("utf-8"))
+                cfg = AppConfig(**data)
+            except Exception:
+                cfg = DiscoveryService.auto_discover_rentasst()
+
+        if cfg:
+            # Environment variable overrides
+            env_ra_token = os.environ.get("RENTASST_API_TOKEN") or os.environ.get("RENTASST_TOKEN") or os.environ.get("RENTASST_API_KEY")
+            env_ra_url = os.environ.get("RENTASST_URL") or os.environ.get("RENTASST_API_URL")
+            env_ext_key = os.environ.get("EXTERNAL_API_KEY") or os.environ.get("TALLY_API_KEY")
+            env_ext_url = os.environ.get("EXTERNAL_URL") or os.environ.get("TALLY_HOST")
+
+            if env_ra_token:
+                cfg.rentasst_api_key = env_ra_token
+            if env_ra_url:
+                cfg.rentasst_url = env_ra_url.rstrip("/")
+            if env_ext_key:
+                cfg.external_api_key = env_ext_key
+            if env_ext_url:
+                cfg.external_url = env_ext_url.rstrip("/")
+
+        return cfg
 
     def require(self) -> AppConfig:
         cfg = self.load_safe()
@@ -57,3 +90,14 @@ class ConfigStore:
         enc = fernet.encrypt(raw)
         with open(self.cfg_path, "wb") as f:
             f.write(enc)
+
+    def get_masked_config(self, cfg: Optional[AppConfig] = None) -> Dict[str, Any]:
+        target_cfg = cfg or self.load_safe()
+        if not target_cfg:
+            return {}
+        data = target_cfg.model_dump()
+        if data.get("rentasst_api_key"):
+            data["rentasst_api_key"] = mask_secret(data["rentasst_api_key"])
+        if data.get("external_api_key"):
+            data["external_api_key"] = mask_secret(data["external_api_key"])
+        return data

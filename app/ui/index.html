@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RentAsst Middleware</title>
+  <title>RentAsst ↔ Tally Production Middleware Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.ico">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
@@ -17,19 +18,30 @@
       --success: #10b981;
       --error: #ef4444;
       --warning: #f59e0b;
+      --info: #3b82f6;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }
     body { background: var(--bg); color: var(--text); padding: 2rem; }
-    .container { max-width: 1000px; margin: 0 auto; }
-    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
+    .container { max-width: 1200px; margin: 0 auto; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
     h1 { font-size: 1.75rem; font-weight: 700; background: linear-gradient(135deg, #a5b4fc, #6366f1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
     .status-badge { background: #064e3b; color: #34d399; padding: 0.35rem 0.85rem; border-radius: 9999px; font-size: 0.85rem; font-weight: 600; display: inline-flex; align-items: center; gap: 0.5rem; }
     .pulse { width: 8px; height: 8px; background: #34d399; border-radius: 50%; box-shadow: 0 0 8px #34d399; }
-    .metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 2rem; }
-    .metric-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; text-align: center; }
-    .metric-card .val { font-size: 1.5rem; font-weight: 700; margin-top: 0.25rem; color: var(--text); }
-    .metric-card .lbl { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem; }
+    
+    .section-title { font-size: 1.1rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; }
+
+    /* Entity Sync Status Grid */
+    .entity-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0.75rem; margin-bottom: 1.5rem; }
+    .entity-card { background: #111827; border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem; text-align: center; }
+    .entity-card .ent-name { font-size: 0.8rem; font-weight: 600; color: #a5b4fc; text-transform: capitalize; }
+    .entity-card .ent-count { font-size: 1.3rem; font-weight: 700; margin: 0.2rem 0; color: var(--text); }
+    .entity-card .ent-time { font-size: 0.65rem; color: var(--text-muted); }
+
+    /* Reconciliation Audit */
+    .recon-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
+    .recon-card { background: #0f172a; border: 1px solid var(--border); border-radius: 10px; padding: 1rem; text-align: center; }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem; }
     .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; }
     .card h2 { font-size: 1.15rem; margin-bottom: 1rem; color: var(--text); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
     .form-group { margin-bottom: 1rem; }
@@ -53,32 +65,69 @@
   <div class="container">
     <header>
       <div>
-        <h1>RentAsst Middleware Gateway</h1>
+        <h1>RentAsst ↔ Tally Production Gateway</h1>
       </div>
       <div class="status-badge" id="service_status"><span class="pulse"></span> Service Active</div>
     </header>
 
-    <!-- Operational Telemetry Tiles -->
-    <div class="metrics-grid">
-      <div class="metric-card">
-        <div class="lbl">Pending / Waiting</div>
-        <div class="val" id="metric_pending">0</div>
+    <!-- 1. Entity Synchronization Status -->
+    <div class="section-title">Entity Synchronization Status</div>
+    <div class="entity-grid">
+      <div class="entity-card">
+        <div class="ent-name">👥 Customers</div>
+        <div class="ent-count" id="ent_customers_cnt">0</div>
+        <div class="ent-time" id="ent_customers_time">No sync</div>
       </div>
-      <div class="metric-card">
-        <div class="lbl">Retry Queue</div>
-        <div class="val" id="metric_retry" style="color: var(--warning);">0</div>
+      <div class="entity-card">
+        <div class="ent-name">🚜 Equipment</div>
+        <div class="ent-count" id="ent_equipment_cnt">0</div>
+        <div class="ent-time" id="ent_equipment_time">No sync</div>
       </div>
-      <div class="metric-card">
-        <div class="lbl">Completed Jobs</div>
-        <div class="val" id="metric_completed" style="color: var(--success);">0</div>
+      <div class="entity-card">
+        <div class="ent-name">📋 Orders</div>
+        <div class="ent-count" id="ent_orders_cnt">0</div>
+        <div class="ent-time" id="ent_orders_time">No sync</div>
       </div>
-      <div class="metric-card">
-        <div class="lbl">Failed Jobs</div>
-        <div class="val" id="metric_failed" style="color: var(--error);">0</div>
+      <div class="entity-card">
+        <div class="ent-name">🧾 Invoices</div>
+        <div class="ent-count" id="ent_invoices_cnt">0</div>
+        <div class="ent-time" id="ent_invoices_time">No sync</div>
+      </div>
+      <div class="entity-card">
+        <div class="ent-name">💳 Payments</div>
+        <div class="ent-count" id="ent_payments_cnt">0</div>
+        <div class="ent-time" id="ent_payments_time">No sync</div>
+      </div>
+      <div class="entity-card">
+        <div class="ent-name">🔄 Reverse Sync</div>
+        <div class="ent-count" id="ent_reverse_cnt">0</div>
+        <div class="ent-time" id="ent_reverse_time">No sync</div>
       </div>
     </div>
 
-    <div class="grid">
+    <!-- 2. Reconciliation & Conflict Audit -->
+    <div class="section-title">Reconciliation & Conflict Audit</div>
+    <div class="recon-grid">
+      <div class="recon-card">
+        <div class="lbl">Matched Records</div>
+        <div class="val" id="recon_matched" style="color: var(--success);">0</div>
+      </div>
+      <div class="recon-card">
+        <div class="lbl">Missing Records</div>
+        <div class="val" id="recon_missing" style="color: var(--warning);">0</div>
+      </div>
+      <div class="recon-card">
+        <div class="lbl">Mismatched Records</div>
+        <div class="val" id="recon_mismatched" style="color: var(--error);">0</div>
+      </div>
+      <div class="recon-card">
+        <div class="lbl">Unresolved Conflicts</div>
+        <div class="val" id="recon_conflicts" style="color: var(--error);">0</div>
+      </div>
+    </div>
+
+    <!-- Settings & Sync Trigger Grid -->
+    <div class="grid-2">
       <div class="card">
         <h2>RentAsst System Settings</h2>
         <div class="form-group">
@@ -117,10 +166,6 @@
             <option value="">-- Select or Open Tally Company --</option>
           </select>
         </div>
-        <div class="form-group">
-          <label>Target API Key (Optional)</label>
-          <input type="password" id="external_api_key" placeholder="Enter API Key if required">
-        </div>
         <div class="btn-group">
           <button onclick="testConnection('external')">Test Connection</button>
           <button class="secondary" onclick="saveConfig()">Save All Config</button>
@@ -133,25 +178,64 @@
       <h2>Manual Entity Synchronization</h2>
       <div class="sync-actions">
         <div class="sync-btn" onclick="triggerSync('customers')">👥 Customers</div>
-        <div class="sync-btn" onclick="triggerSync('equipment')">🚜 Assets</div>
-        <div class="sync-btn" onclick="triggerSync('invoices')">🧾 Invoices </div>
-        <div class="sync-btn" onclick="triggerSync('payments')">💳 Payments </div>
+        <div class="sync-btn" onclick="triggerSync('equipment')">🚜 Equipment / Assets</div>
+        <div class="sync-btn" onclick="triggerSync('rental_orders')">📋 Rental Orders</div>
+        <div class="sync-btn" onclick="triggerSync('invoices')">🧾 Invoices</div>
+        <div class="sync-btn" onclick="triggerSync('payments')">💳 Payments</div>
+        <div class="sync-btn" onclick="triggerSync('tally_to_rentasst')">🔄 Sync Tally ➔ RentAsst (Vouchers & Receipts)</div>
       </div>
     </div>
+
   </div>
 
   <script>
+    function setText(id, text) {
+      const el = document.getElementById(id);
+      if (el) el.innerText = text;
+    }
+
     async function loadStatus() {
       try {
         const res = await fetch('/api/status');
         if (!res.ok) return;
         const data = await res.json();
-        
-        document.getElementById('metric_pending').innerText = data.queue_metrics.pending_jobs;
-        document.getElementById('metric_retry').innerText = data.queue_metrics.running_jobs;
-        document.getElementById('metric_completed').innerText = data.queue_metrics.completed_jobs;
-        document.getElementById('metric_failed').innerText = data.queue_metrics.failed_jobs;
-      } catch(e) {}
+
+        // 1. Entity Sync Status
+        const es = data.entity_sync_status || {};
+        if (es.customers) {
+          setText('ent_customers_cnt', es.customers.synced_count);
+          setText('ent_customers_time', es.customers.last_sync ? es.customers.last_sync.split(' ')[0] : 'No sync');
+        }
+        if (es.equipment) {
+          setText('ent_equipment_cnt', es.equipment.synced_count);
+          setText('ent_equipment_time', es.equipment.last_sync ? es.equipment.last_sync.split(' ')[0] : 'No sync');
+        }
+        if (es.rental_orders) {
+          setText('ent_orders_cnt', es.rental_orders.synced_count);
+          setText('ent_orders_time', es.rental_orders.last_sync ? es.rental_orders.last_sync.split(' ')[0] : 'No sync');
+        }
+        if (es.invoices) {
+          setText('ent_invoices_cnt', es.invoices.synced_count);
+          setText('ent_invoices_time', es.invoices.last_sync ? es.invoices.last_sync.split(' ')[0] : 'No sync');
+        }
+        if (es.payments) {
+          setText('ent_payments_cnt', es.payments.synced_count);
+          setText('ent_payments_time', es.payments.last_sync ? es.payments.last_sync.split(' ')[0] : 'No sync');
+        }
+        if (es.reverse_sync) {
+          setText('ent_reverse_cnt', es.reverse_sync.synced_count);
+          setText('ent_reverse_time', es.reverse_sync.last_sync ? es.reverse_sync.last_sync.split(' ')[0] : 'No sync');
+        }
+
+        // 2. Reconciliation Metrics
+        const rm = data.reconciliation_metrics || {};
+        setText('recon_matched', rm.matched || 0);
+        setText('recon_missing', rm.missing || 0);
+        setText('recon_mismatched', rm.mismatched || 0);
+        setText('recon_conflicts', rm.unresolved_conflicts || 0);
+      } catch(e) {
+        console.error('Error loading dashboard status:', e);
+      }
     }
 
     async function fetchTallyCompanies() {
@@ -162,7 +246,6 @@
         if (res.ok) {
           const data = await res.json();
           select.innerHTML = '<option value="">-- Select Company --</option>';
-
           if (data.companies && data.companies.length > 0) {
             data.companies.forEach(c => {
               const opt = document.createElement('option');
@@ -174,19 +257,9 @@
               const matchingOpt = Array.from(select.options).find(o => o.value === savedValue);
               if (matchingOpt) select.value = savedValue;
             }
-            if (data.companies.length === 1 && !savedValue) {
-              select.value = data.companies[0].name;
-            }
-          } else {
-            const opt = document.createElement('option');
-            opt.value = savedValue || '';
-            opt.textContent = savedValue ? savedValue + ' (Saved)' : '-- No open Tally company detected --';
-            select.appendChild(opt);
           }
         }
-      } catch(e) {
-        console.error('Error fetching Tally companies:', e);
-      }
+      } catch(e) {}
     }
 
     async function fetchRentAsstCompanies() {
@@ -226,9 +299,7 @@
             opt.selected = true;
             select.appendChild(opt);
           }
-          if (cfg.external_api_key) document.getElementById('external_api_key').value = cfg.external_api_key;
 
-          // Automatically fetch open companies from Tally XML Server
           fetchTallyCompanies();
           fetchRentAsstCompanies();
         }
@@ -242,7 +313,7 @@
         rentasst_tenant_id: document.getElementById('rentasst_tenant_id').value,
         external_url: document.getElementById('external_url').value,
         tally_company_name: document.getElementById('tally_company_name').value,
-        external_api_key: document.getElementById('external_api_key').value,
+        external_api_key: '',
         external_system_type: 'tally',
         auto_sync_enabled: true
       };

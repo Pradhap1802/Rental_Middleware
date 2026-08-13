@@ -26,7 +26,7 @@ class SyncScheduler:
                 return
 
             # Enqueue entity sync jobs into SQLite Queue Engine
-            entities = ["customers", "equipment", "invoices", "payments"]
+            entities = ["customers", "equipment", "rental_orders", "invoices", "payments"]
             enqueued_count = 0
             for entity in entities:
                 job_id = self.queue_store.enqueue(entity)
@@ -37,6 +37,16 @@ class SyncScheduler:
         except Exception as e:
             log_event("Scheduler", f"Error during background scheduler enqueue: {str(e)}")
 
+    def _backup_job(self):
+        log_event("Scheduler", "Executing scheduled database backup...")
+        try:
+            from ..services.backup_service import BackupService
+            svc = BackupService(self.data_dir)
+            res = svc.trigger_backup()
+            log_event("Scheduler", f"Scheduled backup completed: {res}")
+        except Exception as e:
+            log_event("Scheduler", f"Error during scheduled database backup: {e}")
+
     def start(self, interval_minutes: int = 10):
         if not self.is_running:
             self.scheduler.add_job(
@@ -46,10 +56,17 @@ class SyncScheduler:
                 id="rentasst_sync_job",
                 replace_existing=True,
             )
+            self.scheduler.add_job(
+                self._backup_job,
+                "interval",
+                hours=24,
+                id="rentasst_backup_job",
+                replace_existing=True,
+            )
             self.scheduler.start()
             self.is_running = True
             self.is_paused = False
-            log_event("Scheduler", f"Sync scheduler started with {interval_minutes} minute interval.")
+            log_event("Scheduler", f"Sync scheduler started with {interval_minutes} minute sync interval and 24-hour backup schedule.")
 
     def stop(self):
         if self.is_running:
@@ -72,7 +89,7 @@ class SyncScheduler:
 
     def trigger_manual_sync(self, entity_type: Optional[str] = None) -> int:
         """Immediately enqueues sync jobs for requested entity or all entities."""
-        entities = [entity_type] if entity_type else ["customers", "equipment", "invoices", "payments"]
+        entities = [entity_type] if entity_type else ["customers", "equipment", "rental_orders", "invoices", "payments"]
         enqueued = 0
         for entity in entities:
             res = self.queue_store.enqueue(entity, priority=True)

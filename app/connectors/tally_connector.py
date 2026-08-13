@@ -1,34 +1,20 @@
 import functools
 from typing import Dict, Any, Optional
 from .base_connector import BaseConnector, ConnectorResponse
-from ..clients.external_client import ExternalClient
 from ..models.domain import AppConfig
-
-
-def generate_tally_xml_envelope(action: str, entity_type: str, voucher_type: str, company_name: str = "") -> str:
-    """Template generator for Tally XML envelopes with dynamic target company injection."""
-    company_var = f"<STATICVARIABLES><SVCURRENTCOMPANY>{company_name}</SVCURRENTCOMPANY></STATICVARIABLES>" if company_name else ""
-    return (
-        f'<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>'
-        f'<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME>'
-        f'{company_var}'
-        f'</REQUESTDESC><REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">'
-        f'<!-- {action} {entity_type} {voucher_type} -->'
-        f'</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>'
-    )
-
-
 
 class TallyConnector(BaseConnector):
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
+        from ..clients.external_client import ExternalClient
         self.client = ExternalClient(cfg)
 
     def connect(self) -> bool:
         return self.health_check()
 
     def disconnect(self) -> None:
-        self.client.close()
+        if hasattr(self.client, "close"):
+            self.client.close()
 
     def health_check(self) -> bool:
         return self.client.ping()

@@ -10,9 +10,10 @@ def get_config_service(request: Request) -> ConfigService:
     return ConfigService(request.app.state.data_dir)
 
 
-@router.get("/config", response_model=AppConfig)
+@router.get("/config")
 def get_config(svc: ConfigService = Depends(get_config_service)):
-    return svc.get_config()
+    cfg = svc.get_config()
+    return svc.config_store.get_masked_config(cfg)
 
 
 @router.post("/config")
