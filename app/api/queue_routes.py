@@ -19,3 +19,10 @@ def get_queue_status(svc: QueueService = Depends(get_queue_service)):
 def retry_failed(svc: QueueService = Depends(get_queue_service)):
     requeued = svc.retry_failed()
     return {"status": "success", "requeued_count": requeued}
+
+
+@router.post("/{job_id}/cancel")
+def cancel_job(job_id: int, svc: QueueService = Depends(get_queue_service)):
+    cancelled = svc.queue_store.cancel_job(job_id)
+    return {"status": "success" if cancelled else "failed", "cancelled": cancelled, "job_id": job_id}
+

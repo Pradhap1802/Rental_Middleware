@@ -3,12 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RentAsst Middleware</title>
+  <title>RentAsst ↔ Tally Middleware Portal</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.ico">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #0f172a;
-      --card-bg: #1e293b;
+      --bg: #0b0f19;
+      --card-bg: #151c2c;
+      --card-border: #232d42;
       --accent: #6366f1;
       --accent-hover: #4f46e5;
       --text: #f8fafc;
@@ -17,95 +19,212 @@
       --success: #10b981;
       --error: #ef4444;
       --warning: #f59e0b;
+      --info: #3b82f6;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }
-    body { background: var(--bg); color: var(--text); padding: 2rem; }
-    .container { max-width: 1000px; margin: 0 auto; }
-    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
-    h1 { font-size: 1.75rem; font-weight: 700; background: linear-gradient(135deg, #a5b4fc, #6366f1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    body { background: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 1.5rem; }
+    .container { width: 100%; max-width: 1200px; margin: 0 auto; }
+    
+    /* Login Gate Screen */
+    #login_screen { display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; min-height: 80vh; }
+    .login-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 2.5rem; width: 100%; max-width: 440px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.4); text-align: center; }
+    .login-logo { font-size: 2.5rem; margin-bottom: 0.5rem; display: block; }
+    .login-title { font-size: 1.6rem; font-weight: 700; background: linear-gradient(135deg, #a5b4fc, #6366f1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.4rem; }
+    .login-subtitle { font-size: 0.88rem; color: var(--text-muted); margin-bottom: 1.8rem; line-height: 1.4; }
+    
+    .form-group { margin-bottom: 1.2rem; text-align: left; }
+    label { display: block; font-size: 0.82rem; font-weight: 500; color: var(--text-muted); margin-bottom: 0.45rem; }
+    .input-with-prefix { display: flex; align-items: center; background: #0b0f19; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; transition: border-color 0.2s; }
+    .input-with-prefix:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2); }
+    .prefix { padding: 0.75rem 0.85rem; background: #111827; color: var(--text-muted); font-weight: 600; font-size: 0.9rem; border-right: 1px solid var(--border); }
+    .input-with-prefix input { border: none; background: transparent; padding: 0.75rem 0.85rem; color: var(--text); width: 100%; font-size: 0.95rem; outline: none; }
+    
+    input, select { width: 100%; background: #0b0f19; border: 1px solid var(--border); color: var(--text); padding: 0.75rem 0.85rem; border-radius: 8px; font-size: 0.9rem; transition: border-color 0.2s; }
+    input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2); }
+    
+    .btn-primary { width: 100%; background: linear-gradient(135deg, #6366f1, #4f46e5); color: white; border: none; padding: 0.85rem 1.2rem; border-radius: 8px; font-size: 0.95rem; font-weight: 600; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
+    .btn-primary:hover { background: linear-gradient(135deg, #4f46e5, #4338ca); transform: translateY(-1px); }
+    .btn-primary:disabled { background: #334155; cursor: not-allowed; box-shadow: none; opacity: 0.6; }
+    
+    .btn-secondary { background: #334155; color: white; border: none; padding: 0.6rem 1rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+    .btn-secondary:hover { background: #475569; }
+
+    .status-msg { margin-top: 1rem; padding: 0.75rem 1rem; border-radius: 8px; font-size: 0.85rem; text-align: left; display: none; line-height: 1.4; }
+    .status-msg.error { background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; }
+    .status-msg.success { background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); color: #6ee7b7; }
+    .status-msg.info { background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.3); color: #93c5fd; }
+
+    /* Dashboard Layout */
+    #dashboard_screen { display: none; width: 100%; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
+    h1 { font-size: 1.6rem; font-weight: 700; background: linear-gradient(135deg, #a5b4fc, #6366f1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .header-actions { display: flex; align-items: center; gap: 1rem; }
     .status-badge { background: #064e3b; color: #34d399; padding: 0.35rem 0.85rem; border-radius: 9999px; font-size: 0.85rem; font-weight: 600; display: inline-flex; align-items: center; gap: 0.5rem; }
     .pulse { width: 8px; height: 8px; background: #34d399; border-radius: 50%; box-shadow: 0 0 8px #34d399; }
-    .metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 2rem; }
-    .metric-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; text-align: center; }
-    .metric-card .val { font-size: 1.5rem; font-weight: 700; margin-top: 0.25rem; color: var(--text); }
-    .metric-card .lbl { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem; }
-    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; }
-    .card h2 { font-size: 1.15rem; margin-bottom: 1rem; color: var(--text); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
-    .form-group { margin-bottom: 1rem; }
-    label { display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.4rem; }
-    input, select { width: 100%; background: #0f172a; border: 1px solid var(--border); color: var(--text); padding: 0.65rem 0.85rem; border-radius: 6px; font-size: 0.9rem; }
-    input:focus, select:focus { outline: none; border-color: var(--accent); }
-    .btn-group { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
-    button { background: var(--accent); color: white; border: none; padding: 0.6rem 1rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: all 0.2s; }
-    button:hover { background: var(--accent-hover); }
-    button.secondary { background: #334155; }
-    button.secondary:hover { background: #475569; }
+    
+    .section-title { font-size: 0.95rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; }
+
+    .entity-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0.75rem; margin-bottom: 1.5rem; }
+    .entity-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 0.85rem; text-align: center; }
+    .entity-card .ent-name { font-size: 0.8rem; font-weight: 600; color: #a5b4fc; text-transform: capitalize; }
+    .entity-card .ent-count { font-size: 1.4rem; font-weight: 700; margin: 0.3rem 0; color: var(--text); }
+    .entity-card .ent-time { font-size: 0.65rem; color: var(--text-muted); }
+
+    .recon-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
+    .recon-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 1rem; text-align: center; }
+    .recon-card .lbl { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.3rem; }
+    .recon-card .val { font-size: 1.3rem; font-weight: 700; }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
+    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 1.5rem; }
+    .card h2 { font-size: 1.1rem; margin-bottom: 1rem; color: var(--text); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
     .sync-actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem; }
-    .sync-btn { background: #27272a; border: 1px solid var(--border); padding: 0.85rem; text-align: center; border-radius: 8px; cursor: pointer; transition: all 0.2s; font-size: 0.9rem; }
+    .sync-btn { background: #111827; border: 1px solid var(--border); padding: 0.85rem; text-align: center; border-radius: 8px; cursor: pointer; transition: all 0.2s; font-size: 0.9rem; font-weight: 500; }
     .sync-btn:hover { border-color: var(--accent); background: #1e1e24; }
     .fetch-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
     .fetch-btn { background: #334155; color: #a5b4fc; padding: 0.25rem 0.6rem; font-size: 0.75rem; border-radius: 4px; border: none; cursor: pointer; }
     .fetch-btn:hover { background: #475569; color: #fff; }
+    .auth-badge { display: flex; align-items: center; justify-content: space-between; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 8px; padding: 0.75rem 1rem; color: #34d399; font-size: 0.85rem; font-weight: 500; margin-bottom: 1rem; }
   </style>
 </head>
 <body>
-  <div class="container">
+
+  <!-- ==================== 1. LOGIN GATE SCREEN ==================== -->
+  <div id="login_screen">
+    <div class="login-card">
+      <span class="login-logo">🚜</span>
+      <h1 class="login-title">RentAsst Middleware</h1>
+      <p class="login-subtitle">Enter your registered RentAsst Mobile Number to receive an OTP and connect the middleware.</p>
+      
+      <!-- Step 1: Request OTP -->
+      <div id="step_mobile">
+        <div class="form-group">
+          <label for="login_mobile">Registered Mobile Number</label>
+          <div class="input-with-prefix">
+            <span class="prefix">+91</span>
+            <input type="tel" id="login_mobile" placeholder="9876543210" maxlength="10" autocomplete="tel" onkeyup="if(event.key==='Enter') sendLoginOTP()">
+          </div>
+        </div>
+        <button class="btn-primary" id="btn_send_otp" onclick="sendLoginOTP()">📲 Send OTP</button>
+      </div>
+
+      <!-- Step 2: Verify OTP -->
+      <div id="step_otp" style="display: none;">
+        <div class="form-group">
+          <label for="login_otp">6-Digit Verification Code</label>
+          <input type="text" id="login_otp" placeholder="Enter 6-digit OTP" maxlength="6" style="letter-spacing: 4px; font-size: 1.1rem; text-align: center;" autocomplete="one-time-code" onkeyup="if(event.key==='Enter') verifyLoginOTP()">
+          <input type="hidden" id="login_request_id">
+        </div>
+        <button class="btn-primary" id="btn_verify_otp" onclick="verifyLoginOTP()">✅ Verify OTP & Login</button>
+        <div style="margin-top: 0.8rem; font-size: 0.8rem;">
+          <a href="#" style="color: #a5b4fc; text-decoration: none;" onclick="resetToStepMobile(); return false;">← Change Mobile Number</a>
+        </div>
+      </div>
+
+      <!-- Status Alert Box -->
+      <div class="status-msg" id="gate_status_msg"></div>
+    </div>
+  </div>
+
+
+  <!-- ==================== 2. MAIN DASHBOARD SCREEN ==================== -->
+  <div id="dashboard_screen" class="container">
     <header>
       <div>
-        <h1>RentAsst Middleware Gateway</h1>
+        <h1>RentAsst ↔ Tally Gateway</h1>
       </div>
-      <div class="status-badge" id="service_status"><span class="pulse"></span> Service Active</div>
+      <div class="header-actions">
+        <div class="status-badge" id="service_status"><span class="pulse"></span> Service Active</div>
+        <button class="btn-secondary" style="padding: 0.4rem 0.8rem; font-size: 0.8rem; background: #991b1b;" onclick="logoutMiddleware()">🚪 Logout</button>
+      </div>
     </header>
 
-    <!-- Operational Telemetry Tiles -->
-    <div class="metrics-grid">
-      <div class="metric-card">
-        <div class="lbl">Pending / Waiting</div>
-        <div class="val" id="metric_pending">0</div>
+    <!-- 1. Entity Synchronization Status -->
+    <div class="section-title">Entity Synchronization Status</div>
+    <div class="entity-grid">
+      <div class="entity-card">
+        <div class="ent-name">👥 Customers</div>
+        <div class="ent-count" id="ent_customers_cnt">0</div>
+        <div class="ent-time" id="ent_customers_time">No sync</div>
       </div>
-      <div class="metric-card">
-        <div class="lbl">Retry Queue</div>
-        <div class="val" id="metric_retry" style="color: var(--warning);">0</div>
+      <div class="entity-card">
+        <div class="ent-name">🚜 Equipment</div>
+        <div class="ent-count" id="ent_equipment_cnt">0</div>
+        <div class="ent-time" id="ent_equipment_time">No sync</div>
       </div>
-      <div class="metric-card">
-        <div class="lbl">Completed Jobs</div>
-        <div class="val" id="metric_completed" style="color: var(--success);">0</div>
+      <div class="entity-card">
+        <div class="ent-name">📋 Orders</div>
+        <div class="ent-count" id="ent_orders_cnt">0</div>
+        <div class="ent-time" id="ent_orders_time">No sync</div>
       </div>
-      <div class="metric-card">
-        <div class="lbl">Failed Jobs</div>
-        <div class="val" id="metric_failed" style="color: var(--error);">0</div>
+      <div class="entity-card">
+        <div class="ent-name">🧾 Invoices</div>
+        <div class="ent-count" id="ent_invoices_cnt">0</div>
+        <div class="ent-time" id="ent_invoices_time">No sync</div>
+      </div>
+      <div class="entity-card">
+        <div class="ent-name">💳 Payments</div>
+        <div class="ent-count" id="ent_payments_cnt">0</div>
+        <div class="ent-time" id="ent_payments_time">No sync</div>
+      </div>
+      <div class="entity-card">
+        <div class="ent-name">🔄 Reverse Sync</div>
+        <div class="ent-count" id="ent_reverse_cnt">0</div>
+        <div class="ent-time" id="ent_reverse_time">No sync</div>
       </div>
     </div>
 
-    <div class="grid">
+    <!-- 2. Reconciliation & Conflict Audit -->
+    <div class="section-title">Reconciliation & Conflict Audit</div>
+    <div class="recon-grid">
+      <div class="recon-card">
+        <div class="lbl">Matched Records</div>
+        <div class="val" id="recon_matched" style="color: var(--success);">0</div>
+      </div>
+      <div class="recon-card">
+        <div class="lbl">Missing Records</div>
+        <div class="val" id="recon_missing" style="color: var(--warning);">0</div>
+      </div>
+      <div class="recon-card">
+        <div class="lbl">Mismatched Records</div>
+        <div class="val" id="recon_mismatched" style="color: var(--error);">0</div>
+      </div>
+      <div class="recon-card">
+        <div class="lbl">Unresolved Conflicts</div>
+        <div class="val" id="recon_conflicts" style="color: var(--error);">0</div>
+      </div>
+    </div>
+
+    <!-- Settings & Sync Trigger Grid -->
+    <div class="grid-2">
       <div class="card">
-        <h2>RentAsst System Settings</h2>
-        <div class="form-group">
-          <label>RentAsst API Endpoint</label>
-          <input type="text" id="rentasst_url" value="http://localhost:8000/api">
+        <h2>RentAsst Connection Settings</h2>
+        
+        <!-- Authenticated Status Badge -->
+        <div class="auth-badge">
+          <span>🔒 RentAsst Session Active</span>
+          <span id="active_tenant_display" style="font-weight:700;">Tenant: default</span>
         </div>
-        <div class="form-group">
-          <label>API Key / Token</label>
-          <input type="password" id="rentasst_api_key" placeholder="Enter RentAsst API Token">
-        </div>
+
         <div class="form-group">
           <div class="fetch-header">
-            <label style="margin-bottom:0;">Business Code / Tenant ID</label>
+            <label style="margin-bottom:0;">Business Company Code</label>
             <button class="fetch-btn" onclick="fetchRentAsstCompanies()">🔄 Fetch Companies</button>
           </div>
           <input type="text" id="rentasst_tenant_id" placeholder="e.g. B100001" list="rentasst_tenant_list">
           <datalist id="rentasst_tenant_list"></datalist>
         </div>
-        <div class="btn-group">
-          <button onclick="testConnection('rentasst')">Test RentAsst API</button>
+
+        <div class="btn-group" style="margin-top: 1rem; display: flex; gap: 0.5rem;">
+          <button class="btn-secondary" onclick="testConnection('rentasst')">⚡ Test RentAsst Connection</button>
+          <button class="btn-secondary" onclick="saveConfig()">💾 Save Settings</button>
         </div>
       </div>
 
       <div class="card">
-        <h2>External Target System Settings</h2>
+        <h2>Target Tally Prime Settings</h2>
         <div class="form-group">
-          <label>External System Target URL (Tally / ERP)</label>
+          <label>External System Target URL</label>
           <input type="text" id="external_url" value="http://localhost:9000">
         </div>
         <div class="form-group">
@@ -117,13 +236,9 @@
             <option value="">-- Select or Open Tally Company --</option>
           </select>
         </div>
-        <div class="form-group">
-          <label>Target API Key (Optional)</label>
-          <input type="password" id="external_api_key" placeholder="Enter API Key if required">
-        </div>
-        <div class="btn-group">
-          <button onclick="testConnection('external')">Test Connection</button>
-          <button class="secondary" onclick="saveConfig()">Save All Config</button>
+        <div class="btn-group" style="margin-top: 1rem; display: flex; gap: 0.5rem;">
+          <button class="btn-secondary" onclick="testConnection('external')">⚡ Test Tally</button>
+          <button class="btn-primary" style="width:auto; padding:0.6rem 1rem;" onclick="saveConfig()">💾 Save Config</button>
         </div>
       </div>
     </div>
@@ -134,24 +249,187 @@
       <div class="sync-actions">
         <div class="sync-btn" onclick="triggerSync('customers')">👥 Customers</div>
         <div class="sync-btn" onclick="triggerSync('equipment')">🚜 Assets</div>
-        <div class="sync-btn" onclick="triggerSync('invoices')">🧾 Invoices </div>
-        <div class="sync-btn" onclick="triggerSync('payments')">💳 Payments </div>
+        <div class="sync-btn" onclick="triggerSync('rental_orders')">📋 Rental Orders</div>
+        <div class="sync-btn" onclick="triggerSync('invoices')">🧾 Invoices</div>
+        <div class="sync-btn" onclick="triggerSync('payments')">💳 Payments</div>
+        <div class="sync-btn" onclick="triggerSync('tally_to_rentasst')">🔄 Sync Tally ➔ RentAsst</div>
       </div>
     </div>
   </div>
 
   <script>
+    function setText(id, text) {
+      const el = document.getElementById(id);
+      if (el) el.innerText = text;
+    }
+
+    function showStatusMsg(msg, type = 'info') {
+      const msgEl = document.getElementById('gate_status_msg');
+      msgEl.className = `status-msg ${type}`;
+      msgEl.innerHTML = msg;
+      msgEl.style.display = 'block';
+    }
+
+    function resetToStepMobile() {
+      document.getElementById('step_mobile').style.display = 'block';
+      document.getElementById('step_otp').style.display = 'none';
+      document.getElementById('gate_status_msg').style.display = 'none';
+    }
+
+    async function checkAuthStatus() {
+      try {
+        const res = await fetch('/api/auth/status');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.authenticated) {
+            document.getElementById('login_screen').style.display = 'none';
+            document.getElementById('dashboard_screen').style.display = 'block';
+            setText('active_tenant_display', `Tenant: ${data.tenant_id || 'default'}`);
+            loadConfig();
+            loadStatus();
+          } else {
+            document.getElementById('login_screen').style.display = 'flex';
+            document.getElementById('dashboard_screen').style.display = 'none';
+          }
+        }
+      } catch (e) {
+        console.error('Auth check error:', e);
+      }
+    }
+
+    async function sendLoginOTP() {
+      const mobileInput = document.getElementById('login_mobile').value.trim();
+      const btn = document.getElementById('btn_send_otp');
+      if (!mobileInput) {
+        showStatusMsg('❌ Please enter your mobile number.', 'error');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerHTML = '⏳ Sending OTP...';
+      showStatusMsg('⏳ Sending OTP code to +91 ' + mobileInput + '...', 'info');
+
+      try {
+        const res = await fetch('/api/rentasst/send-otp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mobile: mobileInput })
+        });
+        const data = await res.json();
+
+        if (res.ok && data.status === 'success') {
+          showStatusMsg(`✅ OTP sent successfully to +91 ${mobileInput}!`, 'success');
+          document.getElementById('login_request_id').value = data.request_id || '';
+          if (data.dev_otp) {
+            document.getElementById('login_otp').value = data.dev_otp;
+            showStatusMsg(`✅ OTP sent to +91 ${mobileInput}! (Dev Code: <strong>${data.dev_otp}</strong>)`, 'success');
+          }
+          document.getElementById('step_mobile').style.display = 'none';
+          document.getElementById('step_otp').style.display = 'block';
+        } else {
+          showStatusMsg(`❌ ${data.message || 'Failed to send OTP. Please verify mobile number.'}`, 'error');
+        }
+      } catch (e) {
+        showStatusMsg(`❌ Network Error: ${e.message}`, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '📲 Send OTP';
+      }
+    }
+
+    async function verifyLoginOTP() {
+      const mobileInput = document.getElementById('login_mobile').value.trim();
+      const otpInput = document.getElementById('login_otp').value.trim();
+      const requestId = document.getElementById('login_request_id').value;
+      const btn = document.getElementById('btn_verify_otp');
+
+      if (!otpInput) {
+        showStatusMsg('❌ Please enter the 6-digit OTP code.', 'error');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerHTML = '⏳ Verifying OTP...';
+      showStatusMsg('⏳ Verifying OTP code with RentAsst...', 'info');
+
+      try {
+        const res = await fetch('/api/rentasst/verify-otp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mobile: mobileInput,
+            otp: otpInput,
+            request_id: requestId
+          })
+        });
+        const data = await res.json();
+
+        if (res.ok && data.status === 'success') {
+          showStatusMsg('✅ Mobile OTP Verified! Launching Dashboard...', 'success');
+          setTimeout(() => {
+            checkAuthStatus();
+          }, 800);
+        } else {
+          showStatusMsg(`❌ ${data.message || 'Verification failed. Invalid or expired OTP.'}`, 'error');
+        }
+      } catch (e) {
+        showStatusMsg(`❌ Network Error: ${e.message}`, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '✅ Verify OTP & Login';
+      }
+    }
+
+    async function logoutMiddleware() {
+      try {
+        await fetch('/api/auth/logout', { method: 'POST' });
+        resetToStepMobile();
+        checkAuthStatus();
+      } catch (e) {
+        console.error('Logout error:', e);
+      }
+    }
+
     async function loadStatus() {
       try {
         const res = await fetch('/api/status');
         if (!res.ok) return;
         const data = await res.json();
-        
-        document.getElementById('metric_pending').innerText = data.queue_metrics.pending_jobs;
-        document.getElementById('metric_retry').innerText = data.queue_metrics.running_jobs;
-        document.getElementById('metric_completed').innerText = data.queue_metrics.completed_jobs;
-        document.getElementById('metric_failed').innerText = data.queue_metrics.failed_jobs;
-      } catch(e) {}
+
+        const es = data.entity_sync_status || {};
+        if (es.customers) {
+          setText('ent_customers_cnt', es.customers.synced_count);
+          setText('ent_customers_time', es.customers.last_sync ? es.customers.last_sync.split(' ')[0] : 'No sync');
+        }
+        if (es.equipment) {
+          setText('ent_equipment_cnt', es.equipment.synced_count);
+          setText('ent_equipment_time', es.equipment.last_sync ? es.equipment.last_sync.split(' ')[0] : 'No sync');
+        }
+        if (es.rental_orders) {
+          setText('ent_orders_cnt', es.rental_orders.synced_count);
+          setText('ent_orders_time', es.rental_orders.last_sync ? es.rental_orders.last_sync.split(' ')[0] : 'No sync');
+        }
+        if (es.invoices) {
+          setText('ent_invoices_cnt', es.invoices.synced_count);
+          setText('ent_invoices_time', es.invoices.last_sync ? es.invoices.last_sync.split(' ')[0] : 'No sync');
+        }
+        if (es.payments) {
+          setText('ent_payments_cnt', es.payments.synced_count);
+          setText('ent_payments_time', es.payments.last_sync ? es.payments.last_sync.split(' ')[0] : 'No sync');
+        }
+        if (es.reverse_sync) {
+          setText('ent_reverse_cnt', es.reverse_sync.synced_count);
+          setText('ent_reverse_time', es.reverse_sync.last_sync ? es.reverse_sync.last_sync.split(' ')[0] : 'No sync');
+        }
+
+        const rm = data.reconciliation_metrics || {};
+        setText('recon_matched', rm.matched || 0);
+        setText('recon_missing', rm.missing || 0);
+        setText('recon_mismatched', rm.mismatched || 0);
+        setText('recon_conflicts', rm.unresolved_conflicts || 0);
+      } catch(e) {
+        console.error('Error loading status:', e);
+      }
     }
 
     async function fetchTallyCompanies() {
@@ -162,7 +440,6 @@
         if (res.ok) {
           const data = await res.json();
           select.innerHTML = '<option value="">-- Select Company --</option>';
-
           if (data.companies && data.companies.length > 0) {
             data.companies.forEach(c => {
               const opt = document.createElement('option');
@@ -174,19 +451,9 @@
               const matchingOpt = Array.from(select.options).find(o => o.value === savedValue);
               if (matchingOpt) select.value = savedValue;
             }
-            if (data.companies.length === 1 && !savedValue) {
-              select.value = data.companies[0].name;
-            }
-          } else {
-            const opt = document.createElement('option');
-            opt.value = savedValue || '';
-            opt.textContent = savedValue ? savedValue + ' (Saved)' : '-- No open Tally company detected --';
-            select.appendChild(opt);
           }
         }
-      } catch(e) {
-        console.error('Error fetching Tally companies:', e);
-      }
+      } catch(e) {}
     }
 
     async function fetchRentAsstCompanies() {
@@ -213,8 +480,6 @@
         const res = await fetch('/api/config');
         if (res.ok) {
           const cfg = await res.json();
-          if (cfg.rentasst_url) document.getElementById('rentasst_url').value = cfg.rentasst_url;
-          if (cfg.rentasst_api_key) document.getElementById('rentasst_api_key').value = cfg.rentasst_api_key;
           if (cfg.rentasst_tenant_id) document.getElementById('rentasst_tenant_id').value = cfg.rentasst_tenant_id;
           if (cfg.external_url) document.getElementById('external_url').value = cfg.external_url;
           if (cfg.tally_company_name) {
@@ -226,47 +491,91 @@
             opt.selected = true;
             select.appendChild(opt);
           }
-          if (cfg.external_api_key) document.getElementById('external_api_key').value = cfg.external_api_key;
-
-          // Automatically fetch open companies from Tally XML Server
           fetchTallyCompanies();
           fetchRentAsstCompanies();
         }
       } catch(e) {}
     }
 
+    let toastTimer = null;
+    function showToast(msg, type = 'success') {
+      const toast = document.getElementById('toast');
+      if (!toast) return;
+      toast.innerHTML = msg;
+      toast.style.display = 'block';
+      if (type === 'success') {
+        toast.style.background = '#064e3b';
+        toast.style.color = '#34d399';
+        toast.style.border = '1px solid #059669';
+      } else if (type === 'error') {
+        toast.style.background = '#7f1d1d';
+        toast.style.color = '#fca5a5';
+        toast.style.border = '1px solid #dc2626';
+      } else {
+        toast.style.background = '#1e293b';
+        toast.style.color = '#f8fafc';
+        toast.style.border = '1px solid #334155';
+      }
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        toast.style.display = 'none';
+      }, 3500);
+    }
+
     async function saveConfig() {
       const cfg = {
-        rentasst_url: document.getElementById('rentasst_url').value,
-        rentasst_api_key: document.getElementById('rentasst_api_key').value,
         rentasst_tenant_id: document.getElementById('rentasst_tenant_id').value,
         external_url: document.getElementById('external_url').value,
         tally_company_name: document.getElementById('tally_company_name').value,
-        external_api_key: document.getElementById('external_api_key').value,
-        external_system_type: 'tally',
         auto_sync_enabled: true
       };
-      await fetch('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(cfg)
-      });
+      try {
+        const res = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(cfg)
+        });
+        const data = await res.json();
+        if (res.ok && data.status === 'success') {
+          showToast('✅ Configuration saved successfully!', 'success');
+        } else {
+          showToast(`❌ Save Failed: ${data.message || 'Unknown error'}`, 'error');
+        }
+      } catch (e) {
+        showToast(`❌ Network Error: ${e.message}`, 'error');
+      }
       loadStatus();
     }
 
     async function testConnection(target) {
-      await fetch(`/api/test/${target}`, { method: 'POST' });
+      try {
+        const res = await fetch(`/api/test/${target}`, { method: 'POST' });
+        const data = await res.json();
+        if (res.ok && data.status === 'success') {
+          showToast(`✅ ${data.message || 'Connection successful'}`, 'success');
+        } else {
+          showToast(`❌ Connection Failed: ${data.message || 'Could not connect'}`, 'error');
+        }
+      } catch (e) {
+        showToast(`❌ Test Error: ${e.message}`, 'error');
+      }
       loadStatus();
     }
 
     async function triggerSync(entity) {
-      await fetch(`/api/sync/${entity}`, { method: 'POST' });
+      try {
+        await fetch(`/api/sync/${entity}`, { method: 'POST' });
+      } catch (e) {
+        console.error(`Sync error for ${entity}:`, e);
+      }
       loadStatus();
     }
 
-    loadConfig();
-    loadStatus();
+    // Initialize check
+    checkAuthStatus();
     setInterval(loadStatus, 4000);
   </script>
+  <!-- Floating non-intrusive toast notification -->
+  <div id="toast" style="position: fixed; bottom: 24px; right: 24px; z-index: 99999; display: none; padding: 0.75rem 1.25rem; border-radius: 8px; font-size: 0.85rem; font-weight: 500; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.6); pointer-events: none; transition: opacity 0.3s ease;"></div>
 </body>
 </html>

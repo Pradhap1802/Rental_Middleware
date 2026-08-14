@@ -3,7 +3,7 @@ import hashlib
 import json
 from typing import Dict, Any, List, Callable, Optional
 from ..mapping.store import MappingStore
-from ..logging.logger import log_event
+from ..logging.logger import log_event, log_sync_event
 
 
 def compute_payload_hash(payload: Dict[str, Any]) -> str:
@@ -29,20 +29,33 @@ def extract_identifier(entity_type: str, item: Dict[str, Any]) -> str:
     return ""
 
 
+import threading
+from .idempotency import generate_integration_key, check_target_system_record_exists
+from ..queue.lock_manager import LockManager
+from ..validation.validator import validate_entity_payload
+from .dependencies import DependencyResolver, MissingDependencyException
+
+
 def run_sync_pipeline(
     entity_type: str,
     fetch_func: Callable[[], List[Dict[str, Any]]],
     sync_func: Callable[[Dict[str, Any]], str],
     store: MappingStore,
     external_client: Optional[Any] = None,
+    ra_client: Optional[Any] = None,
+    source_company_id: str = "default",
+    target_company_id: str = "default",
     batch_size: int = 100,
 ) -> Dict[str, Any]:
     """
     Generic resilient synchronization pipeline runner with chunked batching, 
-    content hash deduplication, Tally DB existence check, and dead-letter queueing.
+    pre-flight data validation, dependency checking, deterministic integration key idempotency, 
+    target system timeout recovery, record-level lock concurrency protection, and dead-letter queueing.
     """
     stats = {"processed": 0, "created": 0, "updated": 0, "failed": 0, "skipped": 0}
     start_time = time.time()
+    lock_mgr = LockManager(store.db_path)
+    worker_id = f"thread-{threading.get_ident()}"
 
     try:
         items = fetch_func()
@@ -50,48 +63,150 @@ def run_sync_pipeline(
 
         for i in range(0, total_count, batch_size):
             batch = items[i : i + batch_size]
+            # High-performance batch prefetching into in-memory TTL cache
+            batch_ids = [str(it.get("id")) for it in batch if it.get("id")]
+            store.prefetch_mappings(entity_type, batch_ids, source_company_id=source_company_id)
+
             for item in batch:
                 stats["processed"] += 1
                 item_id = str(item.get("id"))
                 payload_hash = compute_payload_hash(item)
                 identifier = extract_identifier(entity_type, item)
+                integration_key = generate_integration_key(
+                    source_company=source_company_id,
+                    entity_type=entity_type,
+                    source_id=item_id,
+                    sync_direction="forward",
+                )
 
-                # Content hash deduplication & Tally DB existence check
-                if store.is_duplicate(entity_type, item_id, payload_hash):
-                    # If record is in middleware DB, check if it was deleted in Tally DB
-                    if external_client and external_client.ping() and not external_client.check_exists_in_tally(entity_type, identifier):
-                        log_event("Synchronization", f"Record {entity_type} #{item_id} ('{identifier}') exists in middleware DB but was deleted in Tally. Resyncing...")
-                    else:
+                # Concurrency Protection: Acquire Record-Level Lock
+                lock_key = lock_mgr.generate_lock_key(source_company_id, entity_type, "forward", item_id)
+                if not lock_mgr.acquire_lock(lock_key, worker_id, lease_seconds=300):
+                    log_event(
+                        "Concurrency",
+                        f"Item '{lock_key}' is currently locked by another active worker. Skipping concurrent execution.",
+                    )
+                    stats["skipped"] += 1
+                    continue
+
+                try:
+                    # 1. Pre-Flight Data Validation Check (Task 10)
+                    is_valid, val_err = validate_entity_payload(entity_type, item)
+                    if not is_valid:
+                        log_event("Validation", f"Payload validation failed for {entity_type} #{item_id}: {val_err}")
+                        store.add_history(entity_type, item_id, "failed", details=f"Validation Failure: {val_err}")
+                        store.add_dead_letter(
+                            entity_type=entity_type,
+                            source_id=item_id,
+                            error=f"Validation Failure: {val_err}",
+                            payload=json.dumps(item),
+                            company_id=source_company_id,
+                            error_type="ValidationError",
+                        )
+                        stats["failed"] += 1
+                        continue
+
+                    # 2. Dependency Resolution Check (Task 11)
+                    has_deps, missing_reason, missing_ent, missing_id = DependencyResolver.check_dependencies(
+                        entity_type=entity_type,
+                        data=item,
+                        store=store,
+                        source_company_id=source_company_id,
+                    )
+                    if not has_deps:
+                        log_event("Dependencies", f"Dependency check failed for {entity_type} #{item_id}: {missing_reason}")
+                        raise MissingDependencyException(missing_reason, missing_entity=missing_ent, missing_id=missing_id)
+
+                    # 3. Integration Key & Content Hash Deduplication Check
+                    existing_key_mapping = store.find_by_integration_key(integration_key)
+                    if existing_key_mapping and store.is_duplicate(entity_type, item_id, payload_hash, source_company_id=source_company_id):
                         stats["skipped"] += 1
                         continue
 
-                try:
-                    ext_id = store.get_external_id(entity_type, item_id)
-                    new_ext_id = sync_func(item)
-                    final_ext_id = new_ext_id or ext_id or item_id
-                    
-                    store.save(
-                        entity_type=entity_type,
-                        rentasst_id=item_id,
-                        external_id=final_ext_id,
-                        tally_guid=final_ext_id,
-                        last_hash=payload_hash,
-                        status="synced",
-                    )
-                    store.add_history(entity_type, item_id, "synced", external_id=final_ext_id)
 
-                    if ext_id:
-                        stats["updated"] += 1
-                    else:
-                        stats["created"] += 1
+                    # 4. Timeout Recovery / Target System Pre-Check
+                    # If local mapping is missing, check if record was already created in Tally during a previous timed-out attempt
+                    if not existing_key_mapping and identifier:
+                        if check_target_system_record_exists(
+                            entity_type=entity_type,
+                            identifier=identifier,
+                            sync_direction="forward",
+                            external_client=external_client,
+                            ra_client=ra_client,
+                        ):
+                            target_id = identifier
+                            log_event(
+                                "Idempotency",
+                                f"Timeout recovery: Record '{identifier}' for entity '{entity_type}' already exists in target system. Adopted target ID without duplicate creation.",
+                            )
+                            store.save_mapping(
+                                entity_type=entity_type,
+                                source_id=item_id,
+                                target_id=target_id,
+                                source_company_id=source_company_id,
+                                target_company_id=target_company_id,
+                                integration_key=integration_key,
+                                last_synced_hash=payload_hash,
+                                status="synced",
+                            )
+                            store.add_history(entity_type, item_id, "synced", external_id=target_id, details="Timeout recovery from target system")
+                            stats["skipped"] += 1
+                            continue
 
-                except Exception as ex:
-                    stats["failed"] += 1
-                    error_msg = str(ex)
-                    log_event("Synchronization", f"Failed to sync {entity_type} {item_id}: {error_msg}")
-                    store.add_history(entity_type, item_id, "failed", details=error_msg)
-                    store.add_dead_letter(entity_type, item_id, error_msg, json.dumps(item))
-                    raise ex
+                    # 5. Create / Update Sync Execution
+                    try:
+                        ext_id = store.get_external_id(entity_type, item_id, source_company_id=source_company_id)
+                        new_ext_id = sync_func(item)
+                        final_ext_id = new_ext_id or ext_id or item_id
+                        
+                        store.save_mapping(
+                            entity_type=entity_type,
+                            source_id=item_id,
+                            target_id=final_ext_id,
+                            source_company_id=source_company_id,
+                            target_company_id=target_company_id,
+                            integration_key=integration_key,
+                            last_synced_hash=payload_hash,
+                            status="synced",
+                        )
+                        store.add_history(entity_type, item_id, "synced", external_id=final_ext_id)
+
+                        if ext_id:
+                            stats["updated"] += 1
+                            log_sync_event(
+                            entity_type=entity_type,
+                            entity_id=item_id,
+                            company_id=source_company_id,
+                            direction="forward",
+                            source_system="rentasst",
+                            target_system="tally",
+                            status="SUCCESS",
+                            message=f"Successfully synced {entity_type} #{item_id} -> Tally '{final_ext_id}'",
+                        )
+                        else:
+                            stats["created"] += 1
+                    except MissingDependencyException as mde:
+                        raise mde
+                    except Exception as ex:
+                        stats["failed"] += 1
+                        error_msg = str(ex)
+                        log_sync_event(
+                            entity_type=entity_type,
+                            entity_id=item_id,
+                            company_id=source_company_id,
+                            direction="forward",
+                            source_system="rentasst",
+                            target_system="tally",
+                            status="FAILED",
+                            message=f"Failed to sync {entity_type} {item_id}: {error_msg}",
+                            metadata={"error": error_msg},
+                        )
+                        log_event("Synchronization", f"Failed to sync {entity_type} {item_id}: {error_msg}")
+                        store.add_history(entity_type, item_id, "failed", details=error_msg)
+                        store.add_dead_letter(entity_type, item_id, error_msg, json.dumps(item))
+                        # Resilient batch processing: continue loop without aborting batch
+                finally:
+                    lock_mgr.release_lock(lock_key, worker_id)
 
         duration_ms = (time.time() - start_time) * 1000
         log_event(
@@ -104,3 +219,4 @@ def run_sync_pipeline(
     except Exception as e:
         log_event("Synchronization", f"{entity_type.capitalize()} sync error: {str(e)}")
         raise e
+

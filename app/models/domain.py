@@ -21,6 +21,13 @@ class AppConfig(BaseModel):
     verify_ssl: bool = Field(default=True)
 
 
+class RentAsstLoginRequest(BaseModel):
+    url: Optional[str] = Field(default="http://localhost:8000/api")
+    email: str = Field(..., description="RentAsst account login mail ID")
+    business_code: Optional[str] = Field(default="", description="Target business code (optional)")
+
+
+
 class CustomerModel(BaseModel):
     id: str
     name: str
@@ -91,16 +98,21 @@ class DeadLetterModel(BaseModel):
 
 
 class QueueJobModel(BaseModel):
-    id: int
+    job_id: int
     entity_type: str
+    entity_id: Optional[str] = ""
+    company_id: Optional[str] = "default"
+    direction: Optional[str] = "forward"
     payload: Optional[str] = None
-    status: str # 'Pending', 'Running', 'Retry', 'Completed', 'Failed', 'Waiting'
-    attempts: int = 0
+    status: str # PENDING, PROCESSING, SUCCESS, PARTIAL_SUCCESS, FAILED, RETRYING, DLQ, CANCELLED
+    attempt_count: int = 0
     max_attempts: int = 3
-    error_message: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    last_error: Optional[str] = None
+    next_retry_at: Optional[str] = None
     created_at: str
     updated_at: str
-    scheduled_at: str
 
 
 class SystemStatusModel(BaseModel):
@@ -110,6 +122,10 @@ class SystemStatusModel(BaseModel):
     system_health: Dict[str, Any]
     queue_metrics: Dict[str, int]
     resource_metrics: Dict[str, float]
+    entity_sync_status: Dict[str, Any] = Field(default_factory=dict)
+    job_status_breakdown: Dict[str, int] = Field(default_factory=dict)
+    reconciliation_metrics: Dict[str, Any] = Field(default_factory=dict)
+    performance_metrics: Dict[str, Any] = Field(default_factory=dict)
     timestamp: str
 
 
