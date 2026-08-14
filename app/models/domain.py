@@ -23,9 +23,9 @@ class AppConfig(BaseModel):
 
 class RentAsstLoginRequest(BaseModel):
     url: Optional[str] = Field(default="http://localhost:8000/api")
-    email: str = Field(..., description="RentAsst account email or username")
-    password: str = Field(..., description="RentAsst account password")
+    email: str = Field(..., description="RentAsst account login mail ID")
     business_code: Optional[str] = Field(default="", description="Target business code (optional)")
+
 
 
 class CustomerModel(BaseModel):

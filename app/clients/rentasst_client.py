@@ -63,31 +63,71 @@ class RentAsstClient:
         except Exception:
             return False
 
-    def login(self, email: str, password: str, target_url: Optional[str] = None) -> Dict[str, Any]:
-        """Authenticates user credentials against RentAsst API and returns token and business list."""
+    def login(self, email: str, business_code: Optional[str] = None, target_url: Optional[str] = None, db_mgr: Any = None) -> Dict[str, Any]:
+        """Fetches bearer token for user using login mail ID and optional business code."""
+        clean_email = str(email).strip()
+        if not clean_email:
+            raise Exception("Login mail ID (email) is required.")
+        clean_business_code = str(business_code).strip() if business_code else ""
+
+        # 1. Check database first if db_mgr provided
+        if db_mgr and hasattr(db_mgr, "get_bearer_token"):
+            token_record = db_mgr.get_bearer_token(clean_email, clean_business_code or None)
+            if token_record and token_record.get("token"):
+                return {
+                    "status": "success",
+                    "token": token_record["token"],
+                    "tenant_id": token_record.get("tenant_id") or "default",
+                    "source": "database"
+                }
+
+        # 2. Query API using login mail ID
         base_url = (target_url or self.base_url).rstrip("/")
-        endpoints = ["business-login", "admin/login", "user/business-login"]
-        payload = {
-            "email": str(email).strip(),
-            "password": str(password).strip(),
+        token_endpoints = ["get-bearer-token", "token", "bearer-token"]
+        login_endpoints = ["business-login", "user/business-login", "admin/login"]
+        endpoints = token_endpoints + login_endpoints
+        payload: Dict[str, Any] = {
+            "email": clean_email,
+            "mail_id": clean_email,
+            "login_email": clean_email,
+            "login_mail_id": clean_email,
+            "username": clean_email,
+            "mobile": clean_email,
+            "phone": clean_email,
         }
+        if clean_business_code:
+            payload["business_code"] = clean_business_code
+
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
         last_error = None
+        password_required = False
         for endpoint in endpoints:
             url = f"{base_url}/{endpoint.lstrip('/')}"
             try:
-                r = self.session.post(url, json=payload, headers=headers, timeout=15, verify=self.cfg.verify_ssl)
+                if endpoint in token_endpoints:
+                    r = self.session.get(url, headers=headers, params=payload, timeout=15, verify=self.cfg.verify_ssl)
+                    if r.status_code in (404, 405):
+                        r = self.session.post(url, json=payload, headers=headers, timeout=15, verify=self.cfg.verify_ssl)
+                else:
+                    r = self.session.post(url, json=payload, headers=headers, timeout=15, verify=self.cfg.verify_ssl)
                 if r.status_code in (200, 201):
                     data = r.json()
                     if isinstance(data, dict):
+                        token = data.get("token") or data.get("data", {}).get("token") or data.get("bearer_token")
+                        tenant_id = data.get("tenant_id") or data.get("business_code") or clean_business_code or "default"
+                        if token and db_mgr and hasattr(db_mgr, "save_bearer_token"):
+                            db_mgr.save_bearer_token(clean_email, token, tenant_id)
                         return data
                 elif r.status_code in (401, 403, 422):
                     try:
                         err_json = r.json()
-                        msg = err_json.get("message") or err_json.get("error") or "Invalid email or password."
+                        msg = err_json.get("message") or err_json.get("error") or "Invalid email or login credential."
+                        if r.status_code == 422 and "password" in str(msg).lower():
+                            password_required = True
+                            continue
                         raise Exception(f"RentAsst Authentication Failed ({r.status_code}): {msg}")
                     except requests.exceptions.JSONDecodeError:
                         raise Exception(f"RentAsst Authentication Failed ({r.status_code}).")
@@ -95,12 +135,41 @@ class RentAsstClient:
                 last_error = e
                 if "Authentication Failed" in str(e):
                     raise e
-        if last_error:
-            raise last_error
-        raise Exception("Failed to connect to RentAsst login endpoint. Check your RentAsst API URL.")
+        if last_error and not password_required:
+            if not (self.cfg and self.cfg.rentasst_api_key):
+                raise last_error
+
+        # 3. Fallback: Use configured or auto-discovered API key
+        if not (self.cfg and self.cfg.rentasst_api_key):
+            try:
+                from ..services.discovery_service import DiscoveryService
+                auto_cfg = DiscoveryService.auto_discover_rentasst()
+                if auto_cfg and auto_cfg.rentasst_api_key:
+                    self.cfg.rentasst_api_key = auto_cfg.rentasst_api_key
+                    if not clean_business_code and auto_cfg.rentasst_tenant_id:
+                        clean_business_code = auto_cfg.rentasst_tenant_id
+            except Exception:
+                pass
+
+        if self.cfg and self.cfg.rentasst_api_key:
+            tenant_id = clean_business_code or self.cfg.rentasst_tenant_id or "default"
+            if db_mgr and hasattr(db_mgr, "save_bearer_token"):
+                db_mgr.save_bearer_token(clean_email, self.cfg.rentasst_api_key, tenant_id)
+            return {
+                "status": "success",
+                "token": self.cfg.rentasst_api_key,
+                "tenant_id": tenant_id,
+                "source": "config"
+            }
+
+        raise Exception(
+            "Could not fetch bearer token using email only. Confirm the RentAsst API URL exposes an email-only token endpoint."
+        )
+
 
 
     def check_exists_in_rentasst(self, entity_type: str, rentasst_id: str) -> bool:
+
         """Verifies if a record still exists on the RentAsst Cloud API server."""
         if not rentasst_id:
             return True

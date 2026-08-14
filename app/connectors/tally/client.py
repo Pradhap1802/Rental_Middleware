@@ -75,19 +75,26 @@ class TallyClient:
 
         ent = (entity_type or "").lower().strip()
         tally_type = "LEDGER"
+        fetch_fields = "NAME"
         if ent in ("equipment", "product", "products"):
             tally_type = "STOCKITEM"
+            fetch_fields = "NAME, MAILINGNAME"
         elif ent == "unit":
             tally_type = "UNIT"
+            fetch_fields = "NAME"
         elif ent == "stockgroup":
             tally_type = "STOCKGROUP"
+            fetch_fields = "NAME"
         elif ent == "stockcategory":
             tally_type = "STOCKCATEGORY"
+            fetch_fields = "NAME"
         elif ent in ("rental_orders", "rental_order", "invoices", "invoice", "payments", "payment", "voucher"):
             tally_type = "VOUCHER"
+            fetch_fields = "VOUCHERNUMBER, REMOTEID, MASTERID"
 
         company_name = getattr(self.cfg, "tally_company_name", None)
-        xml = build_export_collection_envelope("CheckExistence", tally_type, "NAME, VOUCHERNUMBER, REMOTEID", company_name=company_name)
+        xml = build_export_collection_envelope("CheckExistence", tally_type, fetch_fields, company_name=company_name)
+
 
         try:
             r = self.session.post(self.base_url, data=xml.encode("utf-8"), headers={"Content-Type": "text/xml"}, timeout=10)

@@ -135,20 +135,19 @@
           <input type="text" id="rentasst_url" value="http://localhost:8000/api">
         </div>
 
-        <!-- Automated Solution 1: Account Login Section -->
+        <!-- Account Login Section -->
         <div style="background: #111827; border: 1px dashed var(--accent); border-radius: 8px; padding: 0.85rem; margin-bottom: 1rem;">
           <div style="font-size: 0.85rem; font-weight: 600; color: #a5b4fc; margin-bottom: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
-            <span>🔐 Login & Connect RentAsst</span>
+            <span>🔐 Login & Connect RentAsst </span>
           </div>
           <div class="form-group" style="margin-bottom: 0.5rem;">
-            <input type="email" id="rentasst_email" placeholder="Email / Username (e.g. admin@example.com)">
+            <input type="text" id="rentasst_email" placeholder="Login Mail ID or Phone Number (e.g. admin@example.com or 9876543210)">
           </div>
-          <div class="form-group" style="margin-bottom: 0.5rem;">
-            <input type="password" id="rentasst_password" placeholder="Account Password">
-          </div>
-          <button style="width: 100%; background: linear-gradient(135deg, #6366f1, #4f46e5); font-size: 0.85rem;" onclick="loginRentAsst()">🔑 Login</button>
+          <button style="width: 100%; background: linear-gradient(135deg, #6366f1, #4f46e5); font-size: 0.85rem;" onclick="loginRentAsst()">🔑 Fetch Token </button>
           <div id="login_status_msg" style="font-size: 0.75rem; margin-top: 0.4rem; display: none;"></div>
         </div>
+
+
 
         <div class="form-group">
           <label>Bearer Token</label>
@@ -297,28 +296,97 @@
       } catch(e) {}
     }
 
-    async function loginRentAsst() {
-      const email = document.getElementById('rentasst_email').value;
-      const password = document.getElementById('rentasst_password').value;
+    let currentLoginTab = 'otp';
+
+    function switchLoginTab(tab) {
+      currentLoginTab = tab;
+      const otpContainer = document.getElementById('login_otp_container');
+      const pwdContainer = document.getElementById('login_pwd_container');
+      const otpBtn = document.getElementById('tab_otp_btn');
+      const pwdBtn = document.getElementById('tab_pwd_btn');
+      const msgEl = document.getElementById('login_status_msg');
+      msgEl.style.display = 'none';
+
+      if (tab === 'otp') {
+        otpContainer.style.display = 'block';
+        pwdContainer.style.display = 'none';
+        otpBtn.style.color = '#6366f1';
+        otpBtn.style.fontWeight = 'bold';
+        otpBtn.style.textDecoration = 'underline';
+        pwdBtn.style.color = '#9ca3af';
+        pwdBtn.style.fontWeight = 'normal';
+        pwdBtn.style.textDecoration = 'none';
+      } else {
+        otpContainer.style.display = 'none';
+        pwdContainer.style.display = 'block';
+        pwdBtn.style.color = '#6366f1';
+        pwdBtn.style.fontWeight = 'bold';
+        pwdBtn.style.textDecoration = 'underline';
+        otpBtn.style.color = '#9ca3af';
+        otpBtn.style.fontWeight = 'normal';
+        otpBtn.style.textDecoration = 'none';
+      }
+    }
+
+    async function sendRentAsstOTP() {
+      const mobile = document.getElementById('rentasst_mobile').value;
       const url = document.getElementById('rentasst_url').value;
       const msgEl = document.getElementById('login_status_msg');
-      
-      if (!email || !password) {
+      if (!mobile) {
         msgEl.style.display = 'block';
         msgEl.style.color = '#ef4444';
-        msgEl.innerText = '❌ Please enter both Email and Password.';
+        msgEl.innerText = '❌ Please enter a Mobile Number.';
         return;
       }
-      
       msgEl.style.display = 'block';
       msgEl.style.color = '#a5b4fc';
-      msgEl.innerText = '⏳ Authenticating with RentAsst...';
-      
+      msgEl.innerText = '⏳ Sending OTP...';
       try {
-        const res = await fetch('/api/rentasst/login', {
+        const res = await fetch('/api/rentasst/send-otp', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password, url })
+          body: JSON.stringify({ mobile, url })
+        });
+        const data = await res.json();
+        if (res.ok && data.status === 'success') {
+          msgEl.style.color = '#10b981';
+          msgEl.innerText = `✅ ${data.message}`;
+          document.getElementById('rentasst_request_id').value = data.request_id || '';
+          if (data.dev_otp) {
+            document.getElementById('rentasst_otp').value = data.dev_otp;
+          }
+          document.getElementById('otp_verify_group').style.display = 'flex';
+        } else {
+
+          msgEl.style.color = '#ef4444';
+          msgEl.innerText = `❌ ${data.message || 'Failed to send OTP.'}`;
+        }
+      } catch (e) {
+        msgEl.style.color = '#ef4444';
+        msgEl.innerText = `❌ Error: ${e.message}`;
+      }
+    }
+
+    async function verifyRentAsstOTP() {
+      const mobile = document.getElementById('rentasst_mobile').value;
+      const otp = document.getElementById('rentasst_otp').value;
+      const requestId = document.getElementById('rentasst_request_id').value;
+      const url = document.getElementById('rentasst_url').value;
+      const msgEl = document.getElementById('login_status_msg');
+      if (!mobile || !otp) {
+        msgEl.style.display = 'block';
+        msgEl.style.color = '#ef4444';
+        msgEl.innerText = '❌ Please enter both Mobile Number and OTP code.';
+        return;
+      }
+      msgEl.style.display = 'block';
+      msgEl.style.color = '#a5b4fc';
+      msgEl.innerText = '⏳ Verifying OTP...';
+      try {
+        const res = await fetch('/api/rentasst/verify-otp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mobile, otp, request_id: requestId, url })
         });
         const data = await res.json();
         if (res.ok && data.status === 'success') {
@@ -330,7 +398,49 @@
           loadStatus();
         } else {
           msgEl.style.color = '#ef4444';
-          msgEl.innerText = `❌ ${data.message || 'Authentication failed.'}`;
+          msgEl.innerText = `❌ ${data.message || 'OTP Verification failed.'}`;
+        }
+      } catch (e) {
+        msgEl.style.color = '#ef4444';
+        msgEl.innerText = `❌ Error: ${e.message}`;
+      }
+    }
+
+    async function loginRentAsst() {
+
+      const email = document.getElementById('rentasst_email').value;
+      const url = document.getElementById('rentasst_url').value;
+      const business_code = document.getElementById('rentasst_tenant_id').value;
+      const msgEl = document.getElementById('login_status_msg');
+      
+      if (!email) {
+        msgEl.style.display = 'block';
+        msgEl.style.color = '#ef4444';
+        msgEl.innerText = '❌ Please enter Login Mail ID or Phone Number.';
+        return;
+      }
+      
+      msgEl.style.display = 'block';
+      msgEl.style.color = '#a5b4fc';
+      msgEl.innerText = '⏳ Fetching Bearer Token...';
+      
+      try {
+        const res = await fetch('/api/rentasst/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, url, business_code })
+        });
+        const data = await res.json();
+        if (res.ok && data.status === 'success') {
+          msgEl.style.color = '#10b981';
+          msgEl.innerText = `✅ ${data.message}`;
+          if (data.token) document.getElementById('rentasst_api_key').value = data.token;
+          if (data.tenant_id) document.getElementById('rentasst_tenant_id').value = data.tenant_id;
+          fetchRentAsstCompanies();
+          loadStatus();
+        } else {
+          msgEl.style.color = '#ef4444';
+          msgEl.innerText = `❌ ${data.message || 'Token retrieval failed.'}`;
         }
       } catch (e) {
         msgEl.style.color = '#ef4444';

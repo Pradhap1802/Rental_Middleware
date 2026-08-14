@@ -42,28 +42,29 @@ def auto_detect_config(request: Request, svc: ConfigService = Depends(get_config
 
 @router.post("/rentasst/login")
 def rentasst_login(req: Dict[str, Any], request: Request, svc: ConfigService = Depends(get_config_service)):
-    """Authenticates user credentials against RentAsst API, retrieves Sanctum token & tenant info, and updates configuration."""
+    """Fetches bearer token using only the login mail ID from the database or RentAsst API, and updates configuration."""
     from ..clients.rentasst_client import RentAsstClient
-    email = req.get("email") or ""
-    password = req.get("password") or ""
+    email = req.get("email") or req.get("mail_id") or req.get("login_email") or ""
+    business_code = req.get("business_code") or req.get("tenant_id") or req.get("rentasst_tenant_id") or ""
     rentasst_url = req.get("url") or "http://localhost:8000/api"
     
-    if not email or not password:
-        return {"status": "error", "message": "Email/Username and Password are required."}
+    if not email:
+        return {"status": "error", "message": "Login Mail ID (Email) is required."}
     
     cfg = svc.get_config()
     cfg.rentasst_url = rentasst_url.rstrip("/")
     client = RentAsstClient(cfg)
+    db_mgr = getattr(request.app.state, "db", None)
     
     try:
-        res = client.login(email, password, target_url=rentasst_url)
-        token = res.get("token") or res.get("data", {}).get("token")
+        res = client.login(email, business_code=business_code, target_url=rentasst_url, db_mgr=db_mgr)
+        token = res.get("token") or res.get("data", {}).get("token") or res.get("bearer_token")
         if not token:
             return {"status": "error", "message": "Authentication response did not contain an API token.", "raw": res}
         
         # Extract available business companies
         businesses = res.get("business") or res.get("data", {}).get("business") or []
-        tenant_id = req.get("business_code") or ""
+        tenant_id = business_code or res.get("tenant_id") or res.get("business_code") or ""
         if not tenant_id and isinstance(businesses, list) and len(businesses) > 0:
             first_b = businesses[0]
             tenant_id = first_b.get("business_code") or first_b.get("code") or first_b.get("id") or "default"
@@ -74,6 +75,9 @@ def rentasst_login(req: Dict[str, Any], request: Request, svc: ConfigService = D
         cfg.rentasst_api_key = token
         cfg.rentasst_tenant_id = tenant_id
         saved_cfg = svc.save_config(cfg)
+
+        if db_mgr and hasattr(db_mgr, "save_bearer_token"):
+            db_mgr.save_bearer_token(email, token, tenant_id)
         
         scheduler = getattr(request.app.state, "scheduler", None)
         if scheduler and saved_cfg.auto_sync_enabled:
@@ -81,7 +85,7 @@ def rentasst_login(req: Dict[str, Any], request: Request, svc: ConfigService = D
             
         return {
             "status": "success",
-            "message": f"Successfully authenticated as {email}!",
+            "message": f"Successfully retrieved bearer token for {email}!",
             "token": token,
             "tenant_id": tenant_id,
             "businesses": businesses,
@@ -95,6 +99,7 @@ def rentasst_login(req: Dict[str, Any], request: Request, svc: ConfigService = D
 
 
 @router.get("/companies/rentasst")
+
 def get_rentasst_companies(svc: ConfigService = Depends(get_config_service)):
     """Fetches list of available RentAsst business companies based on configured URL and Token."""
     cfg = svc.get_config()

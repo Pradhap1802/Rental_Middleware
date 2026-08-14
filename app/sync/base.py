@@ -120,12 +120,9 @@ def run_sync_pipeline(
                     # 3. Integration Key & Content Hash Deduplication Check
                     existing_key_mapping = store.find_by_integration_key(integration_key)
                     if existing_key_mapping and store.is_duplicate(entity_type, item_id, payload_hash, source_company_id=source_company_id):
-                        # If record is in middleware DB, check if it was deleted in Tally DB
-                        if external_client and hasattr(external_client, "ping") and external_client.ping() and not external_client.check_exists_in_tally(entity_type, identifier):
-                            log_event("Synchronization", f"Record {entity_type} #{item_id} ('{identifier}') exists in middleware DB but was deleted in Tally. Resyncing...")
-                        else:
-                            stats["skipped"] += 1
-                            continue
+                        stats["skipped"] += 1
+                        continue
+
 
                     # 4. Timeout Recovery / Target System Pre-Check
                     # If local mapping is missing, check if record was already created in Tally during a previous timed-out attempt

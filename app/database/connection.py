@@ -1,7 +1,7 @@
 import sqlite3
 import os
 import threading
-from typing import ContextManager
+from typing import ContextManager, Optional, Dict, Any
 from contextlib import contextmanager
 
 
@@ -359,6 +359,91 @@ class DatabaseManager:
                     FOREIGN KEY (run_id) REFERENCES reconciliation_runs(id) ON DELETE CASCADE
                 )
                 """
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bearer_tokens (
+                    email TEXT NOT NULL,
+                    token TEXT NOT NULL,
+                    tenant_id TEXT DEFAULT 'default',
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (email, tenant_id)
+                )
+                """
+            )
+            try:
+                bearer_cols = conn.execute("PRAGMA table_info(bearer_tokens)").fetchall()
+                email_col = next((col for col in bearer_cols if col["name"] == "email"), None)
+                if email_col and email_col["pk"] == 1 and not any(col["name"] == "tenant_id" and col["pk"] == 2 for col in bearer_cols):
+                    conn.execute("ALTER TABLE bearer_tokens RENAME TO bearer_tokens_legacy")
+                    conn.execute(
+                        """
+                        CREATE TABLE bearer_tokens (
+                            email TEXT NOT NULL,
+                            token TEXT NOT NULL,
+                            tenant_id TEXT DEFAULT 'default',
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            PRIMARY KEY (email, tenant_id)
+                        )
+                        """
+                    )
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO bearer_tokens (email, token, tenant_id, updated_at)
+                        SELECT LOWER(email), token, COALESCE(NULLIF(tenant_id, ''), 'default'), updated_at
+                        FROM bearer_tokens_legacy
+                        """
+                    )
+                    conn.execute("DROP TABLE bearer_tokens_legacy")
+            except Exception:
+                pass
+
+    def get_bearer_token(self, email: str, tenant_id: Optional[str] = None) -> Optional[dict]:
+        if not email:
+            return None
+        email_clean = email.strip().lower()
+        with self.get_connection() as conn:
+            if tenant_id:
+                tenant_clean = tenant_id.strip() or "default"
+                cur = conn.execute(
+                    """
+                    SELECT email, token, tenant_id, updated_at
+                    FROM bearer_tokens
+                    WHERE LOWER(email) = ? AND tenant_id = ?
+                    """,
+                    (email_clean, tenant_clean),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    SELECT email, token, tenant_id, updated_at
+                    FROM bearer_tokens
+                    WHERE LOWER(email) = ?
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (email_clean,),
+                )
+            row = cur.fetchone()
+            if row:
+                return dict(row)
+        return None
+
+    def save_bearer_token(self, email: str, token: str, tenant_id: str = "default") -> None:
+        if not email or not token:
+            return
+        email_clean = email.strip().lower()
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO bearer_tokens (email, token, tenant_id, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(email, tenant_id) DO UPDATE SET
+                    token = excluded.token,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (email_clean, token, tenant_id or "default")
             )
 
     @contextmanager
