@@ -18,6 +18,8 @@ class SyncService:
     def execute_sync(self, entity_type: str) -> Dict[str, Any]:
         cfg_store = ConfigStore(self.data_dir)
         cfg = cfg_store.require()
+        if not cfg or not cfg.rentasst_api_key or not cfg.rentasst_api_key.strip():
+            raise ValueError("Middleware is not authenticated. Please log in with your RentAsst mobile number to authenticate.")
         db_path = f"{self.data_dir}/state.db"
         store = MappingStore(db_path)
         ra_client = RentAsstClient(cfg)

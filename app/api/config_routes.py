@@ -40,6 +40,101 @@ def auto_detect_config(request: Request, svc: ConfigService = Depends(get_config
     return {"status": "success", "message": "RentAsst setup auto-detected successfully!", "config": saved_cfg}
 
 
+@router.get("/auth/status")
+def auth_status(svc: ConfigService = Depends(get_config_service)):
+    """Checks whether the middleware is authenticated with a valid RentAsst Bearer Token."""
+    cfg = svc.get_config()
+    is_authenticated = bool(cfg.rentasst_api_key and cfg.rentasst_api_key.strip())
+    return {
+        "status": "success",
+        "authenticated": is_authenticated,
+        "tenant_id": cfg.rentasst_tenant_id or "default",
+        "url": cfg.rentasst_url or "http://localhost:8000/api",
+    }
+
+
+@router.post("/auth/logout")
+def auth_logout(request: Request, svc: ConfigService = Depends(get_config_service)):
+    """Logs out of RentAsst session in middleware by clearing stored bearer token."""
+    cfg = svc.get_config()
+    cfg.rentasst_api_key = ""
+    saved_cfg = svc.save_config(cfg)
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler:
+        scheduler.stop()
+    return {"status": "success", "message": "Logged out successfully."}
+
+
+@router.post("/rentasst/send-otp")
+def rentasst_send_otp(req: Dict[str, Any], svc: ConfigService = Depends(get_config_service)):
+    """Sends OTP to user's mobile number via RentAsst API."""
+    from ..clients.rentasst_client import RentAsstClient
+    mobile = req.get("mobile") or req.get("phone") or ""
+    rentasst_url = req.get("url") or "http://localhost:8000/api"
+    if not mobile:
+        return {"status": "error", "message": "Mobile number is required."}
+    
+    cfg = svc.get_config()
+    cfg.rentasst_url = rentasst_url.rstrip("/")
+    client = RentAsstClient(cfg)
+    try:
+        res = client.send_otp(mobile, target_url=rentasst_url)
+        return res
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        client.close()
+
+
+@router.post("/rentasst/verify-otp")
+def rentasst_verify_otp(req: Dict[str, Any], request: Request, svc: ConfigService = Depends(get_config_service)):
+    """Verifies OTP code with RentAsst API, retrieves Sanctum Bearer Token, and updates config."""
+    from ..clients.rentasst_client import RentAsstClient
+    mobile = req.get("mobile") or req.get("phone") or ""
+    otp = req.get("otp") or ""
+    request_id = req.get("request_id") or ""
+    rentasst_url = req.get("url") or "http://localhost:8000/api"
+    
+    if not mobile or not otp:
+        return {"status": "error", "message": "Mobile number and OTP code are required."}
+        
+    cfg = svc.get_config()
+    cfg.rentasst_url = rentasst_url.rstrip("/")
+    client = RentAsstClient(cfg)
+    db_mgr = getattr(request.app.state, "db", None)
+    
+    try:
+        res = client.verify_otp(mobile, otp, request_id=request_id, target_url=rentasst_url, db_mgr=db_mgr)
+        token = res.get("token")
+        if not token:
+            return {"status": "error", "message": "Verification succeeded but no Bearer token was returned.", "raw": res}
+            
+        tenant_id = res.get("tenant_id") or cfg.rentasst_tenant_id or "default"
+        cfg.rentasst_api_key = token
+        cfg.rentasst_tenant_id = tenant_id
+        saved_cfg = svc.save_config(cfg)
+
+        if db_mgr and hasattr(db_mgr, "save_bearer_token"):
+            db_mgr.save_bearer_token(mobile, token, tenant_id)
+
+        scheduler = getattr(request.app.state, "scheduler", None)
+        if scheduler and saved_cfg.auto_sync_enabled:
+            scheduler.start(saved_cfg.sync_interval_minutes)
+
+        return {
+            "status": "success",
+            "message": "RentAsst Mobile OTP verified successfully!",
+            "token": token,
+            "tenant_id": tenant_id,
+            "businesses": res.get("businesses", []),
+            "config": svc.config_store.get_masked_config(saved_cfg)
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        client.close()
+
+
 @router.post("/rentasst/login")
 def rentasst_login(req: Dict[str, Any], request: Request, svc: ConfigService = Depends(get_config_service)):
     """Fetches bearer token using only the login mail ID from the database or RentAsst API, and updates configuration."""
@@ -62,13 +157,11 @@ def rentasst_login(req: Dict[str, Any], request: Request, svc: ConfigService = D
         if not token:
             return {"status": "error", "message": "Authentication response did not contain an API token.", "raw": res}
         
-        # Extract available business companies
         businesses = res.get("business") or res.get("data", {}).get("business") or []
         tenant_id = business_code or res.get("tenant_id") or res.get("business_code") or ""
         if not tenant_id and isinstance(businesses, list) and len(businesses) > 0:
             first_b = businesses[0]
             tenant_id = first_b.get("business_code") or first_b.get("code") or first_b.get("id") or "default"
-        
         if not tenant_id:
             tenant_id = cfg.rentasst_tenant_id or "default"
 
@@ -97,9 +190,7 @@ def rentasst_login(req: Dict[str, Any], request: Request, svc: ConfigService = D
         client.close()
 
 
-
 @router.get("/companies/rentasst")
-
 def get_rentasst_companies(svc: ConfigService = Depends(get_config_service)):
     """Fetches list of available RentAsst business companies based on configured URL and Token."""
     cfg = svc.get_config()
@@ -125,4 +216,3 @@ def get_tally_companies(svc: ConfigService = Depends(get_config_service)):
         return {"status": "success", "companies": companies}
     except Exception as e:
         return {"status": "error", "message": f"Could not fetch Tally companies: {str(e)}", "companies": []}
-

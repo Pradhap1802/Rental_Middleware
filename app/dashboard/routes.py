@@ -12,12 +12,16 @@ else:
 
 
 @router.get("/", response_class=HTMLResponse)
+@router.get("/login", response_class=HTMLResponse)
+@router.get("/dashboard", response_class=HTMLResponse)
+@router.get("/middleware", response_class=HTMLResponse)
 def index_page():
     index_file = os.path.join(UI_DIR, "index.html")
     if os.path.exists(index_file):
         with open(index_file, "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
     return HTMLResponse("<h1>RentAsst Middleware Service Running</h1>")
+
 
 
 @router.get("/favicon.ico", include_in_schema=False)

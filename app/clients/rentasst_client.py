@@ -166,6 +166,170 @@ class RentAsstClient:
             "Could not fetch bearer token using email only. Confirm the RentAsst API URL exposes an email-only token endpoint."
         )
 
+    def send_otp(self, mobile: str, target_url: Optional[str] = None) -> Dict[str, Any]:
+        """Requests OTP for mobile number from RentAsst API server."""
+        clean_mobile = str(mobile).strip()
+        if not clean_mobile:
+            raise Exception("Mobile number is required.")
+        base_url = (target_url or self.base_url).rstrip("/")
+        endpoints = [
+            "admin/business-owner/send-otp",
+            "ecommerce/auth/send-otp",
+            "auth/send-otp",
+            "send-otp",
+        ]
+        device_token = f"mw_device_{clean_mobile}"
+        notification_token = f"mw_notif_{clean_mobile}"
+        payload = {
+            "mobile": clean_mobile,
+            "notification_token": notification_token,
+            "device_token": device_token,
+            "device_type": "web",
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Device-Type": "web",
+            "device-type": "web",
+        }
+        last_error = None
+        for endpoint in endpoints:
+            url = f"{base_url}/{endpoint.lstrip('/')}"
+            try:
+                r = self.session.post(url, json=payload, headers=headers, timeout=15, verify=self.cfg.verify_ssl)
+                if r.status_code in (200, 201):
+                    data = r.json()
+                    req_id = data.get("request_id") or data.get("data", {}).get("request_id") or f"req_{clean_mobile}"
+                    dev_otp = data.get("otp") or data.get("data", {}).get("otp") or None
+                    return {
+                        "status": "success",
+                        "message": f"OTP sent successfully to {clean_mobile}",
+                        "request_id": req_id,
+                        "dev_otp": dev_otp,
+                        "raw": data
+                    }
+                elif r.status_code in (400, 401, 403, 422):
+                    try:
+                        err = r.json()
+                        msg = err.get("message")
+                        if not msg or "and 1 more error" in str(msg):
+                            errors = err.get("errors", {})
+                            if isinstance(errors, dict) and errors:
+                                all_errs = []
+                                for _, err_list in errors.items():
+                                    if isinstance(err_list, list):
+                                        all_errs.extend(err_list)
+                                    else:
+                                        all_errs.append(str(err_list))
+                                msg = ", ".join(all_errs)
+                        if not msg:
+                            msg = err.get("error") or "Failed to send OTP."
+                        raise Exception(f"RentAsst OTP Error ({r.status_code}): {msg}")
+                    except Exception as e:
+                        if "RentAsst OTP Error" in str(e):
+                            raise e
+            except Exception as e:
+                last_error = e
+                if "RentAsst OTP Error" in str(e):
+                    raise e
+        if last_error:
+            raise last_error
+        raise Exception("Could not reach RentAsst OTP endpoints.")
+
+    def verify_otp(self, mobile: str, otp: str, request_id: Optional[str] = None, target_url: Optional[str] = None, db_mgr: Any = None) -> Dict[str, Any]:
+        """Verifies OTP code with RentAsst API and retrieves Sanctum Bearer Token."""
+        clean_mobile = str(mobile).strip()
+        clean_otp = str(otp).strip()
+        if not clean_mobile or not clean_otp:
+            raise Exception("Mobile number and OTP code are required.")
+        base_url = (target_url or self.base_url).rstrip("/")
+        endpoints = [
+            "admin/business-owner/verify-otp",
+            "ecommerce/auth/verify-otp",
+            "auth/verify-otp",
+            "verify-otp",
+        ]
+        device_token = f"mw_device_{clean_mobile}"
+        notification_token = f"mw_notif_{clean_mobile}"
+        payload = {
+            "mobile": clean_mobile,
+            "otp": clean_otp,
+            "request_id": request_id or "",
+            "notification_token": notification_token,
+            "device_token": device_token,
+            "device_type": "web",
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Device-Type": "web",
+            "device-type": "web",
+        }
+        last_error = None
+        for endpoint in endpoints:
+            url = f"{base_url}/{endpoint.lstrip('/')}"
+            try:
+                r = self.session.post(url, json=payload, headers=headers, timeout=15, verify=self.cfg.verify_ssl)
+                if r.status_code in (200, 201):
+                    data = r.json()
+                    if isinstance(data, dict):
+                        if data.get("user_not_registered"):
+                            raise Exception(f"Mobile number +91 {clean_mobile} is verified, but not registered in RentAsst. Please enter your registered RentAsst account mobile number.")
+                        if data.get("user_has_no_business"):
+                            raise Exception(f"The account for +91 {clean_mobile} has no active business assigned in RentAsst.")
+
+                        token = data.get("token") or data.get("data", {}).get("token") or data.get("bearer_token")
+                        tenant_id = data.get("tenant_id") or data.get("business_code") or ""
+                        businesses = data.get("business") or data.get("data", {}).get("business") or []
+                        if not tenant_id and isinstance(businesses, list) and len(businesses) > 0:
+                            first_b = businesses[0]
+                            tenant_id = first_b.get("business_code") or first_b.get("code") or first_b.get("id") or ""
+                        if not tenant_id:
+                            tenant_id = "default"
+
+                        if not token:
+                            raise Exception(f"RentAsst API did not return an access token for +91 {clean_mobile}.")
+
+                        if token and db_mgr and hasattr(db_mgr, "save_bearer_token"):
+                            db_mgr.save_bearer_token(clean_mobile, token, tenant_id)
+                        return {
+                            "status": "success",
+                            "message": "OTP verified successfully!",
+                            "token": token,
+                            "tenant_id": tenant_id,
+                            "businesses": businesses,
+                            "raw": data
+                        }
+                elif r.status_code in (400, 401, 403, 422):
+                    try:
+                        err = r.json()
+                        msg = err.get("message")
+                        if not msg or "and 1 more error" in str(msg):
+                            errors = err.get("errors", {})
+                            if isinstance(errors, dict) and errors:
+                                all_errs = []
+                                for _, err_list in errors.items():
+                                    if isinstance(err_list, list):
+                                        all_errs.extend(err_list)
+                                    else:
+                                        all_errs.append(str(err_list))
+                                msg = ", ".join(all_errs)
+                        if not msg:
+                            msg = err.get("error") or "Invalid or expired OTP."
+                        raise Exception(f"RentAsst Verification Failed ({r.status_code}): {msg}")
+                    except Exception as e:
+                        if "Verification Failed" in str(e):
+                            raise e
+            except Exception as e:
+                last_error = e
+                if "Verification Failed" in str(e):
+                    raise e
+        if last_error:
+            raise last_error
+        raise Exception("Could not reach RentAsst OTP verification endpoints.")
+
+
+
 
 
     def check_exists_in_rentasst(self, entity_type: str, rentasst_id: str) -> bool:
