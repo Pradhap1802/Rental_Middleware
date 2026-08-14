@@ -12,6 +12,7 @@ class AppConfig(BaseModel):
     external_url: str = Field(default="http://localhost:9000")
     external_api_key: Optional[str] = Field(default="")
     external_system_type: str = Field(default="tally") # 'tally', 'rest_erp', 'accounting'
+    tally_company_name: Optional[str] = Field(default="") # Target Tally Company Name for multi-company setup
     
     # General Settings
     sync_interval_minutes: int = Field(default=10)

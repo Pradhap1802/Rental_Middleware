@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from ..services.sync_service import SyncService
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
@@ -10,29 +11,35 @@ def get_sync_service(request: Request) -> SyncService:
 
 @router.post("/customers")
 def sync_customers_endpoint(svc: SyncService = Depends(get_sync_service)):
-    stats = svc.execute_sync("customers")
-    return {"status": "success", "stats": stats}
+    try:
+        stats = svc.execute_sync("customers")
+        return {"status": "success", "stats": stats}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
 
 
 @router.post("/equipment")
 def sync_equipment_endpoint(svc: SyncService = Depends(get_sync_service)):
-    stats = svc.execute_sync("equipment")
-    return {"status": "success", "stats": stats}
-
-
-@router.post("/rental_orders")
-def sync_orders_endpoint(svc: SyncService = Depends(get_sync_service)):
-    stats = svc.execute_sync("rental_orders")
-    return {"status": "success", "stats": stats}
+    try:
+        stats = svc.execute_sync("equipment")
+        return {"status": "success", "stats": stats}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
 
 
 @router.post("/invoices")
 def sync_invoices_endpoint(svc: SyncService = Depends(get_sync_service)):
-    stats = svc.execute_sync("invoices")
-    return {"status": "success", "stats": stats}
+    try:
+        stats = svc.execute_sync("invoices")
+        return {"status": "success", "stats": stats}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
 
 
 @router.post("/payments")
 def sync_payments_endpoint(svc: SyncService = Depends(get_sync_service)):
-    stats = svc.execute_sync("payments")
-    return {"status": "success", "stats": stats}
+    try:
+        stats = svc.execute_sync("payments")
+        return {"status": "success", "stats": stats}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
