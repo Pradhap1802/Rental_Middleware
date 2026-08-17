@@ -1,3 +1,4 @@
+import concurrent.futures
 import requests
 from typing import Dict, Any
 from ..configuration.store import ConfigStore
@@ -17,25 +18,43 @@ class TestService:
         try:
             endpoints = ["health", "user/profile", "user", "customer", "customers", ""]
             base = client.base_url.rstrip("/")
+            urls = [f"{base}/{ep}".rstrip("/") for ep in endpoints]
+
+            # Probe every candidate endpoint concurrently instead of sequentially -
+            # only one is actually correct for a given deployment, so waiting out
+            # each candidate's full timeout in turn wastes most of the wall-clock time.
+            outcome = None
             last_code = None
-            for ep in endpoints:
-                url = f"{base}/{ep}".rstrip("/")
-                try:
-                    r = client.session.get(url, headers=client.headers, timeout=15, verify=cfg.verify_ssl)
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(len(urls), 4))
+            futures = {executor.submit(client.session.get, u, headers=client.headers, timeout=8, verify=cfg.verify_ssl): u for u in urls}
+            try:
+                for fut in concurrent.futures.as_completed(futures, timeout=10):
+                    try:
+                        r = fut.result()
+                    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                        continue
+                    except Exception:
+                        continue
                     if r.status_code in (200, 201, 204):
-                        return {"status": "success", "message": "RentAsst API connection successful"}
+                        outcome = ("success", "RentAsst API connection successful")
+                        break
                     elif r.status_code in (401, 403):
-                        return {"status": "error", "message": f"Connected to RentAsst API, but authentication failed (Status {r.status_code}). Please check your API key / login credentials."}
+                        outcome = ("error", f"Connected to RentAsst API, but authentication failed (Status {r.status_code}). Please check your API key / login credentials.")
+                        break
                     last_code = r.status_code
-                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-                    continue
-                except Exception:
-                    continue
+            except concurrent.futures.TimeoutError:
+                pass
+            finally:
+                executor.shutdown(wait=False)
+
+            if outcome:
+                status, message = outcome
+                return {"status": status, "message": message}
 
             # Fallback: check root server URL (e.g. http://localhost:8000)
             try:
                 root_url = base.replace("/api", "")
-                r = client.session.get(root_url, timeout=10, verify=cfg.verify_ssl)
+                r = client.session.get(root_url, timeout=8, verify=cfg.verify_ssl)
                 if r.status_code in (200, 204, 301, 302, 404):
                     return {"status": "success", "message": "RentAsst server is reachable and active."}
             except Exception:

@@ -1,3 +1,6 @@
+import time
+import threading
+import concurrent.futures
 import requests
 from requests.adapters import HTTPAdapter
 from typing import Dict, Any, List, Optional
@@ -6,6 +9,20 @@ from ..retry.engine import RetryableException, NonRetryableException
 
 
 class RentAsstClient:
+    # Remembers which endpoint/method actually worked for a given base_url + logical
+    # record type, so repeat syncs skip straight to it instead of re-probing every
+    # candidate endpoint from scratch. Shared across client instances (a new client
+    # is created per sync execution, but the cache should outlive any single one).
+    _endpoint_cache: Dict[str, Dict[str, str]] = {}
+    _endpoint_cache_lock = threading.Lock()
+
+    # Callers (status polling, idempotency checks, config routes) each construct a
+    # fresh RentAsstClient per call rather than sharing one long-lived instance, so
+    # the ping cache must live at class level (keyed by base_url) to actually
+    # suppress repeat liveness probes across those short-lived instances.
+    _ping_cache: Dict[str, Dict[str, Any]] = {}
+    _ping_cache_lock = threading.Lock()
+
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
         self.base_url = cfg.rentasst_url.rstrip("/")
@@ -13,7 +30,8 @@ class RentAsstClient:
         adapter = HTTPAdapter(pool_connections=20, pool_maxsize=50)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
-        
+        self._equipment_cache: Optional[List[Dict[str, Any]]] = None
+
         self.headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -35,7 +53,69 @@ class RentAsstClient:
             self.headers["TenantId"] = cfg.rentasst_tenant_id
             self.headers["tenant_id"] = cfg.rentasst_tenant_id
 
-    def _request_with_fallback(self, endpoints: List[str], params: Optional[Dict[str, Any]] = None, timeout: int = 5) -> Any:
+    def _cache_get(self, cache_key: str) -> Optional[Dict[str, str]]:
+        return self._endpoint_cache.get(f"{self.base_url}:{cache_key}")
+
+    def _cache_set(self, cache_key: str, method: str, endpoint: str) -> None:
+        with self._endpoint_cache_lock:
+            self._endpoint_cache[f"{self.base_url}:{cache_key}"] = {"method": method, "endpoint": endpoint}
+
+    @staticmethod
+    def _first_success(session: requests.Session, urls: List[str], headers: Dict[str, str], timeout: int, verify: bool, ok_codes=(200, 201, 204)) -> Optional[requests.Response]:
+        """
+        Fires GET requests at every candidate URL concurrently and returns the first
+        response matching ok_codes, without waiting for the slower candidates to finish.
+        Safe for read-only endpoint discovery/health probes only.
+        """
+        if not urls:
+            return None
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(len(urls), 4))
+        futures = {executor.submit(session.get, u, headers=headers, timeout=timeout, verify=verify): u for u in urls}
+        result = None
+        try:
+            for fut in concurrent.futures.as_completed(futures, timeout=timeout + 2):
+                try:
+                    r = fut.result()
+                except Exception:
+                    continue
+                if r.status_code in ok_codes:
+                    result = r
+                    break
+        except concurrent.futures.TimeoutError:
+            pass
+        finally:
+            executor.shutdown(wait=False)
+        return result
+
+    def _post_datatable_fallback(self, endpoints: List[str], body: Dict[str, Any], cache_key: Optional[str] = None, timeout: int = 8) -> Optional[List[Dict[str, Any]]]:
+        ordered = endpoints
+        if cache_key:
+            cached = self._cache_get(cache_key)
+            if cached and cached.get("method") == "POST" and cached.get("endpoint") in endpoints:
+                ordered = [cached["endpoint"]] + [e for e in endpoints if e != cached["endpoint"]]
+
+        req_body = dict(body or {})
+        if self.cfg.rentasst_tenant_id and "business_code" not in req_body:
+            req_body["business_code"] = self.cfg.rentasst_tenant_id
+
+        for ep in ordered:
+            url = f"{self.base_url}/{ep.lstrip('/')}"
+            try:
+                r = self.session.post(url, json=req_body, headers=self.headers, timeout=timeout, verify=self.cfg.verify_ssl)
+                if r.status_code in (200, 204):
+                    content_type = r.headers.get("content-type", "").lower()
+                    if "text/html" not in content_type and not (r.text or "").strip().startswith(("<html", "<!doctype")):
+                        data = r.json()
+                        items = data.get("data", data) if isinstance(data, dict) else data
+                        if isinstance(items, list) and len(items) > 0:
+                            if cache_key:
+                                self._cache_set(cache_key, "POST", ep)
+                            return items
+            except Exception:
+                pass
+        return None
+
+    def _request_with_fallback(self, endpoints: List[str], params: Optional[Dict[str, Any]] = None, timeout: int = 8, cache_key: Optional[str] = None) -> Any:
         last_error = None
         req_params = dict(params or {})
         if self.cfg.rentasst_tenant_id:
@@ -43,7 +123,13 @@ class RentAsstClient:
                 req_params["business_code"] = self.cfg.rentasst_tenant_id
                 req_params["businesscode"] = self.cfg.rentasst_tenant_id
 
-        for endpoint in endpoints:
+        ordered_endpoints = endpoints
+        if cache_key:
+            cached = self._cache_get(cache_key)
+            if cached and cached.get("method") == "GET" and cached.get("endpoint") in endpoints:
+                ordered_endpoints = [cached["endpoint"]] + [e for e in endpoints if e != cached["endpoint"]]
+
+        for endpoint in ordered_endpoints:
             url = f"{self.base_url}/{endpoint.lstrip('/')}"
             try:
                 r = self.session.get(url, headers=self.headers, params=req_params, timeout=timeout, verify=self.cfg.verify_ssl)
@@ -61,7 +147,10 @@ class RentAsstClient:
                     continue
 
                 data = r.json()
-                return data.get("data", data) if isinstance(data, dict) else data
+                result = data.get("data", data) if isinstance(data, dict) else data
+                if cache_key:
+                    self._cache_set(cache_key, "GET", endpoint)
+                return result
             except (requests.exceptions.JSONDecodeError, requests.exceptions.ConnectionError, requests.exceptions.Timeout):
                 continue
             except requests.exceptions.HTTPError as e:
@@ -103,22 +192,33 @@ class RentAsstClient:
 
 
     def ping(self) -> bool:
+        # Liveness only changes on the timescale of the target server going up/down,
+        # so a short-lived cache avoids re-probing on every idempotency/status check -
+        # callers construct a fresh client per call, so this is cached by base_url,
+        # not on the instance (see _ping_cache class attribute).
+        now = time.time()
+        cached = self._ping_cache.get(self.base_url)
+        if cached and (now - cached["time"]) < 15:
+            return cached["ok"]
+
         endpoints = ["health", "user/profile", "customer", "customers", ""]
         base = self.base_url.rstrip("/")
-        for ep in endpoints:
-            url = f"{base}/{ep}".rstrip("/")
+        urls = [f"{base}/{ep}".rstrip("/") for ep in endpoints]
+        result = self._first_success(self.session, urls, self.headers, timeout=8, verify=self.cfg.verify_ssl, ok_codes=(200, 201, 204, 401, 403))
+
+        if result is not None:
+            ok = True
+        else:
             try:
-                r = self.session.get(url, headers=self.headers, timeout=10, verify=self.cfg.verify_ssl)
-                if r.status_code in (200, 201, 204, 401, 403):
-                    return True
+                root_url = base.replace("/api", "")
+                r = self.session.get(root_url, timeout=8, verify=self.cfg.verify_ssl)
+                ok = r.status_code in (200, 204, 301, 302, 404)
             except Exception:
-                continue
-        try:
-            root_url = base.replace("/api", "")
-            r = self.session.get(root_url, timeout=5, verify=self.cfg.verify_ssl)
-            return r.status_code in (200, 204, 301, 302, 404)
-        except Exception:
-            return False
+                ok = False
+
+        with self._ping_cache_lock:
+            self._ping_cache[self.base_url] = {"ok": ok, "time": now}
+        return ok
 
 
     def check_token_validity(self) -> bool:
@@ -126,17 +226,28 @@ class RentAsstClient:
         if not self.cfg.rentasst_api_key or not self.cfg.rentasst_api_key.strip():
             return False
         endpoints = ["user/profile", "user", "customer", "customers", "asset", "invoices"]
-        for endpoint in endpoints:
-            url = f"{self.base_url}/{endpoint}"
-            try:
-                r = self.session.get(url, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
+        urls = [f"{self.base_url}/{endpoint}" for endpoint in endpoints]
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(len(urls), 4))
+        futures = {executor.submit(self.session.get, u, headers=self.headers, timeout=8, verify=self.cfg.verify_ssl): u for u in urls}
+        result = True
+        try:
+            for fut in concurrent.futures.as_completed(futures, timeout=10):
+                try:
+                    r = fut.result()
+                except Exception:
+                    continue
                 if r.status_code in (200, 201):
-                    return True
+                    result = True
+                    break
                 if r.status_code in (401, 403):
-                    return False
-            except Exception:
-                pass
-        return True
+                    result = False
+                    break
+        except concurrent.futures.TimeoutError:
+            pass
+        finally:
+            executor.shutdown(wait=False)
+        return result
 
     def login(self, email: str, business_code: Optional[str] = None, target_url: Optional[str] = None, db_mgr: Any = None) -> Dict[str, Any]:
         """Fetches bearer token for user using login mail ID and optional business code."""
@@ -430,7 +541,7 @@ class RentAsstClient:
         for endpoint in endpoints:
             url = f"{self.base_url}/{endpoint.lstrip('/')}"
             try:
-                r = self.session.get(url, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
+                r = self.session.get(url, headers=self.headers, timeout=8, verify=self.cfg.verify_ssl)
                 if r.status_code in (200, 204):
                     return True
             except Exception:
@@ -503,31 +614,27 @@ class RentAsstClient:
         if updated_after:
             params["updated_after"] = updated_after
 
-        # 1. Try standard GET endpoints first
-        try:
-            raw_customers = self._request_with_fallback(["customer", "customers", "customer-list"], params, timeout=5)
-        except Exception:
-            raw_customers = None
+        cache_key = "customers"
+        get_endpoints = ["customer", "customers", "customer-list"]
+        post_endpoints = ["customer-list", "customers", "customer"]
+        post_body: Dict[str, Any] = {"start": 0, "length": 1000}
 
-        # 2. Try POST DataTable API if GET returned nothing
-        if not raw_customers or not isinstance(raw_customers, list) or len(raw_customers) == 0:
-            for ep in ["customer-list", "customers", "customer"]:
-                try:
-                    url = f"{self.base_url}/{ep.lstrip('/')}"
-                    body: Dict[str, Any] = {"start": 0, "length": 1000}
-                    if self.cfg.rentasst_tenant_id:
-                        body["business_code"] = self.cfg.rentasst_tenant_id
-                    r = self.session.post(url, json=body, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
-                    if r.status_code in (200, 204):
-                        content_type = r.headers.get("content-type", "").lower()
-                        if "text/html" not in content_type and not (r.text or "").strip().startswith(("<html", "<!doctype")):
-                            data = r.json()
-                            items = data.get("data", data) if isinstance(data, dict) else data
-                            if isinstance(items, list) and len(items) > 0:
-                                raw_customers = items
-                                break
-                except Exception:
-                    pass
+        raw_customers = None
+        # Fast path: last sync's winning method/endpoint, skips discovery entirely.
+        cached = self._cache_get(cache_key)
+        if cached and cached.get("method") == "POST":
+            raw_customers = self._post_datatable_fallback(post_endpoints, post_body, cache_key=cache_key)
+
+        if not raw_customers:
+            # 1. Try standard GET endpoints first
+            try:
+                raw_customers = self._request_with_fallback(get_endpoints, params, timeout=8, cache_key=cache_key)
+            except Exception:
+                raw_customers = None
+
+            # 2. Try POST DataTable API if GET returned nothing
+            if not raw_customers or not isinstance(raw_customers, list) or len(raw_customers) == 0:
+                raw_customers = self._post_datatable_fallback(post_endpoints, post_body, cache_key=cache_key)
 
         if isinstance(raw_customers, list):
             return self._deduplicate_customers(raw_customers)
@@ -540,7 +647,7 @@ class RentAsstClient:
         """
         unit_endpoints = ["asset-units", "asset-unit", "units", "unit"]
         try:
-            units = self._request_with_fallback(unit_endpoints, timeout=5)
+            units = self._request_with_fallback(unit_endpoints, timeout=8, cache_key="asset_units")
             if isinstance(units, list) and len(units) > 0:
                 standardized = []
                 for u in units:
@@ -603,108 +710,122 @@ class RentAsstClient:
         return [{"id": "Nos", "name": "Nos", "symbol": "Nos", "formal_name": "Numbers", "decimal_places": 0}]
 
     def fetch_equipment(self) -> List[Dict[str, Any]]:
-        # 1. Try GET equipment / assets first
-        try:
-            raw_assets = self._request_with_fallback(["equipment", "asset", "assets", "asset-list"], {"per_page": 1000, "limit": 1000}, timeout=5)
-        except Exception:
-            raw_assets = None
+        # A single sync execution can call this twice (once as fetch_asset_units'
+        # fallback, once for the actual equipment sync step) - reuse the result
+        # instead of issuing a second round of network calls. Safe because a fresh
+        # RentAsstClient is created per sync execution, so this never goes stale
+        # across different sync runs.
+        if self._equipment_cache is not None:
+            return self._equipment_cache
 
-        # 2. Try POST DataTable API if GET returned nothing
-        if not raw_assets or not isinstance(raw_assets, list) or len(raw_assets) == 0:
-            for ep in ["asset-list", "assets", "equipment"]:
-                try:
-                    url = f"{self.base_url}/{ep.lstrip('/')}"
-                    body: Dict[str, Any] = {"start": 0, "length": 1000}
-                    if self.cfg.rentasst_tenant_id:
-                        body["business_code"] = self.cfg.rentasst_tenant_id
-                    r = self.session.post(url, json=body, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
-                    if r.status_code in (200, 204):
-                        content_type = r.headers.get("content-type", "").lower()
-                        if "text/html" not in content_type and not (r.text or "").strip().startswith(("<html", "<!doctype")):
-                            data = r.json()
-                            items = data.get("data", data) if isinstance(data, dict) else data
-                            if isinstance(items, list) and len(items) > 0:
-                                raw_assets = items
-                                break
-                except Exception:
-                    pass
+        cache_key = "equipment"
+        get_endpoints = ["equipment", "asset", "assets", "asset-list"]
+        post_endpoints = ["asset-list", "assets", "equipment"]
+        post_body: Dict[str, Any] = {"start": 0, "length": 1000}
 
-        if isinstance(raw_assets, list):
-            return raw_assets
-        return []
+        raw_assets = None
+        cached = self._cache_get(cache_key)
+        if cached and cached.get("method") == "POST":
+            raw_assets = self._post_datatable_fallback(post_endpoints, post_body, cache_key=cache_key)
+
+        if not raw_assets:
+            # 1. Try GET equipment / assets first
+            try:
+                raw_assets = self._request_with_fallback(get_endpoints, {"per_page": 1000, "limit": 1000}, timeout=8, cache_key=cache_key)
+            except Exception:
+                raw_assets = None
+
+            # 2. Try POST DataTable API if GET returned nothing
+            if not raw_assets or not isinstance(raw_assets, list) or len(raw_assets) == 0:
+                raw_assets = self._post_datatable_fallback(post_endpoints, post_body, cache_key=cache_key)
+
+        result = raw_assets if isinstance(raw_assets, list) else []
+        self._equipment_cache = result
+        return result
 
     def fetch_rental_orders(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
-        # 1. Try POST DataTable API endpoints first
-        for ep in ["rent-list", "rents", "rental-orders"]:
-            try:
-                url = f"{self.base_url}/{ep.lstrip('/')}"
-                body: Dict[str, Any] = {"start": 0, "length": 1000}
-                if status:
-                    body["status"] = [status]
-                if self.cfg.rentasst_tenant_id:
-                    body["business_code"] = self.cfg.rentasst_tenant_id
-                r = self.session.post(url, json=body, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
-                if r.status_code in (200, 204):
-                    content_type = r.headers.get("content-type", "").lower()
-                    if "text/html" not in content_type and not (r.text or "").strip().startswith(("<html", "<!doctype")):
-                        data = r.json()
-                        items = data.get("data", data) if isinstance(data, dict) else data
-                        if isinstance(items, list) and len(items) > 0:
-                            return items
-            except Exception:
-                pass
-
+        cache_key = "rental_orders"
+        post_endpoints = ["rent-list", "rents", "rental-orders"]
+        get_endpoints = ["rents", "rental-orders", "rent-list"]
+        post_body: Dict[str, Any] = {"start": 0, "length": 1000}
+        if status:
+            post_body["status"] = [status]
         params = {"per_page": 1000, "limit": 1000, "length": 1000}
         if status:
             params["status"] = status
+
+        # Fast path: if GET was the winning method last time, skip straight to it
+        # (original discovery order tries POST first, so this only fires once warm).
+        cached = self._cache_get(cache_key)
+        if cached and cached.get("method") == "GET":
+            try:
+                items = self._request_with_fallback(get_endpoints, params, timeout=8, cache_key=cache_key)
+                if isinstance(items, list) and items:
+                    return items
+            except Exception:
+                pass
+
+        # 1. Try POST DataTable API endpoints first (original discovery order)
+        items = self._post_datatable_fallback(post_endpoints, post_body, cache_key=cache_key)
+        if items:
+            return items
+
+        # 2. GET fallback
         try:
-            return self._request_with_fallback(["rents", "rental-orders", "rent-list"], params, timeout=5)
+            result = self._request_with_fallback(get_endpoints, params, timeout=8, cache_key=cache_key)
+            return result if isinstance(result, list) else []
         except Exception:
             return []
 
     def fetch_invoices(self) -> List[Dict[str, Any]]:
-        # 1. Try POST DataTable API endpoints first
-        for ep in ["invoice-list", "invoices"]:
+        cache_key = "invoices"
+        post_endpoints = ["invoice-list", "invoices"]
+        get_endpoints = ["invoices", "invoice-list", "invoice"]
+        post_body: Dict[str, Any] = {"start": 0, "length": 1000}
+
+        cached = self._cache_get(cache_key)
+        if cached and cached.get("method") == "GET":
             try:
-                url = f"{self.base_url}/{ep.lstrip('/')}"
-                body: Dict[str, Any] = {"start": 0, "length": 1000}
-                if self.cfg.rentasst_tenant_id:
-                    body["business_code"] = self.cfg.rentasst_tenant_id
-                r = self.session.post(url, json=body, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
-                if r.status_code in (200, 204):
-                    content_type = r.headers.get("content-type", "").lower()
-                    if "text/html" not in content_type and not (r.text or "").strip().startswith(("<html", "<!doctype")):
-                        data = r.json()
-                        items = data.get("data", data) if isinstance(data, dict) else data
-                        if isinstance(items, list) and len(items) > 0:
-                            return items
+                items = self._request_with_fallback(get_endpoints, {"per_page": 1000, "limit": 1000}, timeout=8, cache_key=cache_key)
+                if isinstance(items, list) and items:
+                    return items
             except Exception:
                 pass
+
+        # 1. Try POST DataTable API endpoints first (original discovery order)
+        items = self._post_datatable_fallback(post_endpoints, post_body, cache_key=cache_key)
+        if items:
+            return items
+
         try:
-            return self._request_with_fallback(["invoices", "invoice-list", "invoice"], {"per_page": 1000, "limit": 1000}, timeout=5)
+            result = self._request_with_fallback(get_endpoints, {"per_page": 1000, "limit": 1000}, timeout=8, cache_key=cache_key)
+            return result if isinstance(result, list) else []
         except Exception:
             return []
 
     def fetch_payments(self) -> List[Dict[str, Any]]:
-        # 1. Try POST DataTable API endpoints first
-        for ep in ["payment-list", "payments"]:
+        cache_key = "payments"
+        post_endpoints = ["payment-list", "payments"]
+        get_endpoints = ["payments", "payment-list", "payment"]
+        post_body: Dict[str, Any] = {"start": 0, "length": 1000}
+
+        cached = self._cache_get(cache_key)
+        if cached and cached.get("method") == "GET":
             try:
-                url = f"{self.base_url}/{ep.lstrip('/')}"
-                body: Dict[str, Any] = {"start": 0, "length": 1000}
-                if self.cfg.rentasst_tenant_id:
-                    body["business_code"] = self.cfg.rentasst_tenant_id
-                r = self.session.post(url, json=body, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
-                if r.status_code in (200, 204):
-                    content_type = r.headers.get("content-type", "").lower()
-                    if "text/html" not in content_type and not (r.text or "").strip().startswith(("<html", "<!doctype")):
-                        data = r.json()
-                        items = data.get("data", data) if isinstance(data, dict) else data
-                        if isinstance(items, list) and len(items) > 0:
-                            return items
+                items = self._request_with_fallback(get_endpoints, {"per_page": 1000, "limit": 1000}, timeout=8, cache_key=cache_key)
+                if isinstance(items, list) and items:
+                    return items
             except Exception:
                 pass
+
+        # 1. Try POST DataTable API endpoints first (original discovery order)
+        items = self._post_datatable_fallback(post_endpoints, post_body, cache_key=cache_key)
+        if items:
+            return items
+
         try:
-            return self._request_with_fallback(["payments", "payment-list", "payment"], {"per_page": 1000, "limit": 1000}, timeout=5)
+            result = self._request_with_fallback(get_endpoints, {"per_page": 1000, "limit": 1000}, timeout=8, cache_key=cache_key)
+            return result if isinstance(result, list) else []
         except Exception:
             return []
 
@@ -725,7 +846,7 @@ class RentAsstClient:
         for endpoint in endpoints:
             url = f"{self.base_url}/{endpoint.lstrip('/')}"
             try:
-                r = self.session.post(url, json=req_payload, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
+                r = self.session.post(url, json=req_payload, headers=self.headers, timeout=8, verify=self.cfg.verify_ssl)
 
 
                 if r.status_code in (404, 405):
