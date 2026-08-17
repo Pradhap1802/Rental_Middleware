@@ -14,8 +14,8 @@ class AppConfig(BaseModel):
     external_system_type: str = Field(default="tally") # 'tally', 'rest_erp', 'accounting'
     
     # General Settings
-    sync_interval_minutes: int = Field(default=15)
-    auto_sync_enabled: bool = Field(default=False)
+    sync_interval_minutes: int = Field(default=10)
+    auto_sync_enabled: bool = Field(default=True)
     proxy: Optional[str] = Field(default="")
     verify_ssl: bool = Field(default=True)
 

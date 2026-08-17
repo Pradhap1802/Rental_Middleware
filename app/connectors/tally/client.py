@@ -8,8 +8,10 @@ from .parser import validate_tally_accounting_success, parse_tally_xml
 from .company import build_fetch_companies_xml, parse_fetch_companies_response
 from .ledger import build_customer_ledger_xml
 from .stock_item import build_stock_item_xml
+from .unit import build_unit_xml
 from .sales_voucher import build_sales_order_voucher_xml, build_sales_invoice_voucher_xml
 from .receipt_voucher import build_receipt_voucher_xml
+
 
 
 class TallyClient:
@@ -21,6 +23,8 @@ class TallyClient:
     def __init__(self, cfg: AppConfig, session: Optional[requests.Session] = None):
         self.cfg = cfg
         self.base_url = cfg.external_url.rstrip("/")
+        self._cache = {}
+        self._cache_time = {}
         if session:
             self.session = session
         else:
@@ -48,7 +52,7 @@ class TallyClient:
             xml_string = xml_string.replace("<REQUESTDESC>", f"<REQUESTDESC>{company_var}")
 
         headers = {"Content-Type": "text/xml"}
-        r = self.session.post(self.base_url, data=xml_string.encode("utf-8"), headers=headers, timeout=15)
+        r = self.session.post(self.base_url, data=xml_string.encode("utf-8"), headers=headers, timeout=20)
         r.raise_for_status()
 
         clean_content = sanitize_tally_xml(r.content)
@@ -74,6 +78,14 @@ class TallyClient:
             return True
 
         ent = (entity_type or "").lower().strip()
+        import time
+        now = time.time()
+        
+        # 1. Use in-memory cache if fresh (within 30 seconds)
+        if ent in self._cache and (now - self._cache_time.get(ent, 0)) < 30:
+            clean_str = identifier.lower().strip()
+            return clean_str in self._cache[ent]
+
         tally_type = "LEDGER"
         fetch_fields = "NAME"
         if ent in ("equipment", "product", "products"):
@@ -95,27 +107,45 @@ class TallyClient:
         company_name = getattr(self.cfg, "tally_company_name", None)
         xml = build_export_collection_envelope("CheckExistence", tally_type, fetch_fields, company_name=company_name)
 
-
         try:
             r = self.session.post(self.base_url, data=xml.encode("utf-8"), headers={"Content-Type": "text/xml"}, timeout=10)
             if r.status_code == 200:
-                clean = sanitize_tally_xml(r.content)
-                return identifier.lower() in clean.lower()
+                clean = sanitize_tally_xml(r.content).lower()
+                self._cache[ent] = clean
+                self._cache_time[ent] = now
+                return identifier.lower().strip() in clean
         except Exception:
             pass
         return False
 
     def sync_customer(self, data: Dict[str, Any]) -> str:
-        name = (data.get("name") or data.get("business_name") or f"Customer-{data.get('id')}").strip()
+        name = (data.get("tally_name") or data.get("name") or data.get("business_name") or f"Customer-{data.get('id')}").strip()
         already_in_tally = self.check_exists("customer", name)
         action = "Alter" if already_in_tally else "Create"
+
 
         company_name = getattr(self.cfg, "tally_company_name", None)
         xml = build_customer_ledger_xml(data, action=action, company_name=company_name)
         return self.send_xml(xml)
 
+    def sync_unit(self, data: Dict[str, Any]) -> str:
+        raw_name = (data.get("name") or data.get("unit_name") or data.get("symbol") or "Nos").strip()
+        raw_symbol = (data.get("symbol") or data.get("code") or "").strip()
+        if "(" in raw_name and ")" in raw_name and not raw_symbol:
+            unit_name = raw_name.split("(")[0].strip()
+        else:
+            unit_name = raw_name or raw_symbol or "Nos"
+
+        already_in_tally = self.check_exists("unit", unit_name)
+        action = "Alter" if already_in_tally else "Create"
+
+        company_name = getattr(self.cfg, "tally_company_name", None)
+        xml = build_unit_xml(data, action=action, company_name=company_name)
+        return self.send_xml(xml)
+
     def sync_equipment(self, data: Dict[str, Any]) -> str:
         name = (data.get("name") or f"Item-{data.get('id')}").strip()
+
 
         unit_name = "Nos"
         if isinstance(data.get("asset_unit"), dict):

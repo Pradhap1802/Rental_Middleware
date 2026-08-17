@@ -6,11 +6,10 @@ This document details the step-by-step forward sync execution hierarchy, depende
 
 ## Forward Sync Execution Hierarchy
 
-The middleware enforces a strict dependency chain for forward synchronization (RentAsst $\to$ Tally Prime):
-
-$$\text{Customer} \longrightarrow \text{Equipment} \longrightarrow \text{Rental Order} \longrightarrow \text{Invoice} \longrightarrow \text{Payment}$$
+$$\text{Customer} \longrightarrow \text{Asset Units (UOM)} \longrightarrow \text{Equipment (Assets)} \longrightarrow \text{Rental Order} \longrightarrow \text{Invoice} \longrightarrow \text{Payment}$$
 
 ### Step-by-Step Forward Sync Workflow
+
 
 1. **Job Enqueue & Batch Chunking**:
    - Entities fetched from RentAsst REST API are chunked into batch sizes (default 100).

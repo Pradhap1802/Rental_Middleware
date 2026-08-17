@@ -16,7 +16,7 @@ class AppConfig(BaseModel):
     
     # General Settings
     sync_interval_minutes: int = Field(default=10)
-    auto_sync_enabled: bool = Field(default=False)
+    auto_sync_enabled: bool = Field(default=True)
     proxy: Optional[str] = Field(default="")
     verify_ssl: bool = Field(default=True)
 
@@ -37,9 +37,19 @@ class CustomerModel(BaseModel):
     gstin_tax_id: Optional[str] = None
 
 
+class AssetUnitModel(BaseModel):
+    id: str
+    name: str
+    symbol: Optional[str] = None
+    formal_name: Optional[str] = None
+    uqc_code: Optional[str] = None
+    decimal_places: int = 0
+
+
 class EquipmentModel(BaseModel):
     id: str
     name: str
+
     code_sku: Optional[str] = None
     category: Optional[str] = None
     daily_rate: float = 0.0

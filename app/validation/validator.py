@@ -26,7 +26,25 @@ class PayloadValidator:
         return True, None
 
     @staticmethod
+    def validate_unit(data: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        if not data or not isinstance(data, dict):
+            return False, "Unit payload must be a valid JSON dictionary"
+
+        uid = data.get("id")
+        name = (data.get("name") or data.get("unit_name") or data.get("symbol") or "").strip()
+
+        if not uid and not name:
+            return False, "Unit payload is missing required field: 'id', 'name', or 'symbol'"
+
+        decimal_places = int(data.get("decimal_places") or data.get("decimalPlaces") or 0)
+        if decimal_places < 0 or decimal_places > 4:
+            return False, f"Unit decimal places must be between 0 and 4 (got: {decimal_places})"
+
+        return True, None
+
+    @staticmethod
     def validate_equipment(data: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+
         if not data or not isinstance(data, dict):
             return False, "Equipment payload must be a valid JSON dictionary"
 
@@ -184,7 +202,9 @@ def validate_entity_payload(entity_type: str, data: Dict[str, Any]) -> Tuple[boo
     ent = (entity_type or "").strip().lower()
     if ent in ("customer", "customers"):
         return PayloadValidator.validate_customer(data)
-    elif ent in ("equipment", "product", "products"):
+    elif ent in ("unit", "units", "asset_unit", "asset_units"):
+        return PayloadValidator.validate_unit(data)
+    elif ent in ("equipment", "product", "products", "asset", "assets"):
         return PayloadValidator.validate_equipment(data)
     elif ent in ("rental_order", "rental_orders"):
         return PayloadValidator.validate_rental_order(data)
@@ -192,5 +212,6 @@ def validate_entity_payload(entity_type: str, data: Dict[str, Any]) -> Tuple[boo
         return PayloadValidator.validate_invoice(data)
     elif ent in ("payment", "payments"):
         return PayloadValidator.validate_payment(data)
+
 
     return True, None

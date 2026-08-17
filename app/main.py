@@ -8,6 +8,7 @@ from .configuration.store import ConfigStore
 from .scheduler.manager import SyncScheduler
 from .queue.worker import QueueWorker
 from .services.sync_service import SyncService
+from .logging.logger import log_event
 from .dashboard import dashboard_router
 from .api import all_routers
 
@@ -36,11 +37,21 @@ async def lifespan(app: FastAPI):
     # Start background Queue Worker
     worker.start()
 
-    # Load configuration and start background scheduler if auto-sync is enabled
+    # Load configuration and determine sync interval
     cfg_store = ConfigStore(DATA_DIR)
     cfg = cfg_store.load_safe()
-    if cfg and cfg.auto_sync_enabled:
-        scheduler.start(cfg.sync_interval_minutes)
+    interval = cfg.sync_interval_minutes if cfg and cfg.sync_interval_minutes else 10
+
+    # Always start the polling scheduler (10-minute default)
+    scheduler.start(interval)
+    log_event("Startup", f"Auto-sync polling started: syncing Customers, Equipment, Rental Orders, Invoices, Payments every {interval} minutes.")
+
+    # Fire an immediate first sync so data syncs right away on boot
+    try:
+        scheduler.trigger_manual_sync()
+        log_event("Startup", "Immediate first forward sync triggered on startup.")
+    except Exception as e:
+        log_event("Startup", f"Initial sync trigger warning: {e}")
 
     yield
 

@@ -1,7 +1,6 @@
 import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 from typing import Optional
-from ..configuration.store import ConfigStore
 from ..queue.queue_store import QueueStore
 from ..logging.logger import log_event
 
@@ -18,14 +17,9 @@ class SyncScheduler:
         self.is_paused = False
 
     def _sync_job(self):
-        log_event("Scheduler", "Executing scheduled sync job enqueue...")
+        log_event("Scheduler", "Polling tick: enqueuing forward sync jobs for Customers, Equipment, Rental Orders, Invoices, Payments...")
         try:
-            cfg_store = ConfigStore(self.data_dir)
-            cfg = cfg_store.load_safe()
-            if not cfg or not cfg.auto_sync_enabled:
-                return
-
-            # Enqueue entity sync jobs into SQLite Queue Engine
+            # Enqueue entity sync jobs into SQLite Queue Engine (dependency order)
             entities = ["customers", "equipment", "rental_orders", "invoices", "payments"]
             enqueued_count = 0
             for entity in entities:
@@ -33,7 +27,7 @@ class SyncScheduler:
                 if job_id:
                     enqueued_count += 1
 
-            log_event("Scheduler", f"Scheduled enqueue completed. Enqueued {enqueued_count} entity jobs.")
+            log_event("Scheduler", f"Polling enqueue completed. Enqueued {enqueued_count}/{len(entities)} entity jobs.")
         except Exception as e:
             log_event("Scheduler", f"Error during background scheduler enqueue: {str(e)}")
 

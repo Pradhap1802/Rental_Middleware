@@ -18,8 +18,19 @@ def sync_customers_endpoint(svc: SyncService = Depends(get_sync_service)):
         return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
 
 
+@router.post("/units")
+@router.post("/asset_units")
+def sync_units_endpoint(svc: SyncService = Depends(get_sync_service)):
+    try:
+        stats = svc.execute_sync("units")
+        return {"status": "success", "stats": stats}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
+
+
 @router.post("/equipment")
 def sync_equipment_endpoint(svc: SyncService = Depends(get_sync_service)):
+
     try:
         stats = svc.execute_sync("equipment")
         return {"status": "success", "stats": stats}

@@ -14,9 +14,13 @@ def compute_payload_hash(payload: Dict[str, Any]) -> str:
 def extract_identifier(entity_type: str, item: Dict[str, Any]) -> str:
     ent = (entity_type or "").lower().strip()
     if ent in ("customer", "customers"):
-        return str(item.get("name") or item.get("business_name") or "").strip()
-    elif ent in ("equipment", "product", "products"):
+        return str(item.get("tally_name") or item.get("name") or item.get("business_name") or "").strip()
+
+    elif ent in ("unit", "units", "asset_unit", "asset_units"):
+        return str(item.get("name") or item.get("symbol") or item.get("unit_name") or "").strip()
+    elif ent in ("equipment", "product", "products", "asset", "assets"):
         return str(item.get("name") or "").strip()
+
     elif ent in ("rental_orders", "rental_order", "order", "orders"):
         raw_num = str(item.get("number") or item.get("rent_code") or "").strip()
         return raw_num if raw_num and raw_num != "0" else f"ORD-{item.get('id')}"

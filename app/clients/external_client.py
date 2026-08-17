@@ -69,7 +69,18 @@ class ExternalClient:
             res = r.json()
             return str(res.get("id") or res.get("external_id") or data.get("id"))
 
+    def sync_unit(self, data: Dict[str, Any]) -> str:
+        if self.cfg.external_system_type == "tally":
+            return self.tally.sync_unit(data)
+        else:
+            url = f"{self.base_url}/api/units"
+            r = self.session.post(url, json=data, headers=self.headers, timeout=10, verify=self.cfg.verify_ssl)
+            r.raise_for_status()
+            res = r.json()
+            return str(res.get("id") or data.get("id") or data.get("name"))
+
     def sync_equipment(self, data: Dict[str, Any]) -> str:
+
         if self.cfg.external_system_type == "tally":
             return self.tally.sync_equipment(data)
         else:

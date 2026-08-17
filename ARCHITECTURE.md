@@ -30,6 +30,7 @@ graph TD
     TALLY --> T_CLIENT["client.py"]
     TALLY --> T_COMPANY["company.py"]
     TALLY --> T_LEDGER["ledger.py"]
+    TALLY --> T_UNIT["unit.py"]
     TALLY --> T_STOCK["stock_item.py"]
     TALLY --> T_SALES["sales_voucher.py"]
     TALLY --> T_RECEIPT["receipt_voucher.py"]
@@ -47,6 +48,7 @@ graph TD
 - `client.py`: High-level Tally XML HTTP client managing connection pings and request dispatches.
 - `company.py`: Fetches active company names from Tally Prime XML server.
 - `ledger.py`: Generates and parses Sundry Debtors and Accounting Ledger creation requests.
+- `unit.py`: Generates and parses Units of Measure (UOM) master creation requests.
 - `stock_item.py`: Generates and parses StockItem/Equipment creation requests.
 - `sales_voucher.py`: Builds Sales Voucher XML payloads for Rental Orders and Invoices.
 - `receipt_voucher.py`: Builds Receipt Voucher XML payloads for Customer Payments.
@@ -61,7 +63,8 @@ graph TD
 
 ### 3. Sync Pipelines & Core Domain Engines (`app/sync/` & `app/reconciliation/`)
 - `base.py`: Resilient generic `run_sync_pipeline()` managing chunked batch execution, locks, validation, and idempotency.
-- `dependencies.py`: Enforces execution hierarchy: `Customer` $\to$ `Equipment` $\to$ `Order` $\to$ `Invoice` $\to$ `Payment`.
+- `dependencies.py`: Enforces execution hierarchy: `Customer` $\to$ `Units` $\to$ `Equipment` $\to$ `Order` $\to$ `Invoice` $\to$ `Payment`.
+
 - `idempotency.py`: Generates multi-company scoped integration keys and conducts target system pre-checks.
 - `ownership.py`: Implements field ownership policy filtering for forward and reverse directions.
 - `conflicts.py`: `ConflictDetector` logging bidirectional modification conflicts for human resolution.

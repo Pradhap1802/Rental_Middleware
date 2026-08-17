@@ -13,7 +13,8 @@ def build_check_ledger_exists_xml(ledger_name: str) -> str:
 
 def build_customer_ledger_xml(data: Dict[str, Any], action: str = "Create", company_name: Optional[str] = None) -> str:
     """Builds full Tally LEDGER XML for Customer / Supplier masters."""
-    name = (data.get("name") or data.get("business_name") or f"Customer-{data.get('id')}").strip()
+    name = (data.get("tally_name") or data.get("name") or data.get("business_name") or f"Customer-{data.get('id')}").strip()
+
     
     # Determine Parent Group (Sundry Creditors vs Sundry Debtors)
     is_supplier = data.get("is_supplier")
@@ -33,39 +34,50 @@ def build_customer_ledger_xml(data: Dict[str, Any], action: str = "Create", comp
     all_mobiles = [m for m in [mobile, alt_mobile1, alt_mobile2] if m]
     phone_str = ", ".join(all_mobiles) if all_mobiles else ""
     primary_mobile = mobile or (all_mobiles[0] if all_mobiles else "")
-
+    contact_person = (data.get("contact_person") or data.get("first_name") or name).strip()
     email = (data.get("email") or "").strip()
 
     # Address resolution
     addr1, addr2, landmark, city, state, country, pincode = "", "", "", "", "", "", ""
-    addresses = data.get("address") or data.get("addresses")
+    addresses = data.get("address") or data.get("addresses") or data.get("customer_addresses")
     default_addr = None
     if isinstance(addresses, list) and len(addresses) > 0:
         default_addr = next((a for a in addresses if a.get("is_default") or a.get("is_billing")), addresses[0])
     elif isinstance(addresses, dict):
         default_addr = addresses
+    elif data.get("shipping_address") and isinstance(data.get("shipping_address"), dict):
+        default_addr = data.get("shipping_address")
 
     if default_addr and isinstance(default_addr, dict):
-        addr1 = (default_addr.get("address1") or "").strip()
-        addr2 = (default_addr.get("address2") or "").strip()
+        addr1 = (default_addr.get("address1") or default_addr.get("address_line1") or default_addr.get("street") or default_addr.get("building") or "").strip()
+        addr2 = (default_addr.get("address2") or default_addr.get("address_line2") or default_addr.get("area") or default_addr.get("locality") or "").strip()
         landmark = (default_addr.get("landmark") or "").strip()
-        city = (default_addr.get("city") or "").strip()
-        state = normalize_state_name(default_addr.get("state") or data.get("state") or "")
-        country = (default_addr.get("country") or data.get("country") or "").strip()
-        pincode = (default_addr.get("zipcode") or default_addr.get("pincode") or data.get("pincode") or "").strip()
+        city = (default_addr.get("city") or default_addr.get("town") or default_addr.get("district") or "").strip()
+        state = normalize_state_name(default_addr.get("state") or default_addr.get("state_name") or data.get("state") or data.get("state_name") or "Tamil Nadu")
+        country = (default_addr.get("country") or default_addr.get("country_name") or data.get("country") or "India").strip()
+        pincode = (default_addr.get("zipcode") or default_addr.get("pincode") or default_addr.get("postal_code") or data.get("pincode") or data.get("zipcode") or "").strip()
     else:
-        state = normalize_state_name(data.get("state") or "")
-        country = (data.get("country") or "").strip()
-        pincode = (data.get("zipcode") or data.get("pincode") or "").strip()
+        addr1 = (data.get("address1") or data.get("address_line1") or data.get("street") or data.get("address") or "").strip()
+        city = (data.get("city") or data.get("district") or "").strip()
+        state = normalize_state_name(data.get("state") or data.get("state_name") or "Tamil Nadu")
+        country = (data.get("country") or "India").strip()
+        pincode = (data.get("zipcode") or data.get("pincode") or data.get("postal_code") or "").strip()
 
-    addr_lines = [line for line in [addr1, addr2, landmark, city] if line]
+    addr_lines = []
+    for item in [addr1, addr2, landmark, city]:
+        item_clean = item.strip()
+        if item_clean and item_clean.lower() not in [x.lower() for x in addr_lines]:
+            addr_lines.append(item_clean)
     if not addr_lines and default_addr and isinstance(default_addr, dict) and default_addr.get("full_address"):
-        addr_lines = [default_addr.get("full_address").strip()]
+        parts = [p.strip() for p in str(default_addr["full_address"]).split(",") if p.strip()]
+        for p in parts:
+            if p.lower() not in [x.lower() for x in addr_lines]:
+                addr_lines.append(p)
 
     addr_nodes = "\n".join([f"              <ADDRESS>{escape_xml(line)}</ADDRESS>" for line in addr_lines]) if addr_lines else ""
 
     # GST Details
-    gst = (data.get("customer_gst_number") or data.get("gst_number") or "").strip().upper()
+    gst = (data.get("customer_gst_number") or data.get("gst_number") or data.get("gstin") or "").strip().upper()
     gst_type = "Regular" if gst else "Unregistered"
 
     pan = ""
@@ -133,6 +145,7 @@ def build_customer_ledger_xml(data: Dict[str, Any], action: str = "Create", comp
             <MAILINGNAME>{escape_xml(mailing_name)}</MAILINGNAME>
             <LEDGERPHONE>{escape_xml(phone_str or primary_mobile)}</LEDGERPHONE>
             <LEDGERMOBILE>{escape_xml(primary_mobile)}</LEDGERMOBILE>
+            <LEDGERCONTACT>{escape_xml(contact_person)}</LEDGERCONTACT>
             <PHONE>{escape_xml(primary_mobile)}</PHONE>
             <MOBILE>{escape_xml(primary_mobile)}</MOBILE>
             <EMAIL>{escape_xml(email)}</EMAIL>

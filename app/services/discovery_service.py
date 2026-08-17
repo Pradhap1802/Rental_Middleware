@@ -48,9 +48,25 @@ class DiscoveryService:
         for path in COMMON_RENTASST_PATHS:
             if os.path.exists(path):
                 env_vars = cls.parse_env_file(path)
-                app_url = env_vars.get("APP_URL") or env_vars.get("RENTASST_URL")
-                api_key = env_vars.get("RENTASST_API_KEY") or env_vars.get("API_KEY") or env_vars.get("SANCTUM_TOKEN")
-                tenant_code = env_vars.get("BUSINESS_CODE") or env_vars.get("RENTASST_TENANT_ID") or env_vars.get("TENANT_ID")
+                app_url = env_vars.get("APP_URL") or env_vars.get("RENTASST_URL") or env_vars.get("API_URL")
+                api_key = (
+                    env_vars.get("RENTASST_API_KEY")
+                    or env_vars.get("API_KEY")
+                    or env_vars.get("TEST_AUTH_KEY")
+                    or env_vars.get("TESTAUTHKEY")
+                    or env_vars.get("AUTH_KEY")
+                    or env_vars.get("SANCTUM_TOKEN")
+                    or env_vars.get("API_TOKEN")
+                    or env_vars.get("BEARER_TOKEN")
+                    or env_vars.get("ACCESS_TOKEN")
+                )
+                tenant_code = (
+                    env_vars.get("BUSINESS_CODE")
+                    or env_vars.get("RENTASST_TENANT_ID")
+                    or env_vars.get("TENANT_ID")
+                    or env_vars.get("BUSINESSCODE")
+                    or env_vars.get("TENANT_CODE")
+                )
                 
                 if app_url:
                     if not app_url.endswith("/api"):
@@ -63,6 +79,7 @@ class DiscoveryService:
                     discovered_tenant = tenant_code
                 log_event("Discovery", f"Auto-discovered RentAsst config at {path} (Tenant: {discovered_tenant})")
                 break
+
 
         return AppConfig(
             rentasst_url=discovered_url,

@@ -26,11 +26,63 @@ def escape_xml(text: Any) -> str:
     return html.escape(str(text), quote=True)
 
 
+INDIAN_STATES = {
+    "tn": "Tamil Nadu",
+    "tamil nadu": "Tamil Nadu",
+    "tamilnadu": "Tamil Nadu",
+    "ka": "Karnataka",
+    "karnataka": "Karnataka",
+    "kl": "Kerala",
+    "kerala": "Kerala",
+    "ap": "Andhra Pradesh",
+    "andhra pradesh": "Andhra Pradesh",
+    "ts": "Telangana",
+    "tg": "Telangana",
+    "telangana": "Telangana",
+    "mh": "Maharashtra",
+    "maharashtra": "Maharashtra",
+    "dl": "Delhi",
+    "delhi": "Delhi",
+    "new delhi": "Delhi",
+    "gj": "Gujarat",
+    "gujarat": "Gujarat",
+    "rj": "Rajasthan",
+    "rajasthan": "Rajasthan",
+    "up": "Uttar Pradesh",
+    "uttar pradesh": "Uttar Pradesh",
+    "wb": "West Bengal",
+    "west bengal": "West Bengal",
+    "py": "Puducherry",
+    "pondicherry": "Puducherry",
+    "puducherry": "Puducherry",
+    "hr": "Haryana",
+    "haryana": "Haryana",
+    "pb": "Punjab",
+    "punjab": "Punjab",
+    "mp": "Madhya Pradesh",
+    "madhya pradesh": "Madhya Pradesh",
+    "or": "Odisha",
+    "odisha": "Odisha",
+    "orissa": "Odisha",
+    "br": "Bihar",
+    "bihar": "Bihar",
+    "ga": "Goa",
+    "goa": "Goa",
+    "as": "Assam",
+    "assam": "Assam",
+    "ch": "Chandigarh",
+    "chandigarh": "Chandigarh",
+}
+
+
 def normalize_state_name(state_raw: str) -> str:
-    """Extracts state/province name directly from RentAsst database record."""
+    """Normalizes state/province name into exact Tally Prime recognized state spelling."""
     if not state_raw:
-        return ""
+        return "Tamil Nadu"
     clean = str(state_raw).strip()
+    lookup = clean.lower()
+    if lookup in INDIAN_STATES:
+        return INDIAN_STATES[lookup]
     return clean.title() if clean.islower() else clean
 
 

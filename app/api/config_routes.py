@@ -45,6 +45,19 @@ def auth_status(svc: ConfigService = Depends(get_config_service)):
     """Checks whether the middleware is authenticated with a valid RentAsst Bearer Token."""
     cfg = svc.get_config()
     is_authenticated = bool(cfg.rentasst_api_key and cfg.rentasst_api_key.strip())
+    if is_authenticated:
+        from ..clients.rentasst_client import RentAsstClient
+        client = RentAsstClient(cfg)
+        try:
+            if not client.check_token_validity():
+                is_authenticated = False
+                cfg.rentasst_api_key = ""
+                svc.save_config(cfg)
+        except Exception:
+            pass
+        finally:
+            client.close()
+
     return {
         "status": "success",
         "authenticated": is_authenticated,

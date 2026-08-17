@@ -85,4 +85,30 @@ class DependencyResolver:
                     reason = f"Missing Customer dependency mapping (Customer ID: '{cust_str}') for Rental Order sync"
                     return False, reason, "customer", cust_str
 
+        # 4. Equipment Dependency Check (Requires Asset Unit mapping if custom unit specified)
+        elif ent in ("equipment", "product", "products", "asset", "assets"):
+            unit_name = ""
+            unit_id = ""
+            if isinstance(data.get("asset_unit"), dict):
+                unit_name = (data["asset_unit"].get("name") or "").strip()
+                unit_id = str(data["asset_unit"].get("id") or "").strip()
+            elif data.get("asset_unit_name"):
+                unit_name = str(data.get("asset_unit_name")).split("(")[0].strip()
+            elif data.get("unit"):
+                unit_name = str(data.get("unit")).strip()
+
+            if unit_name and unit_name.lower() not in ("nos", "numbers", "pcs", "piece", "pieces", "units", "unit", "primary", ""):
+                has_unit = (
+                    (unit_id and store.find_mapping("units", unit_id, source_company_id=source_company_id))
+                    or store.find_mapping("units", unit_name, source_company_id=source_company_id)
+                    or store.get_rentasst_id("units", unit_name)
+                    or store.get_rentasst_id("unit", unit_name)
+                    or (unit_id and store.get_rentasst_id("units", unit_id))
+                )
+                if not has_unit:
+                    reason = f"Missing Asset Unit dependency mapping (Unit: '{unit_name}') for Equipment sync"
+                    return False, reason, "units", unit_name
+
+
         return True, None, None, None
+
