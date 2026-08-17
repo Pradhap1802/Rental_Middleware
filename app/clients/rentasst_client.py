@@ -35,7 +35,7 @@ class RentAsstClient:
             self.headers["TenantId"] = cfg.rentasst_tenant_id
             self.headers["tenant_id"] = cfg.rentasst_tenant_id
 
-    def _request_with_fallback(self, endpoints: List[str], params: Optional[Dict[str, Any]] = None) -> Any:
+    def _request_with_fallback(self, endpoints: List[str], params: Optional[Dict[str, Any]] = None, timeout: int = 5) -> Any:
         last_error = None
         req_params = dict(params or {})
         if self.cfg.rentasst_tenant_id:
@@ -46,8 +46,7 @@ class RentAsstClient:
         for endpoint in endpoints:
             url = f"{self.base_url}/{endpoint.lstrip('/')}"
             try:
-                r = self.session.get(url, headers=self.headers, params=req_params, timeout=30, verify=self.cfg.verify_ssl)
-
+                r = self.session.get(url, headers=self.headers, params=req_params, timeout=timeout, verify=self.cfg.verify_ssl)
                 if r.status_code in (401, 403):
                     last_error = NonRetryableException(f"RentAsst API {r.status_code} Unauthorized at {url}. Check your API Key/Token.")
                     continue
@@ -63,10 +62,11 @@ class RentAsstClient:
 
                 data = r.json()
                 return data.get("data", data) if isinstance(data, dict) else data
-            except requests.exceptions.JSONDecodeError:
-                # Response is not valid JSON (e.g. SPA fallback HTML), try next endpoint
+            except (requests.exceptions.JSONDecodeError, requests.exceptions.ConnectionError, requests.exceptions.Timeout):
                 continue
             except requests.exceptions.HTTPError as e:
+                if r.status_code in (404, 405):
+                    continue
                 err_text = (r.text or "")[:200].replace("\n", " ").strip()
                 last_error = RetryableException(
                     f"RentAsst API at {url} HTTP {r.status_code} Error: {err_text}"
@@ -86,7 +86,7 @@ class RentAsstClient:
                     self.headers["Authorization"] = f"Bearer {auto_cfg.rentasst_api_key}"
                     for endpoint in endpoints:
                         url = f"{self.base_url}/{endpoint.lstrip('/')}"
-                        r = self.session.get(url, headers=self.headers, params=params or {}, timeout=30, verify=self.cfg.verify_ssl)
+                        r = self.session.get(url, headers=self.headers, params=req_params, timeout=timeout, verify=self.cfg.verify_ssl)
                         if r.status_code in (200, 201):
                             text_snippet = (r.text or "").strip()
                             if not text_snippet.startswith(("<html", "<!doctype", "<!DOCTYPE")):
@@ -98,6 +98,7 @@ class RentAsstClient:
         if last_error:
             raise last_error
         raise RetryableException(f"RentAsst API endpoints {endpoints} not found (404)")
+
 
 
 
@@ -502,79 +503,44 @@ class RentAsstClient:
         if updated_after:
             params["updated_after"] = updated_after
 
-        # 1. Try POST DataTable API first (e.g. POST /api/customer-list)
-        post_endpoints = ["customer-list", "customers-list", "customer/list", "customers"]
-        raw_customers = None
-        for ep in post_endpoints:
-            try:
-                url = f"{self.base_url}/{ep.lstrip('/')}"
-                body: Dict[str, Any] = {"start": 0, "length": 1000}
-                r = self.session.post(url, json=body, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
-                if r.status_code in (200, 204):
-                    data = r.json()
-                    items = data.get("data", data) if isinstance(data, dict) else data
-                    if isinstance(items, list) and len(items) > 0:
-                        raw_customers = items
-                        break
-            except Exception:
-                pass
+        # 1. Try standard GET endpoints first
+        try:
+            raw_customers = self._request_with_fallback(["customer", "customers", "customer-list"], params, timeout=5)
+        except Exception:
+            raw_customers = None
 
-        # 2. Fallback to GET endpoints
-        if not raw_customers:
-            get_endpoints = [
-                "customer",
-                "customers",
-                "customer-list",
-                "admin/customer",
-                "admin/customers",
-                "user/customers",
-                "ecommerce/customers",
-            ]
-            raw_customers = self._request_with_fallback(get_endpoints, params)
+        # 2. Try POST DataTable API if GET returned nothing
+        if not raw_customers or not isinstance(raw_customers, list) or len(raw_customers) == 0:
+            for ep in ["customer-list", "customers", "customer"]:
+                try:
+                    url = f"{self.base_url}/{ep.lstrip('/')}"
+                    body: Dict[str, Any] = {"start": 0, "length": 1000}
+                    if self.cfg.rentasst_tenant_id:
+                        body["business_code"] = self.cfg.rentasst_tenant_id
+                    r = self.session.post(url, json=body, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
+                    if r.status_code in (200, 204):
+                        content_type = r.headers.get("content-type", "").lower()
+                        if "text/html" not in content_type and not (r.text or "").strip().startswith(("<html", "<!doctype")):
+                            data = r.json()
+                            items = data.get("data", data) if isinstance(data, dict) else data
+                            if isinstance(items, list) and len(items) > 0:
+                                raw_customers = items
+                                break
+                except Exception:
+                    pass
 
         if isinstance(raw_customers, list):
-            enriched = []
-            for cust in raw_customers:
-                if isinstance(cust, dict) and "id" in cust:
-                    if "address" not in cust or "bank_accounts" not in cust:
-                        try:
-                            detail = self._request_with_fallback([f"customer/{cust['id']}"])
-                            if isinstance(detail, dict) and "id" in detail:
-                                for k, v in detail.items():
-                                    if v is not None or k not in cust:
-                                        cust[k] = v
-                        except Exception:
-                            pass
-                    if "bank_accounts" not in cust and "bankAccounts" not in cust:
-                        try:
-                            banks = self._request_with_fallback([f"customer/{cust['id']}/bank-accounts", f"customer/{cust['id']}/bank-account"])
-                            if isinstance(banks, list):
-                                cust["bank_accounts"] = banks
-                            elif isinstance(banks, dict) and "data" in banks and isinstance(banks["data"], list):
-                                cust["bank_accounts"] = banks["data"]
-                        except Exception:
-                            pass
-                enriched.append(cust)
-            return self._deduplicate_customers(enriched)
-        return self._deduplicate_customers(raw_customers) if isinstance(raw_customers, list) else []
-
+            return self._deduplicate_customers(raw_customers)
+        return []
 
     def fetch_asset_units(self) -> List[Dict[str, Any]]:
         """
         Fetches asset units (Units of Measure) from RentAsst REST API.
         Falls back to extracting unique units from asset catalog if dedicated endpoint is unavailable.
         """
-        unit_endpoints = [
-            "asset-units",
-            "asset-unit",
-            "units",
-            "unit",
-            "asset/units",
-            "admin/asset-units",
-            "ecommerce/asset-units",
-        ]
+        unit_endpoints = ["asset-units", "asset-unit", "units", "unit"]
         try:
-            units = self._request_with_fallback(unit_endpoints)
+            units = self._request_with_fallback(unit_endpoints, timeout=5)
             if isinstance(units, list) and len(units) > 0:
                 standardized = []
                 for u in units:
@@ -634,72 +600,53 @@ class RentAsstClient:
         except Exception:
             pass
 
-        # Default fallback unit
         return [{"id": "Nos", "name": "Nos", "symbol": "Nos", "formal_name": "Numbers", "decimal_places": 0}]
 
     def fetch_equipment(self) -> List[Dict[str, Any]]:
-        # 1. Try POST /api/asset-list (RentAsst primary DataTable API)
-        post_endpoints = ["asset-list", "assets-list", "equipment-list", "asset/list", "assets"]
-        for ep in post_endpoints:
-            try:
-                url = f"{self.base_url}/{ep.lstrip('/')}"
-                body: Dict[str, Any] = {"start": 0, "length": 100}
-                r = self.session.post(url, json=body, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
-                if r.status_code in (200, 204):
-                    data = r.json()
-                    items = data.get("data", data)
-                    if isinstance(items, list) and len(items) > 0:
-                        return self._enrich_equipment(items)
-            except Exception:
-                pass
+        # 1. Try GET equipment / assets first
+        try:
+            raw_assets = self._request_with_fallback(["equipment", "asset", "assets", "asset-list"], {"per_page": 1000, "limit": 1000}, timeout=5)
+        except Exception:
+            raw_assets = None
 
-        # 2. Try GET with fallback across all standard endpoint variants
-        equipment_endpoints = [
-            "equipment",
-            "asset",
-            "assets",
-            "asset-list",
-            "products",
-            "product",
-            "admin/asset",
-            "admin/assets",
-            "ecommerce/asset",
-        ]
-        assets = self._request_with_fallback(equipment_endpoints)
-        if isinstance(assets, list):
-            return self._enrich_equipment(assets)
-        return assets
+        # 2. Try POST DataTable API if GET returned nothing
+        if not raw_assets or not isinstance(raw_assets, list) or len(raw_assets) == 0:
+            for ep in ["asset-list", "assets", "equipment"]:
+                try:
+                    url = f"{self.base_url}/{ep.lstrip('/')}"
+                    body: Dict[str, Any] = {"start": 0, "length": 1000}
+                    if self.cfg.rentasst_tenant_id:
+                        body["business_code"] = self.cfg.rentasst_tenant_id
+                    r = self.session.post(url, json=body, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
+                    if r.status_code in (200, 204):
+                        content_type = r.headers.get("content-type", "").lower()
+                        if "text/html" not in content_type and not (r.text or "").strip().startswith(("<html", "<!doctype")):
+                            data = r.json()
+                            items = data.get("data", data) if isinstance(data, dict) else data
+                            if isinstance(items, list) and len(items) > 0:
+                                raw_assets = items
+                                break
+                except Exception:
+                    pass
 
-    def _enrich_equipment(self, assets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        enriched = []
-        for item in assets:
-            if isinstance(item, dict) and "id" in item:
-                if not item.get("hsn_code"):
-                    try:
-                        detail = self._request_with_fallback([f"asset/{item['id']}", f"equipment/{item['id']}", f"assets/{item['id']}"])
-                        if isinstance(detail, dict) and "id" in detail:
-                            for k, v in detail.items():
-                                if v is not None or k not in item:
-                                    item[k] = v
-                    except Exception:
-                        pass
-            enriched.append(item)
-        return enriched
-
+        if isinstance(raw_assets, list):
+            return raw_assets
+        return []
 
     def fetch_rental_orders(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
         # 1. Try POST DataTable API endpoints first
-        post_endpoints = ["rent-list", "rents-list", "rental-orders", "rents"]
-        for ep in post_endpoints:
+        for ep in ["rent-list", "rents", "rental-orders"]:
             try:
                 url = f"{self.base_url}/{ep.lstrip('/')}"
                 body: Dict[str, Any] = {"start": 0, "length": 1000}
                 if status:
                     body["status"] = [status]
-                r = self.session.post(url, json=body, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
+                if self.cfg.rentasst_tenant_id:
+                    body["business_code"] = self.cfg.rentasst_tenant_id
+                r = self.session.post(url, json=body, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
                 if r.status_code in (200, 204):
                     content_type = r.headers.get("content-type", "").lower()
-                    if "text/html" not in content_type and not (r.text or "").strip().startswith(("<html", "<!doctype", "<!DOCTYPE")):
+                    if "text/html" not in content_type and not (r.text or "").strip().startswith(("<html", "<!doctype")):
                         data = r.json()
                         items = data.get("data", data) if isinstance(data, dict) else data
                         if isinstance(items, list) and len(items) > 0:
@@ -710,45 +657,57 @@ class RentAsstClient:
         params = {"per_page": 1000, "limit": 1000, "length": 1000}
         if status:
             params["status"] = status
-        return self._request_with_fallback(["rents", "rental-orders", "rent-list", "rent"], params)
+        try:
+            return self._request_with_fallback(["rents", "rental-orders", "rent-list"], params, timeout=5)
+        except Exception:
+            return []
 
     def fetch_invoices(self) -> List[Dict[str, Any]]:
         # 1. Try POST DataTable API endpoints first
-        post_endpoints = ["invoice-list", "invoices-list", "invoices/list", "invoices"]
-        for ep in post_endpoints:
+        for ep in ["invoice-list", "invoices"]:
             try:
                 url = f"{self.base_url}/{ep.lstrip('/')}"
                 body: Dict[str, Any] = {"start": 0, "length": 1000}
-                r = self.session.post(url, json=body, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
+                if self.cfg.rentasst_tenant_id:
+                    body["business_code"] = self.cfg.rentasst_tenant_id
+                r = self.session.post(url, json=body, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
                 if r.status_code in (200, 204):
                     content_type = r.headers.get("content-type", "").lower()
-                    if "text/html" not in content_type and not (r.text or "").strip().startswith(("<html", "<!doctype", "<!DOCTYPE")):
+                    if "text/html" not in content_type and not (r.text or "").strip().startswith(("<html", "<!doctype")):
                         data = r.json()
                         items = data.get("data", data) if isinstance(data, dict) else data
                         if isinstance(items, list) and len(items) > 0:
                             return items
             except Exception:
                 pass
-        return self._request_with_fallback(["invoices", "invoice-list", "invoice"], {"per_page": 1000, "limit": 1000})
+        try:
+            return self._request_with_fallback(["invoices", "invoice-list", "invoice"], {"per_page": 1000, "limit": 1000}, timeout=5)
+        except Exception:
+            return []
 
     def fetch_payments(self) -> List[Dict[str, Any]]:
         # 1. Try POST DataTable API endpoints first
-        post_endpoints = ["payment-list", "payments-list", "payments/list", "payments"]
-        for ep in post_endpoints:
+        for ep in ["payment-list", "payments"]:
             try:
                 url = f"{self.base_url}/{ep.lstrip('/')}"
                 body: Dict[str, Any] = {"start": 0, "length": 1000}
-                r = self.session.post(url, json=body, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
+                if self.cfg.rentasst_tenant_id:
+                    body["business_code"] = self.cfg.rentasst_tenant_id
+                r = self.session.post(url, json=body, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
                 if r.status_code in (200, 204):
                     content_type = r.headers.get("content-type", "").lower()
-                    if "text/html" not in content_type and not (r.text or "").strip().startswith(("<html", "<!doctype", "<!DOCTYPE")):
+                    if "text/html" not in content_type and not (r.text or "").strip().startswith(("<html", "<!doctype")):
                         data = r.json()
                         items = data.get("data", data) if isinstance(data, dict) else data
                         if isinstance(items, list) and len(items) > 0:
                             return items
             except Exception:
                 pass
-        return self._request_with_fallback(["payments", "payment-list", "payment"], {"per_page": 1000, "limit": 1000})
+        try:
+            return self._request_with_fallback(["payments", "payment-list", "payment"], {"per_page": 1000, "limit": 1000}, timeout=5)
+        except Exception:
+            return []
+
 
 
     def fetch_businesses(self) -> List[Dict[str, Any]]:
@@ -766,7 +725,8 @@ class RentAsstClient:
         for endpoint in endpoints:
             url = f"{self.base_url}/{endpoint.lstrip('/')}"
             try:
-                r = self.session.post(url, json=req_payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
+                r = self.session.post(url, json=req_payload, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
+
 
                 if r.status_code in (404, 405):
                     continue
