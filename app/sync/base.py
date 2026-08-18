@@ -201,7 +201,6 @@ def run_sync_pipeline(
                             message=f"Failed to sync {entity_type} {item_id}: {error_msg}",
                             metadata={"error": error_msg},
                         )
-                        log_event("Synchronization", f"Failed to sync {entity_type} {item_id}: {error_msg}")
                         store.add_history(entity_type, item_id, "failed", details=error_msg)
                         store.add_dead_letter(entity_type, item_id, error_msg, json.dumps(item))
                         # Resilient batch processing: continue loop without aborting batch

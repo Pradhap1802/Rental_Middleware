@@ -15,10 +15,19 @@ class TestService:
         cfg = self.config_store.require()
         client = RentAsstClient(cfg)
         try:
-            r = requests.get(f"{client.base_url}/health", headers=client.headers, timeout=5, verify=cfg.verify_ssl)
-            if r.status_code in (200, 204):
-                return {"status": "success", "message": "RentAsst API connection successful"}
-            return {"status": "error", "message": f"RentAsst API at {client.base_url} returned status code {r.status_code}"}
+            endpoints = ["admin/check-required-version", "categories", "health"]
+            last_err = None
+            for ep in endpoints:
+                try:
+                    r = client.session.get(f"{client.base_url}/{ep}", headers=client.headers, timeout=12, verify=cfg.verify_ssl)
+                    if r.status_code in (200, 204, 401, 403):
+                        return {"status": "success", "message": "RentAsst API connection successful"}
+                except Exception as ex:
+                    last_err = ex
+                    continue
+            if last_err:
+                raise last_err
+            return {"status": "error", "message": f"Could not reach RentAsst API at {client.base_url}"}
         except Exception as e:
             return {"status": "error", "message": f"Could not connect to RentAsst API at {cfg.rentasst_url}. Ensure RentalApi server is running. (Error: {str(e)})"}
         finally:

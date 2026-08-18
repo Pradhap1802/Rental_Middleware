@@ -25,8 +25,8 @@ class SyncScheduler:
             if not cfg or not cfg.auto_sync_enabled:
                 return
 
-            # Enqueue entity sync jobs into SQLite Queue Engine
-            entities = ["customers", "equipment", "rental_orders", "invoices", "payments"]
+            # Enqueue entity sync jobs into SQLite Queue Engine (Bidirectional Sync)
+            entities = ["customers", "equipment", "rental_orders", "invoices", "payments", "tally_to_rentasst"]
             enqueued_count = 0
             for entity in entities:
                 job_id = self.queue_store.enqueue(entity)
@@ -89,7 +89,7 @@ class SyncScheduler:
 
     def trigger_manual_sync(self, entity_type: Optional[str] = None) -> int:
         """Immediately enqueues sync jobs for requested entity or all entities."""
-        entities = [entity_type] if entity_type else ["customers", "equipment", "rental_orders", "invoices", "payments"]
+        entities = [entity_type] if entity_type else ["customers", "equipment", "rental_orders", "invoices", "payments", "tally_to_rentasst"]
         enqueued = 0
         for entity in entities:
             res = self.queue_store.enqueue(entity, priority=True)

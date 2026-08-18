@@ -116,7 +116,7 @@ def build_stock_item_xml(
         unit_xml = f"""          <UNIT NAME="{escape_xml(unit)}" ACTION="Create">\n            <NAME>{escape_xml(unit)}</NAME>{symbol_tag}\n            <ISSIMPLEUNIT>YES</ISSIMPLEUNIT>\n          </UNIT>\n"""
 
     group_xml = ""
-    if group and group != "Primary" and not group_exists:
+    if group and not group_exists:
         group_xml = f"""          <STOCKGROUP NAME="{escape_xml(group)}" ACTION="Create">\n            <NAME>{escape_xml(group)}</NAME>\n          </STOCKGROUP>\n"""
 
     category_master_xml = ""

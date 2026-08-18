@@ -381,13 +381,21 @@
     }
 
     async function logoutMiddleware() {
+      showToast('🔄 Logging out...', 'info');
       try {
         await fetch('/api/auth/logout', { method: 'POST' });
-        resetToStepMobile();
-        checkAuthStatus();
       } catch (e) {
-        console.error('Logout error:', e);
+        console.error('Logout API error:', e);
       }
+      // Directly swap screens — don't rely on checkAuthStatus which can silently fail
+      document.getElementById('dashboard_screen').style.display = 'none';
+      document.getElementById('login_screen').style.display = 'flex';
+      // Reset login form back to step 1
+      resetToStepMobile();
+      document.getElementById('login_mobile').value = '';
+      document.getElementById('login_otp').value = '';
+      document.getElementById('login_request_id').value = '';
+      showStatusMsg('👋 Logged out successfully. Please re-authenticate.', 'info');
     }
 
     async function loadStatus() {
@@ -503,6 +511,7 @@
       if (!toast) return;
       toast.innerHTML = msg;
       toast.style.display = 'block';
+      toast.style.opacity = '1';
       if (type === 'success') {
         toast.style.background = '#064e3b';
         toast.style.color = '#34d399';
@@ -511,10 +520,15 @@
         toast.style.background = '#7f1d1d';
         toast.style.color = '#fca5a5';
         toast.style.border = '1px solid #dc2626';
+      } else if (type === 'warning') {
+        toast.style.background = '#78350f';
+        toast.style.color = '#fcd34d';
+        toast.style.border = '1px solid #d97706';
       } else {
-        toast.style.background = '#1e293b';
-        toast.style.color = '#f8fafc';
-        toast.style.border = '1px solid #334155';
+        // info / default
+        toast.style.background = '#1e3a5f';
+        toast.style.color = '#93c5fd';
+        toast.style.border = '1px solid #3b82f6';
       }
       clearTimeout(toastTimer);
       toastTimer = setTimeout(() => {
@@ -562,11 +576,23 @@
       loadStatus();
     }
 
+    const entityLabels = {
+      customers: '👥 Customers', equipment: '🚜 Assets', rental_orders: '📋 Rental Orders',
+      invoices: '🧾 Invoices', payments: '💳 Payments', tally_to_rentasst: '🔄 Tally → RentAsst'
+    };
     async function triggerSync(entity) {
+      const label = entityLabels[entity] || entity;
+      showToast(`⏳ ${label} sync queued…`, 'info');
       try {
-        await fetch(`/api/sync/${entity}`, { method: 'POST' });
+        const res = await fetch(`/api/sync/${entity}`, { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          showToast(`✅ ${label} sync job enqueued successfully.`, 'success');
+        } else {
+          showToast(`❌ ${label} sync failed: ${data.message || 'Unknown error'}`, 'error');
+        }
       } catch (e) {
-        console.error(`Sync error for ${entity}:`, e);
+        showToast(`❌ ${label} sync error: ${e.message}`, 'error');
       }
       loadStatus();
     }
