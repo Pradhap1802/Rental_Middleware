@@ -12,7 +12,7 @@ reconciliation_router = APIRouter(prefix="/api/reconciliation", tags=["reconcili
 def get_engine(request: Request) -> ReconciliationEngine:
     store = getattr(request.app.state, "mapping_store", None)
     if not store:
-        db_path = getattr(request.app.state, "db_path", "data/state.db")
+        db_path = getattr(request.app.state, "db_path", ".data/state.db")
         store = MappingStore(db_path)
     return ReconciliationEngine(store)
 
