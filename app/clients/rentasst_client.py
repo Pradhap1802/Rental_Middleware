@@ -23,6 +23,15 @@ class RentAsstClient:
     _ping_cache: Dict[str, Dict[str, Any]] = {}
     _ping_cache_lock = threading.Lock()
 
+    # Single-flight lock per base_url: without this, concurrent/overlapping ping()
+    # calls (e.g. overlapping dashboard polls when the backend is slow to respond)
+    # can all observe an empty/expired cache at once and each launch their own
+    # 5-endpoint probe, multiplying load on an already-struggling backend. Only
+    # one probe should ever be in flight per base_url at a time; everyone else
+    # waits for it and reuses its result.
+    _ping_locks: Dict[str, threading.Lock] = {}
+    _ping_locks_creation_lock = threading.Lock()
+
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
         self.base_url = cfg.rentasst_url.rstrip("/")
@@ -52,6 +61,16 @@ class RentAsstClient:
             self.headers["Business-Code"] = cfg.rentasst_tenant_id
             self.headers["TenantId"] = cfg.rentasst_tenant_id
             self.headers["tenant_id"] = cfg.rentasst_tenant_id
+
+    def _get_ping_lock(self) -> threading.Lock:
+        lock = self._ping_locks.get(self.base_url)
+        if lock is None:
+            with self._ping_locks_creation_lock:
+                lock = self._ping_locks.get(self.base_url)
+                if lock is None:
+                    lock = threading.Lock()
+                    self._ping_locks[self.base_url] = lock
+        return lock
 
     def _cache_get(self, cache_key: str) -> Optional[Dict[str, str]]:
         return self._endpoint_cache.get(f"{self.base_url}:{cache_key}")
@@ -196,29 +215,37 @@ class RentAsstClient:
         # so a short-lived cache avoids re-probing on every idempotency/status check -
         # callers construct a fresh client per call, so this is cached by base_url,
         # not on the instance (see _ping_cache class attribute).
-        now = time.time()
         cached = self._ping_cache.get(self.base_url)
-        if cached and (now - cached["time"]) < 15:
+        if cached and (time.time() - cached["time"]) < 15:
             return cached["ok"]
 
-        endpoints = ["health", "user/profile", "customer", "customers", ""]
-        base = self.base_url.rstrip("/")
-        urls = [f"{base}/{ep}".rstrip("/") for ep in endpoints]
-        result = self._first_success(self.session, urls, self.headers, timeout=8, verify=self.cfg.verify_ssl, ok_codes=(200, 201, 204, 401, 403))
+        # Single-flight: only one thread actually probes per base_url. Everyone
+        # else blocks briefly here and then reuses that probe's result instead of
+        # each launching their own redundant burst of requests (a cache-stampede
+        # that can overwhelm a slow backend faster than any single probe would).
+        with self._get_ping_lock():
+            cached = self._ping_cache.get(self.base_url)
+            if cached and (time.time() - cached["time"]) < 15:
+                return cached["ok"]
 
-        if result is not None:
-            ok = True
-        else:
-            try:
-                root_url = base.replace("/api", "")
-                r = self.session.get(root_url, timeout=8, verify=self.cfg.verify_ssl)
-                ok = r.status_code in (200, 204, 301, 302, 404)
-            except Exception:
-                ok = False
+            endpoints = ["health", "user/profile", "customer", "customers", ""]
+            base = self.base_url.rstrip("/")
+            urls = [f"{base}/{ep}".rstrip("/") for ep in endpoints]
+            result = self._first_success(self.session, urls, self.headers, timeout=8, verify=self.cfg.verify_ssl, ok_codes=(200, 201, 204, 401, 403))
 
-        with self._ping_cache_lock:
-            self._ping_cache[self.base_url] = {"ok": ok, "time": now}
-        return ok
+            if result is not None:
+                ok = True
+            else:
+                try:
+                    root_url = base.replace("/api", "")
+                    r = self.session.get(root_url, timeout=8, verify=self.cfg.verify_ssl)
+                    ok = r.status_code in (200, 204, 301, 302, 404)
+                except Exception:
+                    ok = False
+
+            with self._ping_cache_lock:
+                self._ping_cache[self.base_url] = {"ok": ok, "time": time.time()}
+            return ok
 
 
     def check_token_validity(self) -> bool:

@@ -258,6 +258,11 @@
   </div>
 
   <script>
+    // Tracks whether the RentAsst connection check has completed at least once:
+    // 'pending' (in-flight/not yet run), 'success', or 'error'. Config save is
+    // gated on this so it can't fire while the connection status is still unknown.
+    let rentasstConnectionState = 'pending';
+
     function setText(id, text) {
       const el = document.getElementById(id);
       if (el) el.innerText = text;
@@ -287,6 +292,7 @@
             setText('active_tenant_display', `Tenant: ${data.tenant_id || 'default'}`);
             loadConfig();
             loadStatus();
+            testConnection('rentasst', true);
           } else {
             document.getElementById('login_screen').style.display = 'flex';
             document.getElementById('dashboard_screen').style.display = 'none';
@@ -390,7 +396,14 @@
       }
     }
 
+    let statusRequestInFlight = false;
     async function loadStatus() {
+      // setInterval fires on a fixed clock regardless of whether the previous
+      // call finished - without this guard, a slow backend causes overlapping
+      // /api/status calls to pile up (each one instantiating its own RentAsst
+      // connection check), compounding load instead of just waiting it out.
+      if (statusRequestInFlight) return;
+      statusRequestInFlight = true;
       try {
         const res = await fetch('/api/status');
         if (!res.ok) return;
@@ -429,6 +442,8 @@
         setText('recon_conflicts', rm.unresolved_conflicts || 0);
       } catch(e) {
         console.error('Error loading status:', e);
+      } finally {
+        statusRequestInFlight = false;
       }
     }
 
@@ -523,6 +538,10 @@
     }
 
     async function saveConfig() {
+      if (rentasstConnectionState === 'pending') {
+        showToast('❌ RentAsst connection status has not been fetched yet. Please wait a moment and try again.', 'error');
+        return;
+      }
       const cfg = {
         rentasst_tenant_id: document.getElementById('rentasst_tenant_id').value,
         external_url: document.getElementById('external_url').value,
@@ -547,17 +566,23 @@
       loadStatus();
     }
 
-    async function testConnection(target) {
+    async function testConnection(target, silent = false) {
+      if (target === 'rentasst') rentasstConnectionState = 'pending';
       try {
         const res = await fetch(`/api/test/${target}`, { method: 'POST' });
         const data = await res.json();
-        if (res.ok && data.status === 'success') {
-          showToast(`✅ ${data.message || 'Connection successful'}`, 'success');
-        } else {
-          showToast(`❌ Connection Failed: ${data.message || 'Could not connect'}`, 'error');
+        const ok = res.ok && data.status === 'success';
+        if (target === 'rentasst') rentasstConnectionState = ok ? 'success' : 'error';
+        if (!silent) {
+          if (ok) {
+            showToast(`✅ ${data.message || 'Connection successful'}`, 'success');
+          } else {
+            showToast(`❌ Connection Failed: ${data.message || 'Could not connect'}`, 'error');
+          }
         }
       } catch (e) {
-        showToast(`❌ Test Error: ${e.message}`, 'error');
+        if (target === 'rentasst') rentasstConnectionState = 'error';
+        if (!silent) showToast(`❌ Test Error: ${e.message}`, 'error');
       }
       loadStatus();
     }
