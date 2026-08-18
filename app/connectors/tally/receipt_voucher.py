@@ -2,7 +2,7 @@ from typing import Dict, Any, Optional
 from .xml_builder import escape_xml, format_tally_date, build_import_envelope
 
 
-def build_receipt_voucher_xml(data: Dict[str, Any], company_name: Optional[str] = None) -> str:
+def build_receipt_voucher_xml(data: Dict[str, Any], action: str = "Create", company_name: Optional[str] = None) -> str:
     """Builds Tally VOUCHER XML for Receipt / Payment transactions."""
     raw_ref = str(data.get("reference_id") or data.get("number") or data.get("payment_number") or "").strip()
     ref = raw_ref if raw_ref else f"PAY-{data.get('id')}"
@@ -23,12 +23,13 @@ def build_receipt_voucher_xml(data: Dict[str, Any], company_name: Optional[str] 
             <NAME>{escape_xml(cash_bank_ledger)}</NAME>
             <PARENT>{escape_xml(parent_group)}</PARENT>
           </LEDGER>
-          <VOUCHER VTYPE="Receipt" ACTION="Create" REMOTEID="RENTAL-PAY-{data.get('id')}">
+          <VOUCHER VTYPE="Receipt" ACTION="{action}" REMOTEID="RENTAL-PAY-{data.get('id')}">
             <REMOTEID>RENTAL-PAY-{data.get('id')}</REMOTEID>
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
             <VOUCHERTYPENAME>Receipt</VOUCHERTYPENAME>
             <VOUCHERNUMBER>{ref}</VOUCHERNUMBER>
+            <NARRATION>RENTAL-PAY-{data.get('id')}</NARRATION>
             <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>
             <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>{escape_xml(cash_bank_ledger)}</LEDGERNAME>

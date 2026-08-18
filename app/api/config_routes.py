@@ -3,6 +3,8 @@ from fastapi import APIRouter, Depends, Request
 from ..models.domain import AppConfig
 from ..services.config_service import ConfigService
 from ..services.discovery_service import DiscoveryService
+from ..clients.rentasst_client import RentAsstClient
+from ..clients.external_client import ExternalClient
 
 
 router = APIRouter(prefix="/api", tags=["config"])
@@ -10,6 +12,19 @@ router = APIRouter(prefix="/api", tags=["config"])
 
 def get_config_service(request: Request) -> ConfigService:
     return ConfigService(request.app.state.data_dir)
+
+
+def _refresh_health_clients(request: Request, cfg: AppConfig) -> None:
+    """Rebuilds the RentAsst/Tally clients used by /health so connectivity checks
+    always reflect the most recently saved configuration instead of going stale."""
+    old_ra = getattr(request.app.state, "ra_client", None)
+    old_ext = getattr(request.app.state, "ext_client", None)
+    request.app.state.ra_client = RentAsstClient(cfg)
+    request.app.state.ext_client = ExternalClient(cfg)
+    if old_ra:
+        old_ra.close()
+    if old_ext:
+        old_ext.close()
 
 
 @router.get("/config")
@@ -21,6 +36,7 @@ def get_config(svc: ConfigService = Depends(get_config_service)):
 @router.post("/config")
 def save_config(cfg: AppConfig, request: Request, svc: ConfigService = Depends(get_config_service)):
     saved_cfg = svc.save_config(cfg)
+    _refresh_health_clients(request, saved_cfg)
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler:
         if saved_cfg.auto_sync_enabled:
@@ -34,6 +50,7 @@ def save_config(cfg: AppConfig, request: Request, svc: ConfigService = Depends(g
 def auto_detect_config(request: Request, svc: ConfigService = Depends(get_config_service)):
     auto_cfg = DiscoveryService.auto_discover_rentasst()
     saved_cfg = svc.save_config(auto_cfg)
+    _refresh_health_clients(request, saved_cfg)
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler and saved_cfg.auto_sync_enabled:
         scheduler.start(saved_cfg.sync_interval_minutes)
@@ -59,6 +76,7 @@ def auth_logout(request: Request, svc: ConfigService = Depends(get_config_servic
     cfg = svc.get_config()
     cfg.rentasst_api_key = ""
     saved_cfg = svc.save_config(cfg)
+    _refresh_health_clients(request, saved_cfg)
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler:
         scheduler.stop()
@@ -68,7 +86,6 @@ def auth_logout(request: Request, svc: ConfigService = Depends(get_config_servic
 @router.post("/rentasst/send-otp")
 def rentasst_send_otp(req: Dict[str, Any], svc: ConfigService = Depends(get_config_service)):
     """Sends OTP to user's mobile number via RentAsst API."""
-    from ..clients.rentasst_client import RentAsstClient
     mobile = req.get("mobile") or req.get("phone") or ""
     rentasst_url = req.get("url") or "http://localhost:8000/api"
     if not mobile:
@@ -89,7 +106,6 @@ def rentasst_send_otp(req: Dict[str, Any], svc: ConfigService = Depends(get_conf
 @router.post("/rentasst/verify-otp")
 def rentasst_verify_otp(req: Dict[str, Any], request: Request, svc: ConfigService = Depends(get_config_service)):
     """Verifies OTP code with RentAsst API, retrieves Sanctum Bearer Token, and updates config."""
-    from ..clients.rentasst_client import RentAsstClient
     mobile = req.get("mobile") or req.get("phone") or ""
     otp = req.get("otp") or ""
     request_id = req.get("request_id") or ""
@@ -113,6 +129,7 @@ def rentasst_verify_otp(req: Dict[str, Any], request: Request, svc: ConfigServic
         cfg.rentasst_api_key = token
         cfg.rentasst_tenant_id = tenant_id
         saved_cfg = svc.save_config(cfg)
+        _refresh_health_clients(request, saved_cfg)
 
         if db_mgr and hasattr(db_mgr, "save_bearer_token"):
             db_mgr.save_bearer_token(mobile, token, tenant_id)
@@ -138,7 +155,6 @@ def rentasst_verify_otp(req: Dict[str, Any], request: Request, svc: ConfigServic
 @router.post("/rentasst/login")
 def rentasst_login(req: Dict[str, Any], request: Request, svc: ConfigService = Depends(get_config_service)):
     """Fetches bearer token using only the login mail ID from the database or RentAsst API, and updates configuration."""
-    from ..clients.rentasst_client import RentAsstClient
     email = req.get("email") or req.get("mail_id") or req.get("login_email") or ""
     business_code = req.get("business_code") or req.get("tenant_id") or req.get("rentasst_tenant_id") or ""
     rentasst_url = req.get("url") or "http://localhost:8000/api"
@@ -168,6 +184,7 @@ def rentasst_login(req: Dict[str, Any], request: Request, svc: ConfigService = D
         cfg.rentasst_api_key = token
         cfg.rentasst_tenant_id = tenant_id
         saved_cfg = svc.save_config(cfg)
+        _refresh_health_clients(request, saved_cfg)
 
         if db_mgr and hasattr(db_mgr, "save_bearer_token"):
             db_mgr.save_bearer_token(email, token, tenant_id)
@@ -194,7 +211,6 @@ def rentasst_login(req: Dict[str, Any], request: Request, svc: ConfigService = D
 def get_rentasst_companies(svc: ConfigService = Depends(get_config_service)):
     """Fetches list of available RentAsst business companies based on configured URL and Token."""
     cfg = svc.get_config()
-    from ..clients.rentasst_client import RentAsstClient
     client = RentAsstClient(cfg)
     try:
         businesses = client.fetch_businesses()
@@ -209,7 +225,6 @@ def get_rentasst_companies(svc: ConfigService = Depends(get_config_service)):
 def get_tally_companies(svc: ConfigService = Depends(get_config_service)):
     """Queries Tally Prime XML server to return all currently open/loaded companies."""
     cfg = svc.get_config()
-    from ..clients.external_client import ExternalClient
     client = ExternalClient(cfg)
     try:
         companies = client.fetch_tally_companies()

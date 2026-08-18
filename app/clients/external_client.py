@@ -34,6 +34,10 @@ class ExternalClient:
         # Modular Tally Client Engine
         self.tally = TallyClient(cfg, session=self.session)
 
+    @property
+    def config(self) -> AppConfig:
+        return self.cfg
+
     def close(self) -> None:
         try:
             self.session.close()

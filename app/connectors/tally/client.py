@@ -36,11 +36,15 @@ class TallyClient:
         except Exception:
             return False
 
-    def send_xml(self, xml_string: str) -> str:
+    def send_xml(self, xml_string: str, expect_voucher: bool = False) -> str:
         """
         Posts XML payload to Tally Prime server and enforces strict accounting success criteria.
-        Raises ValueError if Tally returns business errors (<LINEERROR>, <ERROR>, <CREATED>0) 
+        Raises ValueError if Tally returns business errors (<LINEERROR>, <ERROR>, <CREATED>0)
         even when the HTTP status code is 200.
+
+        expect_voucher=True (voucher syncs) requires Tally's LASTVCHID to confirm the voucher
+        itself was created/altered — see validate_tally_accounting_success for why CREATED/
+        ALTERED alone isn't a safe signal for vouchers.
         """
         company_name = getattr(self.cfg, "tally_company_name", None)
         if company_name and "<STATICVARIABLES>" not in xml_string:
@@ -52,7 +56,7 @@ class TallyClient:
         r.raise_for_status()
 
         clean_content = sanitize_tally_xml(r.content)
-        is_success, err_msg, tally_id = validate_tally_accounting_success(clean_content)
+        is_success, err_msg, tally_id = validate_tally_accounting_success(clean_content, require_voucher=expect_voucher)
 
         if not is_success:
             raise ValueError(err_msg or "Tally XML transaction failed accounting validation")
@@ -89,8 +93,13 @@ class TallyClient:
             tally_type = "STOCKCATEGORY"
             fetch_fields = "NAME"
         elif ent in ("rental_orders", "rental_order", "invoices", "invoice", "payments", "payment", "voucher"):
-            tally_type = "VOUCHER"
-            fetch_fields = "VOUCHERNUMBER, REMOTEID, MASTERID"
+            # NOTE: must be "Voucher" (matching TallyFetcher.fetch_vouchers), not "VOUCHER" —
+            # the all-caps native collection name resolves to Voucher Type master config,
+            # not actual transaction vouchers. Confirmed live: REMOTEID/VOUCHERNUMBER we send
+            # on create are not echoed back by Tally on export, so NARRATION (a plain free-text
+            # field Tally preserves verbatim) is what carries our matchable marker instead.
+            tally_type = "Voucher"
+            fetch_fields = "VOUCHERNUMBER, MASTERID, NARRATION"
 
         company_name = getattr(self.cfg, "tally_company_name", None)
         xml = build_export_collection_envelope("CheckExistence", tally_type, fetch_fields, company_name=company_name)
@@ -132,7 +141,10 @@ class TallyClient:
             category = data["asset_brand"]["name"].strip()
 
         unit_exists = self.check_exists("unit", unit_name)
-        group_exists = True if group == "Primary" else self.check_exists("stockgroup", group)
+        # Always verify group existence in Tally — even 'Primary' may not exist as an explicit
+        # named STOCKGROUP in the company, causing Tally to reject the STOCKITEM with
+        # "Stock Group 'Primary' does not exist!"
+        group_exists = self.check_exists("stockgroup", group) if group else True
         category_exists = True if not category else self.check_exists("stockcategory", category)
 
         already_in_tally = self.check_exists("equipment", name)
@@ -150,17 +162,26 @@ class TallyClient:
         return self.send_xml(xml)
 
     def sync_rental_order(self, data: Dict[str, Any]) -> str:
+        remote_id = f"RENTAL-ORD-{data.get('id')}"
+        action = "Alter" if self.check_exists("rental_orders", remote_id) else "Create"
         company_name = getattr(self.cfg, "tally_company_name", None)
-        xml = build_sales_order_voucher_xml(data, company_name=company_name)
-        return self.send_xml(xml)
+        xml = build_sales_order_voucher_xml(data, action=action, company_name=company_name)
+        self.send_xml(xml, expect_voucher=True)
+        return remote_id
 
     def sync_invoice(self, data: Dict[str, Any]) -> str:
+        remote_id = f"RENTAL-INV-{data.get('id')}"
+        action = "Alter" if self.check_exists("invoices", remote_id) else "Create"
         company_name = getattr(self.cfg, "tally_company_name", None)
         company_state = getattr(self.cfg, "company_state", "") or ""
-        xml = build_sales_invoice_voucher_xml(data, company_state=company_state, company_name=company_name)
-        return self.send_xml(xml)
+        xml = build_sales_invoice_voucher_xml(data, action=action, company_state=company_state, company_name=company_name)
+        self.send_xml(xml, expect_voucher=True)
+        return remote_id
 
     def sync_payment(self, data: Dict[str, Any]) -> str:
+        remote_id = f"RENTAL-PAY-{data.get('id')}"
+        action = "Alter" if self.check_exists("payments", remote_id) else "Create"
         company_name = getattr(self.cfg, "tally_company_name", None)
-        xml = build_receipt_voucher_xml(data, company_name=company_name)
-        return self.send_xml(xml)
+        xml = build_receipt_voucher_xml(data, action=action, company_name=company_name)
+        self.send_xml(xml, expect_voucher=True)
+        return remote_id

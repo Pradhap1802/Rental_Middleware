@@ -54,7 +54,7 @@ class TallyFetcher:
             <TDLMESSAGE>
                <COLLECTION NAME="VouchersCollection" ISMODIFY="No">
                   <TYPE>Voucher</TYPE>
-                  <FETCH>MASTERID, ALTERID, GUID, VOUCHERNUMBER, VOUCHERTYPENAME, DATE, PARTYNAME, PARTYLEDGERNAME, AMOUNT, REFERENCE, ALLLEDGERENTRIES.LIST, INVENTORYENTRIES.LIST</FETCH>
+                  <FETCH>MASTERID, ALTERID, GUID, VOUCHERNUMBER, VOUCHERTYPENAME, DATE, PARTYNAME, PARTYLEDGERNAME, AMOUNT, REFERENCE, NARRATION, ALLLEDGERENTRIES.LIST, INVENTORYENTRIES.LIST, BILLALLOCATIONS.LIST</FETCH>
                </COLLECTION>
             </TDLMESSAGE>
          </TDL>
@@ -68,6 +68,157 @@ class TallyFetcher:
 
         return self._parse_vouchers_xml(clean_xml, last_alter_id)
 
+    def fetch_ledgers(self, last_alter_id: int = 0) -> List[Dict[str, Any]]:
+        """Fetch Customer Ledgers (Sundry Debtors) from Tally Prime."""
+        xml_req = """<ENVELOPE>
+   <HEADER>
+      <VERSION>1</VERSION>
+      <TALLYREQUEST>EXPORT</TALLYREQUEST>
+      <TYPE>COLLECTION</TYPE>
+      <ID>LedgersCollection</ID>
+   </HEADER>
+   <BODY>
+      <DESC>
+         <STATICVARIABLES>
+            <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+         </STATICVARIABLES>
+         <TDL>
+            <TDLMESSAGE>
+               <COLLECTION NAME="LedgersCollection" ISMODIFY="No">
+                  <TYPE>Ledger</TYPE>
+                  <FETCH>MASTERID, ALTERID, GUID, NAME, PARENT, MAILINGNAME, LEDGERPHONE, EMAIL, PARTYGSTIN, LEDGERCONTACT</FETCH>
+               </COLLECTION>
+            </TDLMESSAGE>
+         </TDL>
+      </DESC>
+   </BODY>
+</ENVELOPE>"""
+        clean_xml = self._post_xml(xml_req)
+        if not clean_xml:
+            return []
+
+        ledgers = []
+        try:
+            root = ET.fromstring(clean_xml)
+            for l_node in root.findall(".//LEDGER"):
+                name = (l_node.findtext("NAME") or l_node.attrib.get("NAME") or "").strip()
+                parent = (l_node.findtext("PARENT") or "").strip()
+                guid = (l_node.findtext("GUID") or "").strip()
+                alter_id_text = (l_node.findtext("ALTERID") or "0").strip()
+                phone = (l_node.findtext("LEDGERPHONE") or "").strip()
+                email = (l_node.findtext("EMAIL") or "").strip()
+                gstin = (l_node.findtext("PARTYGSTIN") or "").strip()
+
+                # Filter out system ledgers
+                if not name or name.lower() in ("profit & loss a/c", "cash", "sales account", "rental income", "cgst", "sgst", "igst"):
+                    continue
+
+                # Only sync Sundry Debtors (Customers) or customer-type ledgers
+                if parent and "debtor" not in parent.lower() and "customer" not in parent.lower():
+                    continue
+
+                try:
+                    alter_id = int(alter_id_text)
+                except ValueError:
+                    alter_id = 0
+
+                if last_alter_id > 0 and alter_id <= last_alter_id:
+                    continue
+
+                ledgers.append({
+                    "name": name,
+                    "parent": parent,
+                    "tally_guid": guid,
+                    "alter_id": alter_id,
+                    "phone": phone,
+                    "email": email,
+                    "gstin": gstin,
+                })
+        except Exception:
+            pass
+
+        return ledgers
+
+    def fetch_stock_items(self, last_alter_id: int = 0) -> List[Dict[str, Any]]:
+        """Fetch Stock Items (Assets/Equipment) from Tally Prime."""
+        xml_req = """<ENVELOPE>
+   <HEADER>
+      <VERSION>1</VERSION>
+      <TALLYREQUEST>EXPORT</TALLYREQUEST>
+      <TYPE>COLLECTION</TYPE>
+      <ID>StockItemsCollection</ID>
+   </HEADER>
+   <BODY>
+      <DESC>
+         <STATICVARIABLES>
+            <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+         </STATICVARIABLES>
+         <TDL>
+            <TDLMESSAGE>
+               <COLLECTION NAME="StockItemsCollection" ISMODIFY="No">
+                  <TYPE>StockItem</TYPE>
+                  <FETCH>MASTERID, ALTERID, GUID, NAME, PARENT, BASEUNITS, OPENINGBALANCE, OPENINGRATE, OPENINGVALUE, DESCRIPTION, HSNCODE, HSNDETAILS.LIST, GSTDETAILS.LIST</FETCH>
+               </COLLECTION>
+            </TDLMESSAGE>
+         </TDL>
+      </DESC>
+   </BODY>
+</ENVELOPE>"""
+        clean_xml = self._post_xml(xml_req)
+        if not clean_xml:
+            return []
+
+        items = []
+        try:
+            root = ET.fromstring(clean_xml)
+            for s_node in root.findall(".//STOCKITEM"):
+                name = (s_node.findtext("NAME") or s_node.attrib.get("NAME") or "").strip()
+                parent = (s_node.findtext("PARENT") or "").strip()
+                guid = (s_node.findtext("GUID") or "").strip()
+                alter_id_text = (s_node.findtext("ALTERID") or "0").strip()
+                unit = (s_node.findtext("BASEUNITS") or "Nos").strip()
+                desc = (s_node.findtext("DESCRIPTION") or "").strip()
+
+                # Extract HSN Code from top-level or HSNDETAILS.LIST
+                hsn = (s_node.findtext("HSNCODE") or s_node.findtext(".//HSNDETAILS.LIST/HSNCODE") or s_node.findtext(".//HSNCODE") or "").strip()
+
+                # Extract GST Rate from GSTDETAILS.LIST
+                gst_rate = 0.0
+                for r_node in s_node.findall(".//RATEDETAILS.LIST"):
+                    head = (r_node.findtext("GSTRATEDUTYHEAD") or "").strip().upper()
+                    val = (r_node.findtext("GSTRATE") or "0").strip()
+                    if head == "IGST" and val:
+                        try:
+                            gst_rate = float(val)
+                        except ValueError:
+                            pass
+
+                if not name:
+                    continue
+
+                try:
+                    alter_id = int(alter_id_text)
+                except ValueError:
+                    alter_id = 0
+
+                if last_alter_id > 0 and alter_id <= last_alter_id:
+                    continue
+
+                items.append({
+                    "name": name,
+                    "parent": parent,
+                    "tally_guid": guid,
+                    "alter_id": alter_id,
+                    "unit": unit,
+                    "description": desc,
+                    "hsn_code": hsn,
+                    "gst_rate": gst_rate,
+                })
+        except Exception:
+            pass
+
+        return items
+
     def _parse_vouchers_xml(self, clean_xml: str, last_alter_id: int) -> List[Dict[str, Any]]:
         vouchers = []
         try:
@@ -75,11 +226,13 @@ class TallyFetcher:
             for v_node in root.findall(".//VOUCHER"):
                 v_type = v_node.findtext("VOUCHERTYPENAME") or v_node.attrib.get("VCHTYPE") or ""
                 alter_id_text = (v_node.findtext("ALTERID") or "0").strip()
-                guid = (v_node.findtext("GUID") or v_node.attrib.get("REMOTEID") or "").strip()
+                remote_id = (v_node.attrib.get("REMOTEID") or "").strip()
+                guid = (v_node.findtext("GUID") or remote_id or "").strip()
                 v_no = (v_node.findtext("VOUCHERNUMBER") or "").strip()
                 v_date = (v_node.findtext("DATE") or "").strip()
                 party_name = (v_node.findtext("PARTYLEDGERNAME") or v_node.findtext("PARTYNAME") or "").strip()
                 reference = (v_node.findtext("REFERENCE") or "").strip()
+                narration = (v_node.findtext("NARRATION") or "").strip()
                 rentasst_id = (v_node.findtext("UDF_RENTASST_ID") or v_node.findtext("RENTASST_ID") or "").strip()
 
                 try:
@@ -94,6 +247,7 @@ class TallyFetcher:
                 # Parse Ledgers & Amount
                 amount = 0.0
                 ledgers = []
+                bill_ref = ""
                 for l_entry in v_node.findall(".//ALLLEDGERENTRIES.LIST"):
                     lname = l_entry.findtext("LEDGERNAME")
                     amt_text = l_entry.findtext("AMOUNT")
@@ -107,6 +261,13 @@ class TallyFetcher:
                                 amount = val
                         except (ValueError, TypeError):
                             pass
+                    if not bill_ref:
+                        for bill in l_entry.findall(".//BILLALLOCATIONS.LIST"):
+                            bill_name = (bill.findtext("NAME") or "").strip()
+                            bill_type = (bill.findtext("BILLTYPE") or "").strip()
+                            if bill_name and bill_type.lower() in ("agst ref", "against reference"):
+                                bill_ref = bill_name
+                                break
 
                 # Parse Inventory Items if present
                 items = []
@@ -126,6 +287,8 @@ class TallyFetcher:
                 if guid or v_no or alter_id > 0:
                     vouchers.append({
                         "tally_guid": guid,
+                        "remote_id": remote_id,
+                        "narration": narration,
                         "alter_id": alter_id,
                         "voucher_number": v_no,
                         "voucher_type": v_type,
@@ -133,6 +296,7 @@ class TallyFetcher:
                         "party_name": party_name,
                         "amount": amount,
                         "reference": reference,
+                        "bill_ref": bill_ref,
                         "rentasst_id": rentasst_id,
                         "ledgers": ledgers,
                         "items": items,

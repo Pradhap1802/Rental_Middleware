@@ -24,6 +24,10 @@ class RentAsstClient:
             self.headers["BusinessCode"] = cfg.rentasst_tenant_id
             self.headers["businesscode"] = cfg.rentasst_tenant_id
 
+    @property
+    def config(self) -> AppConfig:
+        return self.cfg
+
     def _request_with_fallback(self, endpoints: List[str], params: Optional[Dict[str, Any]] = None) -> Any:
         last_error = None
         for endpoint in endpoints:
@@ -57,11 +61,14 @@ class RentAsstClient:
         raise RetryableException(f"RentAsst API endpoints {endpoints} not found (404)")
 
     def ping(self) -> bool:
-        try:
-            r = self.session.get(f"{self.base_url}/health", headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
-            return r.status_code in (200, 204)
-        except Exception:
-            return False
+        for ep in ["admin/check-required-version", "categories", "health"]:
+            try:
+                r = self.session.get(f"{self.base_url}/{ep}", headers=self.headers, timeout=10, verify=self.cfg.verify_ssl)
+                if r.status_code in (200, 204, 401, 403):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def login(self, email: str, business_code: Optional[str] = None, target_url: Optional[str] = None, db_mgr: Any = None) -> Dict[str, Any]:
         """Fetches bearer token for user using login mail ID and optional business code."""
@@ -417,24 +424,47 @@ class RentAsstClient:
 
     def fetch_rental_orders(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
         # Try POST /api/rent-list first (RentAsst primary API)
+        url = f"{self.base_url}/rent-list"
+        body: Dict[str, Any] = {"start": 0, "length": 100}
+        if status:
+            body["status"] = [status]
         try:
-            url = f"{self.base_url}/rent-list"
-            body: Dict[str, Any] = {"start": 0, "length": 100}
-            if status:
-                body["status"] = [status]
             r = self.session.post(url, json=body, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
-            if r.status_code in (200, 204):
-                data = r.json()
+
+            # Propagate auth failures immediately — do NOT fall through to broken endpoints
+            if r.status_code in (401, 403):
+                raise NonRetryableException(
+                    f"RentAsst API 401 Unauthorized at {url}. Check your API Key/Token."
+                )
+
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                except requests.exceptions.JSONDecodeError:
+                    snippet = (r.text or "")[:150].replace("\n", " ").strip()
+                    raise RetryableException(
+                        f"RentAsst API at {url} returned invalid non-JSON response "
+                        f"(Status {r.status_code}): {snippet}"
+                    )
                 items = data.get("data", data)
                 if isinstance(items, list):
                     return items
+                # Unexpected dict shape — return empty rather than falling to broken endpoints
+                return []
+
+        except (NonRetryableException, RetryableException):
+            raise
         except Exception:
             pass
 
-        params = {}
+        # Last-resort GET fallback using /rent (a known RentAsst endpoint).
+        # NOTE: /rental-orders, /quotation, /transfer-orders are NOT valid API routes in
+        # the PHP backend — requests to those paths are caught by the SPA router and served
+        # as index.html (HTTP 200 with HTML body), which caused the non-JSON parse error.
+        params: Dict[str, Any] = {}
         if status:
             params["status"] = status
-        return self._request_with_fallback(["rental-orders", "quotation", "transfer-orders"], params)
+        return self._request_with_fallback(["rent"], params)
 
     def fetch_invoices(self) -> List[Dict[str, Any]]:
         return self._request_with_fallback(["invoices", "invoice"])
@@ -475,6 +505,59 @@ class RentAsstClient:
     def push_customer(self, customer_data: Dict[str, Any]) -> Dict[str, Any]:
         """Push a customer master from Tally to RentAsst Cloud API."""
         return self._post_with_fallback(["customer", "customers"], customer_data)
+
+    def push_equipment(self, equipment_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Push an equipment/asset record from Tally to RentAsst Cloud API."""
+        return self._post_with_fallback(["asset", "equipment", "assets"], equipment_data)
+
+    def update_equipment(self, asset_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Update an existing asset/equipment in RentAsst with Tally attributes."""
+        url = f"{self.base_url}/asset/{asset_id}"
+        update_payload = dict(payload)
+        if str(asset_id).isdigit():
+            update_payload["id"] = int(asset_id)
+        update_payload.setdefault("skip_inventory", True)
+
+        r = self.session.put(url, json=update_payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("data", data) if isinstance(data, dict) else data
+
+    def resolve_category_id(self, category_name: str) -> Optional[int]:
+        """Resolve or auto-create Category ID in RentAsst."""
+        if not category_name or category_name.lower() in ("primary", "not applicable", ""):
+            return None
+        clean_name = category_name.strip()
+        try:
+            cats = self._request_with_fallback(["asset-category-dropdown", "asset-category", "categories"])
+            if isinstance(cats, list):
+                for c in cats:
+                    if str(c.get("name") or "").strip().lower() == clean_name.lower() and c.get("id"):
+                        return int(c["id"])
+            # Create category if not present
+            res = self._post_with_fallback(["asset-category", "categories"], {"name": clean_name})
+            if isinstance(res, dict) and res.get("id"):
+                return int(res["id"])
+        except Exception:
+            pass
+        return None
+
+    def resolve_unit_id(self, unit_name: str) -> Optional[int]:
+        """Resolve Unit ID in RentAsst."""
+        if not unit_name or unit_name.lower() in ("not applicable", ""):
+            return None
+        clean_unit = unit_name.strip().lower()
+        try:
+            units = self._request_with_fallback(["units-dropdown", "units"])
+            if isinstance(units, list):
+                for u in units:
+                    uname = str(u.get("name") or "").strip().lower()
+                    usym = str(u.get("symbol") or "").strip().lower()
+                    if (clean_unit in (uname, usym) or (clean_unit in ("pc", "pcs", "piece", "pieces") and usym in ("pc", "pcs", "piece", "pieces", "nos"))) and u.get("id"):
+                        return int(u["id"])
+        except Exception:
+            pass
+        return None
 
     def push_rentout(self, rentout_data: Dict[str, Any]) -> Dict[str, Any]:
         """Push a Tally Sales Register / Voucher as a Rentout / Rental Order to RentAsst Cloud API."""

@@ -2,8 +2,17 @@ from typing import Dict, Any, Optional
 from .xml_builder import escape_xml, format_tally_date, build_import_envelope
 
 
-def build_sales_order_voucher_xml(data: Dict[str, Any], company_name: Optional[str] = None) -> str:
-    """Builds Tally VOUCHER XML for Sales Orders."""
+def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", company_name: Optional[str] = None) -> str:
+    """
+    Builds Tally VOUCHER XML for Rent Outs, using Tally's "Memorandum" voucher type
+    rather than Sales Order. Sales Order requires "Order Processing" to be enabled under
+    the Tally company's F11 features (confirmed live: rejected with EXCEPTIONS>0
+    otherwise), which is a Tally application setting outside the middleware's control.
+    Memorandum is one of Tally's default voucher types present in every company (verified
+    live via the VoucherType collection) and is semantically the right fit for a Rent Out
+    — a provisional/reservation record that doesn't post to the books until it's actually
+    confirmed as a sale (handled separately by Invoice sync).
+    """
     num = (
         data.get("number") or data.get("rent_code") or data.get("rent_number")
         or data.get("code") or data.get("quotation_number") or f"ORD-{data.get('id')}"
@@ -70,19 +79,20 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], company_name: Optional[s
               <AMOUNT>{amount:.2f}</AMOUNT>{inventory_allocations}
             </ALLLEDGERENTRIES.LIST>"""
 
-    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="Sales Order" ACTION="Create" REMOTEID="RENTAL-ORD-{data.get('id')}">
+    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="Memorandum" ACTION="{action}" REMOTEID="RENTAL-ORD-{data.get('id')}">
             <REMOTEID>RENTAL-ORD-{data.get('id')}</REMOTEID>
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
-            <VOUCHERTYPENAME>Sales Order</VOUCHERTYPENAME>
+            <VOUCHERTYPENAME>Memorandum</VOUCHERTYPENAME>
             <VOUCHERNUMBER>{escape_xml(num)}</VOUCHERNUMBER>
+            <NARRATION>RENTAL-ORD-{data.get('id')}</NARRATION>
             <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{party_entry}{sales_entry}
           </VOUCHER>"""
 
     return build_import_envelope(msg, report_name="Vouchers", company_name=company_name)
 
 
-def build_sales_invoice_voucher_xml(data: Dict[str, Any], company_state: str = "", company_name: Optional[str] = None) -> str:
+def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create", company_state: str = "", company_name: Optional[str] = None) -> str:
     """Builds Tally VOUCHER XML for Sales Invoices and Credit Notes."""
     raw_num = str(data.get("number") or data.get("invoice_number") or "").strip()
     num = raw_num if raw_num and raw_num != "0" else f"INV-{data.get('id')}"
@@ -197,12 +207,13 @@ def build_sales_invoice_voucher_xml(data: Dict[str, Any], company_state: str = "
               <AMOUNT>{sgst_val:.2f}</AMOUNT>
             </ALLLEDGERENTRIES.LIST>"""
 
-    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="{vtype}" ACTION="Create" REMOTEID="RENTAL-INV-{data.get('id')}">
+    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="{vtype}" ACTION="{action}" REMOTEID="RENTAL-INV-{data.get('id')}">
             <REMOTEID>RENTAL-INV-{data.get('id')}</REMOTEID>
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
             <VOUCHERTYPENAME>{vtype}</VOUCHERTYPENAME>
             <VOUCHERNUMBER>{num}</VOUCHERNUMBER>
+            <NARRATION>RENTAL-INV-{data.get('id')}</NARRATION>
             <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{party_entry}{income_entry}{tax_entries}
           </VOUCHER>"""
 

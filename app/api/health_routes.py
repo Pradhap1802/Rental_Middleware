@@ -10,7 +10,7 @@ health_router = APIRouter(prefix="", tags=["health"])
 
 
 def check_db_health(request: Request) -> Dict[str, Any]:
-    db_path = getattr(request.app.state, "db_path", "data/state.db")
+    db_path = getattr(request.app.state, "db_path", None) or "data/state.db"
     start_time = time.time()
     try:
         store = getattr(request.app.state, "mapping_store", None) or MappingStore(db_path)
