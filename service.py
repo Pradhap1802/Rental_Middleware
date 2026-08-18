@@ -1,6 +1,6 @@
 import sys
 import os
-import time
+import threading
 import uvicorn
 
 try:
@@ -32,9 +32,14 @@ if WIN32_AVAILABLE:
         def __init__(self, args):
             win32serviceutil.ServiceFramework.__init__(self, args)
             self.stop_event = win32event.CreateEvent(None, 0, 0, None)
+            self.server = None
 
         def SvcStop(self):
             self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+            if self.server:
+                # Ask uvicorn's own event loop to shut down gracefully instead of
+                # relying on the process being force-killed by SCM after a timeout.
+                self.server.should_exit = True
             win32event.SetEvent(self.stop_event)
 
         def SvcDoRun(self):
@@ -43,13 +48,41 @@ if WIN32_AVAILABLE:
                 servicemanager.PYS_SERVICE_STARTED,
                 (self._svc_name_, ""),
             )
-            uvicorn.run(app, host="0.0.0.0", port=8088, log_level="info")
+            config = uvicorn.Config(app, host="0.0.0.0", port=8088, log_level="info")
+            self.server = uvicorn.Server(config)
+
+            thread = threading.Thread(target=self.server.run, daemon=True)
+            thread.start()
+
+            # Report RUNNING only once uvicorn has actually started, so SCM doesn't
+            # time out waiting for a status update that never came.
+            self.ReportServiceStatus(win32service.SERVICE_RUNNING)
+            win32event.WaitForSingleObject(self.stop_event, win32event.INFINITE)
+            thread.join(timeout=15)
+
+
+def _run_standalone():
+    print("Starting RentAsst Middleware in standalone mode...")
+    uvicorn.run(app, host="0.0.0.0", port=8088, reload=False)
+
 
 if __name__ == "__main__":
-    if WIN32_AVAILABLE and len(sys.argv) > 1:
-        win32serviceutil.HandleCommandLine(RentAsstMiddlewareService)
+    if WIN32_AVAILABLE:
+        if len(sys.argv) == 1:
+            # No arguments is exactly how the Service Control Manager launches a
+            # registered service binary — hand off to pywin32's dispatcher so it can
+            # correctly report status back to SCM. If that fails (e.g. this process
+            # wasn't actually started by SCM — double-clicked the exe directly, or
+            # invoked as a plain script), fall back to running the app directly.
+            try:
+                servicemanager.Initialize()
+                servicemanager.PrepareToHostSingle(RentAsstMiddlewareService)
+                servicemanager.StartServiceCtrlDispatcher()
+            except Exception:
+                _run_standalone()
+        else:
+            # e.g. `service.py install|start|stop|remove` — pywin32's own CLI handler.
+            win32serviceutil.HandleCommandLine(RentAsstMiddlewareService)
     else:
-        print("Starting RentAsst Middleware in standalone mode...")
-        is_frozen = getattr(sys, "frozen", False)
-        uvicorn.run(app, host="0.0.0.0", port=8088, reload=not is_frozen)
+        _run_standalone()
 
