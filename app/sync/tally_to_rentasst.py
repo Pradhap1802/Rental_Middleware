@@ -132,7 +132,7 @@ def is_tally_voucher_duplicate(v: Dict[str, Any], store: MappingStore, ra_client
         return True
 
     if tally_guid:
-        for ent in ("rental_orders", "rental_order", "invoice", "payment", "customer"):
+        for ent in ("rental_orders", "rental_order", "invoice", "payment"):
             rev_key = generate_integration_key("default", ent, tally_guid, "reverse")
             if store.find_by_integration_key(rev_key):
                 return True
