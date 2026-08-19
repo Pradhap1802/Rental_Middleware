@@ -234,7 +234,14 @@ def is_tally_voucher_duplicate(v: Dict[str, Any], store: MappingStore, ra_client
     return False
 
 
-def sync_tally_to_rentasst(ra_client: Any, ext_client: Any, store: MappingStore, force_full_sync: bool = True) -> Dict[str, Any]:
+def sync_tally_to_rentasst(
+    ra_client: Any,
+    ext_client: Any,
+    store: MappingStore,
+    force_full_sync: bool = True,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Production-grade reverse synchronization runner:
     Fetches Vouchers (Sales Orders, Sales Invoices, Receipts) from Tally Prime, applies reverse field-ownership policy filtering,
@@ -401,7 +408,7 @@ def sync_tally_to_rentasst(ra_client: Any, ext_client: Any, store: MappingStore,
                 log_event("ReverseSync", f"Failed to push Tally stock item '{item_name}': {e}")
 
         # 3. Reverse sync Vouchers (Sales Orders, Invoices, Receipts)
-        vouchers = fetcher.fetch_vouchers(last_alter_id=last_alter_id)
+        vouchers = fetcher.fetch_vouchers(last_alter_id=last_alter_id, from_date=from_date, to_date=to_date)
         
         for v in vouchers:
             stats["processed"] += 1

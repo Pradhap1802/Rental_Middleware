@@ -1,4 +1,5 @@
-from typing import Dict, Any
+from datetime import datetime, timezone
+from typing import Dict, Any, Optional
 from ..configuration.store import ConfigStore
 from ..mapping.store import MappingStore
 from ..clients.rentasst_client import RentAsstClient
@@ -15,7 +16,12 @@ class SyncService:
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
 
-    def execute_sync(self, entity_type: str) -> Dict[str, Any]:
+    def execute_sync(
+        self,
+        entity_type: str,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
         cfg_store = ConfigStore(self.data_dir)
         cfg = cfg_store.require()
         if not cfg or not cfg.rentasst_api_key or not cfg.rentasst_api_key.strip():
@@ -25,28 +31,53 @@ class SyncService:
         ra_client = RentAsstClient(cfg)
         ext_client = ExternalClient(cfg)
 
+        def mark_synced(status_key: str) -> None:
+            # Records that a sync attempt for this entity completed just now, regardless
+            # of whether any record actually changed — MAX(last_synced_at) on the mapping
+            # table only advances when a record changes, which froze "Last Synced" on any
+            # run that legitimately found nothing new in the requested date range.
+            store.set_checkpoint(f"last_synced:{status_key}", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+
         try:
             entity = (entity_type or "").lower()
             if entity in ("tally_to_rentasst", "reverse_sync"):
-                return sync_tally_to_rentasst(ra_client, ext_client, store)
+                res = sync_tally_to_rentasst(ra_client, ext_client, store, from_date=from_date, to_date=to_date)
+                mark_synced("reverse_sync")
+                return res
             elif entity in ("customers", "customer"):
-                return sync_customers(ra_client, ext_client, store)
+                res = sync_customers(ra_client, ext_client, store, from_date=from_date, to_date=to_date)
+                mark_synced("customers")
+                return res
             elif entity in ("equipment", "product"):
-                return sync_equipment(ra_client, ext_client, store)
+                res = sync_equipment(ra_client, ext_client, store, from_date=from_date, to_date=to_date)
+                mark_synced("equipment")
+                return res
             elif entity in ("rental_orders", "rental_order", "orders", "order", "rents", "rent"):
-                return sync_rental_orders(ra_client, ext_client, store)
+                res = sync_rental_orders(ra_client, ext_client, store, from_date=from_date, to_date=to_date)
+                mark_synced("rental_orders")
+                return res
             elif entity in ("invoices", "invoice"):
-                return sync_invoices(ra_client, ext_client, store)
+                res = sync_invoices(ra_client, ext_client, store, from_date=from_date, to_date=to_date)
+                mark_synced("invoices")
+                return res
             elif entity in ("payments", "payment"):
-                return sync_payments(ra_client, ext_client, store)
+                res = sync_payments(ra_client, ext_client, store, from_date=from_date, to_date=to_date)
+                mark_synced("payments")
+                return res
             else:
                 # Sync all (Forward RentAsst -> Tally + Reverse Tally -> RentAsst)
-                res_c = sync_customers(ra_client, ext_client, store)
-                res_e = sync_equipment(ra_client, ext_client, store)
-                res_o = sync_rental_orders(ra_client, ext_client, store)
-                res_i = sync_invoices(ra_client, ext_client, store)
-                res_p = sync_payments(ra_client, ext_client, store)
-                res_t = sync_tally_to_rentasst(ra_client, ext_client, store)
+                res_c = sync_customers(ra_client, ext_client, store, from_date=from_date, to_date=to_date)
+                mark_synced("customers")
+                res_e = sync_equipment(ra_client, ext_client, store, from_date=from_date, to_date=to_date)
+                mark_synced("equipment")
+                res_o = sync_rental_orders(ra_client, ext_client, store, from_date=from_date, to_date=to_date)
+                mark_synced("rental_orders")
+                res_i = sync_invoices(ra_client, ext_client, store, from_date=from_date, to_date=to_date)
+                mark_synced("invoices")
+                res_p = sync_payments(ra_client, ext_client, store, from_date=from_date, to_date=to_date)
+                mark_synced("payments")
+                res_t = sync_tally_to_rentasst(ra_client, ext_client, store, from_date=from_date, to_date=to_date)
+                mark_synced("reverse_sync")
                 return {
                     "processed": res_c["processed"] + res_e["processed"] + res_o["processed"] + res_i["processed"] + res_p["processed"] + res_t["processed"],
                     "created": res_c["created"] + res_e["created"] + res_o["created"] + res_i["created"] + res_p["created"] + res_t["created"],

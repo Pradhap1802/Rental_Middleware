@@ -5,6 +5,14 @@ from typing import Dict, Any, List, Optional
 from ..models.domain import AppConfig
 
 
+def _to_tally_date(value: Optional[str]) -> Optional[str]:
+    """Converts an ISO-ish date string (e.g. '2026-01-01') to Tally's YYYYMMDD format."""
+    if not value:
+        return None
+    digits = re.sub(r"[^0-9]", "", str(value)[:10])
+    return digits if len(digits) == 8 else None
+
+
 def sanitize_tally_xml(raw: Any) -> str:
     """Sanitizes raw Tally XML responses by stripping control chars, BOM, and numeric entities."""
     if isinstance(raw, bytes):
@@ -32,11 +40,18 @@ class TallyFetcher:
         except Exception:
             return None
 
-    def fetch_vouchers(self, last_alter_id: int = 0) -> List[Dict[str, Any]]:
+    def fetch_vouchers(
+        self,
+        last_alter_id: int = 0,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Build TDL Collection XML query to fetch Vouchers from Tally.
         """
-        xml_req = """<ENVELOPE>
+        sv_from_date = _to_tally_date(from_date) or "20000101"
+        sv_to_date = _to_tally_date(to_date) or "20991231"
+        xml_req = f"""<ENVELOPE>
    <HEADER>
       <VERSION>1</VERSION>
       <TALLYREQUEST>EXPORT</TALLYREQUEST>
@@ -47,8 +62,8 @@ class TallyFetcher:
       <DESC>
          <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-            <SVFROMDATE>20000101</SVFROMDATE>
-            <SVTODATE>20991231</SVTODATE>
+            <SVFROMDATE>{sv_from_date}</SVFROMDATE>
+            <SVTODATE>{sv_to_date}</SVTODATE>
          </STATICVARIABLES>
          <TDL>
             <TDLMESSAGE>

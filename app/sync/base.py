@@ -1,6 +1,7 @@
 import time
 import hashlib
 import json
+from datetime import datetime
 from typing import Dict, Any, List, Callable, Optional
 from ..mapping.store import MappingStore
 from ..logging.logger import log_event, log_sync_event
@@ -9,6 +10,56 @@ from ..logging.logger import log_event, log_sync_event
 def compute_payload_hash(payload: Dict[str, Any]) -> str:
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def filter_by_date_range(
+    items: List[Dict[str, Any]],
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Filters RentAsst records by their created_at (falling back to updated_at) timestamp.
+    Records with no parseable timestamp are kept, since RentAsst's own API doesn't filter
+    by record timestamp server-side — this is a best-effort client-side narrowing, not a
+    guarantee, so failing open avoids silently dropping records we can't classify.
+    """
+    if not from_date and not to_date:
+        return items
+
+    from_dt = _parse_date_boundary(from_date)
+    to_dt = _parse_date_boundary(to_date, end_of_day=True)
+
+    filtered = []
+    for item in items:
+        raw_ts = item.get("updated_at") or item.get("created_at")
+        if not raw_ts:
+            filtered.append(item)
+            continue
+        item_dt = _parse_date_boundary(raw_ts)
+        if item_dt is None:
+            filtered.append(item)
+            continue
+        if from_dt and item_dt < from_dt:
+            continue
+        if to_dt and item_dt > to_dt:
+            continue
+        filtered.append(item)
+    return filtered
+
+
+def _parse_date_boundary(value: Optional[str], end_of_day: bool = False) -> Optional[datetime]:
+    if not value:
+        return None
+    text = str(value).strip().replace("Z", "").split("+")[0].split(".")[0]
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            if end_of_day and fmt == "%Y-%m-%d":
+                dt = dt.replace(hour=23, minute=59, second=59)
+            return dt
+        except ValueError:
+            continue
+    return None
 
 
 def extract_identifier(entity_type: str, item: Dict[str, Any]) -> str:

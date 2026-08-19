@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from ..configuration.store import ConfigStore
 from ..queue.queue_store import QueueStore
+from ..mapping.store import MappingStore
 from ..clients.rentasst_client import RentAsstClient
 from ..connectors.factory import ConnectorFactory
 from ..utils.licensing import validate_license
@@ -30,6 +31,7 @@ class StatusService:
         self.data_dir = data_dir
         self.db_path = db_path or f"{data_dir}/state.db"
         self.queue_store = QueueStore(self.db_path)
+        self.mapping_store = MappingStore(self.db_path)
         self.config_store = ConfigStore(data_dir)
 
     def get_system_status(
@@ -183,6 +185,14 @@ class StatusService:
                     performance_metrics["last_sync"] = l_row["completed_at"]
         except Exception:
             pass
+
+        # Overlay with the "last sync attempt ran" checkpoint, which advances every time a
+        # sync executes even if it found nothing new to change — unlike MAX(last_synced_at)
+        # on the mapping table, which only advances when a record actually changes.
+        for status_key in entity_sync_status:
+            checkpoint = self.mapping_store.get_checkpoint(f"last_synced:{status_key}")
+            if checkpoint:
+                entity_sync_status[status_key]["last_sync"] = checkpoint
 
         # Resource & Legacy Queue Metrics
         mem_mb, cpu_pct = get_memory_and_cpu()

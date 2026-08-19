@@ -64,16 +64,9 @@
     
     .section-title { font-size: 0.95rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; }
 
-    .entity-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0.75rem; margin-bottom: 1.5rem; }
-    .entity-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 0.85rem; text-align: center; }
-    .entity-card .ent-name { font-size: 0.8rem; font-weight: 600; color: #a5b4fc; text-transform: capitalize; }
-    .entity-card .ent-count { font-size: 1.4rem; font-weight: 700; margin: 0.3rem 0; color: var(--text); }
-    .entity-card .ent-time { font-size: 0.65rem; color: var(--text-muted); }
-
-    .recon-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
-    .recon-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 1rem; text-align: center; }
-    .recon-card .lbl { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.3rem; }
-    .recon-card .val { font-size: 1.3rem; font-weight: 700; }
+    .sync-last { font-size: 0.65rem; color: var(--text-muted); margin-top: 0.35rem; }
+    .sync-range-row { display: flex; gap: 1rem; margin-bottom: 1.25rem; }
+    .sync-range-row .form-group { flex: 1; margin-bottom: 0; }
 
     .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
     .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 1.5rem; }
@@ -139,62 +132,6 @@
       </div>
     </header>
 
-    <!-- 1. Entity Synchronization Status -->
-    <div class="section-title">Entity Synchronization Status</div>
-    <div class="entity-grid">
-      <div class="entity-card">
-        <div class="ent-name">👥 Customers</div>
-        <div class="ent-count" id="ent_customers_cnt">0</div>
-        <div class="ent-time" id="ent_customers_time">No sync</div>
-      </div>
-      <div class="entity-card">
-        <div class="ent-name">🚜 Equipment</div>
-        <div class="ent-count" id="ent_equipment_cnt">0</div>
-        <div class="ent-time" id="ent_equipment_time">No sync</div>
-      </div>
-      <div class="entity-card">
-        <div class="ent-name">📋 Orders</div>
-        <div class="ent-count" id="ent_orders_cnt">0</div>
-        <div class="ent-time" id="ent_orders_time">No sync</div>
-      </div>
-      <div class="entity-card">
-        <div class="ent-name">🧾 Invoices</div>
-        <div class="ent-count" id="ent_invoices_cnt">0</div>
-        <div class="ent-time" id="ent_invoices_time">No sync</div>
-      </div>
-      <div class="entity-card">
-        <div class="ent-name">💳 Payments</div>
-        <div class="ent-count" id="ent_payments_cnt">0</div>
-        <div class="ent-time" id="ent_payments_time">No sync</div>
-      </div>
-      <div class="entity-card">
-        <div class="ent-name">🔄 Reverse Sync</div>
-        <div class="ent-count" id="ent_reverse_cnt">0</div>
-        <div class="ent-time" id="ent_reverse_time">No sync</div>
-      </div>
-    </div>
-
-    <!-- 2. Reconciliation & Conflict Audit -->
-    <div class="section-title">Reconciliation & Conflict Audit</div>
-    <div class="recon-grid">
-      <div class="recon-card">
-        <div class="lbl">Matched Records</div>
-        <div class="val" id="recon_matched" style="color: var(--success);">0</div>
-      </div>
-      <div class="recon-card">
-        <div class="lbl">Missing Records</div>
-        <div class="val" id="recon_missing" style="color: var(--warning);">0</div>
-      </div>
-      <div class="recon-card">
-        <div class="lbl">Mismatched Records</div>
-        <div class="val" id="recon_mismatched" style="color: var(--error);">0</div>
-      </div>
-      <div class="recon-card">
-        <div class="lbl">Unresolved Conflicts</div>
-        <div class="val" id="recon_conflicts" style="color: var(--error);">0</div>
-      </div>
-    </div>
-
     <!-- Settings & Sync Trigger Grid -->
     <div class="grid-2">
       <div class="card">
@@ -246,13 +183,41 @@
     <!-- Manual Entity Synchronization -->
     <div class="card" style="margin-bottom: 2rem;">
       <h2>Manual Entity Synchronization</h2>
+      <div class="sync-range-row">
+        <div class="form-group">
+          <label for="sync_from_date">From Date (optional — defaults to each entity's last synced date)</label>
+          <input type="date" id="sync_from_date">
+        </div>
+        <div class="form-group">
+          <label for="sync_to_date">To Date (optional)</label>
+          <input type="date" id="sync_to_date">
+        </div>
+      </div>
       <div class="sync-actions">
-        <div class="sync-btn" onclick="triggerSync('customers')">👥 Customers</div>
-        <div class="sync-btn" onclick="triggerSync('equipment')">🚜 Assets</div>
-        <div class="sync-btn" onclick="triggerSync('rental_orders')">📋 Rental Orders</div>
-        <div class="sync-btn" onclick="triggerSync('invoices')">🧾 Invoices</div>
-        <div class="sync-btn" onclick="triggerSync('payments')">💳 Payments</div>
-        <div class="sync-btn" onclick="triggerSync('tally_to_rentasst')">🔄 Sync Tally ➔ RentAsst</div>
+        <div class="sync-btn" onclick="triggerSync('customers')">
+          👥 Customers
+          <div class="sync-last" id="last_customers">Last synced: —</div>
+        </div>
+        <div class="sync-btn" onclick="triggerSync('equipment')">
+          🚜 Assets
+          <div class="sync-last" id="last_equipment">Last synced: —</div>
+        </div>
+        <div class="sync-btn" onclick="triggerSync('rental_orders')">
+          📋 Rental Orders
+          <div class="sync-last" id="last_rental_orders">Last synced: —</div>
+        </div>
+        <div class="sync-btn" onclick="triggerSync('invoices')">
+          🧾 Invoices
+          <div class="sync-last" id="last_invoices">Last synced: —</div>
+        </div>
+        <div class="sync-btn" onclick="triggerSync('payments')">
+          💳 Payments
+          <div class="sync-last" id="last_payments">Last synced: —</div>
+        </div>
+        <div class="sync-btn" onclick="triggerSync('tally_to_rentasst')">
+          🔄 Sync Tally ➔ RentAsst
+          <div class="sync-last" id="last_tally_to_rentasst">Last synced: —</div>
+        </div>
       </div>
     </div>
   </div>
@@ -398,6 +363,25 @@
       showStatusMsg('👋 Logged out successfully. Please re-authenticate.', 'info');
     }
 
+    // Maps each manual-sync button to its entity_sync_status key and stores the raw
+    // last-synced timestamp so triggerSync() can default "From Date" to it.
+    const lastSyncedMap = {};
+    const entityStatusKey = {
+      customers: 'customers', equipment: 'equipment', rental_orders: 'rental_orders',
+      invoices: 'invoices', payments: 'payments', tally_to_rentasst: 'reverse_sync'
+    };
+
+    function formatLastSynced(raw) {
+      // Backend stores SQLite CURRENT_TIMESTAMP as "YYYY-MM-DD HH:MM:SS" in 24-hour time.
+      const match = String(raw).match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})/);
+      if (!match) return raw;
+      const [, datePart, h, mi] = match;
+      let hour = parseInt(h, 10);
+      const ampm = hour >= 12 ? 'PM' : 'AM';
+      hour = hour % 12 || 12;
+      return `${datePart} ${hour}:${mi} ${ampm}`;
+    }
+
     async function loadStatus() {
       try {
         const res = await fetch('/api/status');
@@ -405,36 +389,12 @@
         const data = await res.json();
 
         const es = data.entity_sync_status || {};
-        if (es.customers) {
-          setText('ent_customers_cnt', es.customers.synced_count);
-          setText('ent_customers_time', es.customers.last_sync ? es.customers.last_sync.split(' ')[0] : 'No sync');
+        for (const [entity, statusKey] of Object.entries(entityStatusKey)) {
+          const info = es[statusKey];
+          const lastSync = info ? info.last_sync : null;
+          lastSyncedMap[entity] = lastSync || null;
+          setText(`last_${entity}`, lastSync ? `Last synced: ${formatLastSynced(lastSync)}` : 'Last synced: —');
         }
-        if (es.equipment) {
-          setText('ent_equipment_cnt', es.equipment.synced_count);
-          setText('ent_equipment_time', es.equipment.last_sync ? es.equipment.last_sync.split(' ')[0] : 'No sync');
-        }
-        if (es.rental_orders) {
-          setText('ent_orders_cnt', es.rental_orders.synced_count);
-          setText('ent_orders_time', es.rental_orders.last_sync ? es.rental_orders.last_sync.split(' ')[0] : 'No sync');
-        }
-        if (es.invoices) {
-          setText('ent_invoices_cnt', es.invoices.synced_count);
-          setText('ent_invoices_time', es.invoices.last_sync ? es.invoices.last_sync.split(' ')[0] : 'No sync');
-        }
-        if (es.payments) {
-          setText('ent_payments_cnt', es.payments.synced_count);
-          setText('ent_payments_time', es.payments.last_sync ? es.payments.last_sync.split(' ')[0] : 'No sync');
-        }
-        if (es.reverse_sync) {
-          setText('ent_reverse_cnt', es.reverse_sync.synced_count);
-          setText('ent_reverse_time', es.reverse_sync.last_sync ? es.reverse_sync.last_sync.split(' ')[0] : 'No sync');
-        }
-
-        const rm = data.reconciliation_metrics || {};
-        setText('recon_matched', rm.matched || 0);
-        setText('recon_missing', rm.missing || 0);
-        setText('recon_mismatched', rm.mismatched || 0);
-        setText('recon_conflicts', rm.unresolved_conflicts || 0);
       } catch(e) {
         console.error('Error loading status:', e);
       }
@@ -582,9 +542,21 @@
     };
     async function triggerSync(entity) {
       const label = entityLabels[entity] || entity;
+
+      // Default "From Date" to this entity's own last-synced date if the user hasn't
+      // typed one in — lets a click "just continue" the previous sync's coverage.
+      const fromInput = document.getElementById('sync_from_date').value;
+      const toInput = document.getElementById('sync_to_date').value;
+      const fromDate = fromInput || (lastSyncedMap[entity] ? lastSyncedMap[entity].split(' ')[0].split('T')[0] : '');
+
+      const params = new URLSearchParams();
+      if (fromDate) params.set('from_date', fromDate);
+      if (toInput) params.set('to_date', toInput);
+      const qs = params.toString() ? `?${params.toString()}` : '';
+
       showToast(`⏳ ${label} sync queued…`, 'info');
       try {
-        const res = await fetch(`/api/sync/${entity}`, { method: 'POST' });
+        const res = await fetch(`/api/sync/${entity}${qs}`, { method: 'POST' });
         const data = await res.json().catch(() => ({}));
         if (res.ok) {
           showToast(`✅ ${label} sync job enqueued successfully.`, 'success');
