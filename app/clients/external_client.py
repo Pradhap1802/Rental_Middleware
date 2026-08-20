@@ -1,6 +1,6 @@
 import requests
 from requests.adapters import HTTPAdapter
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from ..models.domain import AppConfig
 from ..connectors.tally import TallyClient
 
@@ -51,6 +51,11 @@ class ExternalClient:
         if self.cfg.external_system_type != "tally":
             return True
         return self.tally.check_exists(entity_type, identifier)
+
+    def fetch_ledger_snapshot(self, name: str) -> Optional[Dict[str, Any]]:
+        if self.cfg.external_system_type != "tally":
+            return None
+        return self.tally.fetch_ledger_snapshot(name)
 
     def fetch_tally_companies(self) -> List[Dict[str, str]]:
         if self.cfg.external_system_type != "tally":

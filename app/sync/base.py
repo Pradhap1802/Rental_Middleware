@@ -63,28 +63,79 @@ def _parse_date_boundary(value: Optional[str], end_of_day: bool = False) -> Opti
 
 
 def extract_identifier(entity_type: str, item: Dict[str, Any]) -> str:
+    """
+    Returns the identity used to probe the target system for timeout-recovery
+    (base.py's "was this already created by a previous, timed-out attempt" check).
+
+    For voucher-based entities this MUST be the same deterministic RENTAL-XXX-{id}
+    marker that sync_rental_order/sync_invoice/sync_payment stamp into REMOTEID/
+    NARRATION (see tally/client.py) — not the human-facing business number. A bare
+    number like "26" is a generic short string that produces false-positive
+    substring matches against unrelated MASTERID/NARRATION text elsewhere in the
+    Tally company's voucher export, wrongly marking a never-created record as
+    already synced (confirmed live).
+    """
     ent = (entity_type or "").lower().strip()
     if ent in ("customer", "customers"):
         return str(item.get("name") or item.get("business_name") or "").strip()
     elif ent in ("equipment", "product", "products"):
         return str(item.get("name") or "").strip()
     elif ent in ("rental_orders", "rental_order", "order", "orders"):
-        raw_num = str(item.get("number") or item.get("rent_code") or "").strip()
-        return raw_num if raw_num and raw_num != "0" else f"ORD-{item.get('id')}"
+        return f"RENTAL-ORD-{item.get('id')}"
     elif ent in ("invoices", "invoice"):
-        raw_num = str(item.get("number") or item.get("invoice_number") or "").strip()
-        return raw_num if raw_num and raw_num != "0" else f"INV-{item.get('id')}"
+        return f"RENTAL-INV-{item.get('id')}"
     elif ent in ("payments", "payment"):
-        raw_ref = str(item.get("reference_id") or item.get("payment_number") or item.get("number") or "").strip()
-        return raw_ref if raw_ref and raw_ref != "0" else f"PAY-{item.get('id')}"
+        return f"RENTAL-PAY-{item.get('id')}"
     return ""
 
 
 import threading
 from .idempotency import generate_integration_key, check_target_system_record_exists
+from .conflicts import ConflictDetector
 from ..queue.lock_manager import LockManager
 from ..validation.validator import validate_entity_payload
 from .dependencies import DependencyResolver, MissingDependencyException
+
+
+def detect_customer_conflicts(
+    item: Dict[str, Any],
+    external_client: Any,
+    store: MappingStore,
+    company_id: str = "default",
+) -> None:
+    """
+    Before Altering an existing Tally customer ledger with RentAsst's data, checks
+    whether the ledger's mobile/email/GST fields were independently edited directly
+    in Tally since our last push. Any field where both sides carry a different,
+    non-empty value is recorded as an OPEN conflict via ConflictDetector — informational
+    only, RentAsst's value still wins the Alter as before (unchanged behavior); this
+    just makes the divergence visible instead of a silent overwrite.
+    """
+    name = (item.get("name") or item.get("business_name") or "").strip()
+    if not name or not hasattr(external_client, "fetch_ledger_snapshot"):
+        return
+    try:
+        tally_snapshot = external_client.fetch_ledger_snapshot(name)
+    except Exception:
+        tally_snapshot = None
+    if not tally_snapshot:
+        return
+
+    rentasst_data = {
+        "mobile": str(item.get("mobile") or item.get("phone") or "").strip(),
+        "email": str(item.get("email") or "").strip(),
+        "gst_number": str(item.get("customer_gst_number") or item.get("gst_number") or "").strip(),
+    }
+    try:
+        ConflictDetector(store).detect_and_record_conflicts(
+            entity_type="customer",
+            entity_id=name,
+            rentasst_data=rentasst_data,
+            tally_data=tally_snapshot,
+            company_id=company_id,
+        )
+    except Exception as e:
+        log_event("Conflict", f"Customer conflict detection note for '{name}': {e}")
 
 
 def run_sync_pipeline(
@@ -171,8 +222,32 @@ def run_sync_pipeline(
                     # 3. Integration Key & Content Hash Deduplication Check
                     existing_key_mapping = store.find_by_integration_key(integration_key)
                     if existing_key_mapping and store.is_duplicate(entity_type, item_id, payload_hash, source_company_id=source_company_id):
-                        stats["skipped"] += 1
-                        continue
+                        # Master data (equipment/customer) can be deleted or reset directly in Tally
+                        # after we last synced it — the content hash alone can't detect that, since
+                        # the RentAsst-side record hasn't changed. Re-verify it's still actually there
+                        # before trusting the skip; otherwise a Tally-side reset permanently strands
+                        # the record as "synced" and every dependent voucher fails forever (confirmed
+                        # live: "Moto G45" stayed skipped while Tally reported it did not exist).
+                        target_still_exists = True
+                        if (
+                            entity_type.lower() in ("equipment", "product", "products", "customer", "customers")
+                            and identifier
+                            and external_client
+                            and hasattr(external_client, "check_exists_in_tally")
+                        ):
+                            try:
+                                target_still_exists = external_client.check_exists_in_tally(entity_type.lower(), identifier)
+                            except Exception:
+                                target_still_exists = True  # fail open: don't force a re-sync storm on a transient Tally error
+
+                        if target_still_exists:
+                            stats["skipped"] += 1
+                            continue
+
+                        log_event(
+                            "Idempotency",
+                            f"Record '{identifier}' for entity '{entity_type}' #{item_id} was marked synced but no longer exists in Tally — re-syncing instead of skipping.",
+                        )
 
 
                     # 4. Timeout Recovery / Target System Pre-Check
@@ -207,6 +282,10 @@ def run_sync_pipeline(
                     # 5. Create / Update Sync Execution
                     try:
                         ext_id = store.get_external_id(entity_type, item_id, source_company_id=source_company_id)
+
+                        if ext_id and entity_type.lower() in ("customer", "customers") and external_client:
+                            detect_customer_conflicts(item, external_client, store, source_company_id)
+
                         new_ext_id = sync_func(item)
                         final_ext_id = new_ext_id or ext_id or item_id
                         

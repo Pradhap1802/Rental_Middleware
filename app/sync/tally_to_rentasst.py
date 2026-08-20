@@ -1,7 +1,7 @@
 import time
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
 # REMOTEID prefixes the forward (RentAsst -> Tally) sync stamps onto every voucher it
@@ -428,19 +428,20 @@ def sync_tally_to_rentasst(
                 if v_type in ("sales order", "sales orders", "order", "orders", "rental order", "rental orders"):
                     cust_id = resolve_customer_id(party_name, ra_client, store)
                     amount = float(v.get("amount") or 0.0)
+                    # create-rent-details validates rent_from/rent_to with the strict Laravel
+                    # rule date_format:Y-m-d H:i:s — a date-only string fails that rule.
+                    rent_datetime = f"{iso_date} 00:00:00"
 
                     rentout_payload = {
                         "number": str(v.get("voucher_number") or f"ORD-{tally_guid[:8]}"),
                         "customer_id": cust_id,
-                        "rent_from": iso_date,
-                        "rent_to": iso_date,
+                        "rent_from": rent_datetime,
+                        "rent_to": rent_datetime,
                         "order_booking_date": iso_date,
                         "grand_total": amount,
                         "total_amount": amount,
-                        "status": "confirmed",
                         "notes": f"Imported from Tally Sales Order #{v.get('voucher_number')}",
                         "tally_guid": tally_guid,
-                        "items": v.get("items") or [],
                     }
 
                     # 1. Field Ownership Policy Filter (Reverse Direction: Tally -> RentAsst)
@@ -463,6 +464,32 @@ def sync_tally_to_rentasst(
                         status="synced",
                     )
                     store.add_history("rental_order", ra_id, "synced", external_id=tally_guid, details="Tally Sales Order Reverse Sync")
+
+                    # 4. Push line items separately — create-rent-details silently drops
+                    # "items" in its own body (Rent's fillable fields don't include it), so
+                    # each product/quantity/unit-price line has to go via add-rent-item.
+                    # RentAsst rejects rent_from == rent_to ("Start and end times are
+                    # identical") — Tally's Sales Order only carries one date, so default
+                    # to a 1-day rental period, matching the day-based calculation_method.
+                    item_rent_to = (datetime.strptime(iso_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d") + " 00:00:00"
+                    for item in (v.get("items") or []):
+                        item_name = (item.get("name") or "").strip()
+                        if not item_name:
+                            continue
+                        try:
+                            ra_client.push_rentout_item(ra_id, {
+                                "asset_name": item_name,
+                                "rented_quantity": int(item.get("quantity") or 1),
+                                "price": item.get("rate") or 0,
+                                "calculation_method": 1,
+                                "rent_from": rent_datetime,
+                                "rent_to": item_rent_to,
+                            })
+                        except Exception as e:
+                            log_event(
+                                "ReverseSync",
+                                f"Failed to push item '{item_name}' for Rent Out {ra_id} (Tally voucher #{v.get('voucher_number')}): {e}",
+                            )
                     stats["created"] += 1
 
                 elif v_type in ("sales", "sales invoice", "invoice"):

@@ -38,15 +38,16 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
             <PARENT>Sales Accounts</PARENT>
           </LEDGER>\n"""
 
-    party_entry = f"""            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>{escape_xml(cust_name)}</LEDGERNAME>
-              <ISPARTYLEDGER>YES</ISPARTYLEDGER>
-              <ISDEEMEDPOSITIVE>YES</ISDEEMEDPOSITIVE>
-              <AMOUNT>-{amount:.2f}</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>"""
-
+    # Item lines go in a top-level ALLINVENTORYENTRIES.LIST — a SIBLING of ALLLEDGERENTRIES.LIST
+    # under VOUCHER, each with its own ACCOUNTINGALLOCATIONS.LIST — NOT nested inside a ledger
+    # entry. Confirmed against a real Tally-native Sales Order export (a voucher entered
+    # directly in the Tally UI): that's the only structure Tally's Order Processing accepts for
+    # a Sales Order voucher carrying stock items — the ledger-nested INVENTORYALLOCATIONS.LIST
+    # shape used here previously is a different, invoice-only convention and gets silently
+    # rejected (EXCEPTIONS>0, no LASTVCHID) for VTYPE="Sales Order".
     items = data.get("rent_items") or data.get("items") or data.get("assets") or data.get("details") or []
-    inventory_allocations = ""
+    inventory_entries = ""
+    items_total = 0.0
     if isinstance(items, list) and len(items) > 0:
         for item in items:
             if isinstance(item, dict):
@@ -56,29 +57,66 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
                 price = float(item.get("price") or item.get("rent_price") or item.get("rate") or 0)
                 item_total = float(item.get("total_price") or item.get("amount") or item.get("total") or (price * qty))
                 unit = item.get("unit") or "Nos"
+                items_total += item_total
 
-                inventory_allocations += f"""
-              <INVENTORYALLOCATIONS.LIST>
-                <STOCKITEMNAME>{escape_xml(item_name)}</STOCKITEMNAME>
-                <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
-                <RATE>{price:.2f}/{escape_xml(unit)}</RATE>
+                inventory_entries += f"""
+            <ALLINVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>{escape_xml(item_name)}</STOCKITEMNAME>
+              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+              <RATE>{price:.2f}/{escape_xml(unit)}</RATE>
+              <AMOUNT>{item_total:.2f}</AMOUNT>
+              <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
+              <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
+              <BATCHALLOCATIONS.LIST>
+                <GODOWNNAME>Main Location</GODOWNNAME>
+                <BATCHNAME>Primary Batch</BATCHNAME>
+                <ORDERNO>{escape_xml(num)}</ORDERNO>
                 <AMOUNT>{item_total:.2f}</AMOUNT>
                 <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
                 <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
-                <BATCHALLOCATIONS.LIST>
-                  <GODOWNNAME>Main Location</GODOWNNAME>
-                  <BATCHNAME>Primary Batch</BATCHNAME>
-                  <AMOUNT>{item_total:.2f}</AMOUNT>
-                  <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
-                  <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
-                </BATCHALLOCATIONS.LIST>
-              </INVENTORYALLOCATIONS.LIST>"""
+              </BATCHALLOCATIONS.LIST>
+              <ACCOUNTINGALLOCATIONS.LIST>
+                <LEDGERNAME>Sales Account</LEDGERNAME>
+                <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+                <AMOUNT>{item_total:.2f}</AMOUNT>
+              </ACCOUNTINGALLOCATIONS.LIST>
+            </ALLINVENTORYENTRIES.LIST>"""
 
-    sales_entry = f"""
+    # When item lines are present, the ledger totals must equal their sum (Tally requires the
+    # accounting side to balance against ACCOUNTINGALLOCATIONS) — otherwise fall back to the
+    # order's own total, unchanged from before item support existed.
+    ledger_amount = items_total if inventory_entries else amount
+
+    if inventory_entries:
+        # Confirmed against a real Tally-native Sales Order export (entered directly in the
+        # Tally UI, with stock items): a Sales Order voucher carrying items has NO separate
+        # top-level "Sales Account" ledger entry at all — the income side lives entirely in
+        # each item's own ACCOUNTINGALLOCATIONS.LIST above. The party reference itself uses
+        # the singular LEDGERENTRIES.LIST tag (not ALLLEDGERENTRIES.LIST), with an explicit
+        # bill-by-bill BILLALLOCATIONS.LIST, matching that same native export exactly.
+        party_entry = f"""            <LEDGERENTRIES.LIST>
+              <LEDGERNAME>{escape_xml(cust_name)}</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>YES</ISDEEMEDPOSITIVE>
+              <AMOUNT>-{ledger_amount:.2f}</AMOUNT>
+              <BILLALLOCATIONS.LIST>
+                <NAME>{escape_xml(num)}</NAME>
+                <BILLTYPE>New Ref</BILLTYPE>
+                <AMOUNT>-{ledger_amount:.2f}</AMOUNT>
+              </BILLALLOCATIONS.LIST>
+            </LEDGERENTRIES.LIST>"""
+        sales_entry = ""
+    else:
+        party_entry = f"""            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>{escape_xml(cust_name)}</LEDGERNAME>
+              <ISPARTYLEDGER>YES</ISPARTYLEDGER>
+              <ISDEEMEDPOSITIVE>YES</ISDEEMEDPOSITIVE>
+              <AMOUNT>-{ledger_amount:.2f}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>"""
+        sales_entry = f"""
             <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>Sales Account</LEDGERNAME>
               <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
-              <AMOUNT>{amount:.2f}</AMOUNT>{inventory_allocations}
+              <AMOUNT>{ledger_amount:.2f}</AMOUNT>
             </ALLLEDGERENTRIES.LIST>"""
 
     msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="Sales Order" ACTION="{action}" REMOTEID="RENTAL-ORD-{data.get('id')}">
@@ -88,7 +126,7 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
             <VOUCHERTYPENAME>Sales Order</VOUCHERTYPENAME>
             <VOUCHERNUMBER>{escape_xml(num)}</VOUCHERNUMBER>
             <NARRATION>RENTAL-ORD-{data.get('id')}</NARRATION>
-            <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{party_entry}{sales_entry}
+            <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{party_entry}{sales_entry}{inventory_entries}
           </VOUCHER>"""
 
     return build_import_envelope(msg, report_name="Vouchers", company_name=company_name)

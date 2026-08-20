@@ -21,10 +21,10 @@ class TestHashingAndTransformers(unittest.TestCase):
         self.assertEqual(extract_identifier("customer", cust), "Acme Rentals")
 
         inv = {"id": 55, "number": "INV-2026-99"}
-        self.assertEqual(extract_identifier("invoice", inv), "INV-2026-99")
+        self.assertEqual(extract_identifier("invoice", inv), "RENTAL-INV-55")
 
         pay = {"id": 88, "reference_id": "PAY-REF-777"}
-        self.assertEqual(extract_identifier("payment", pay), "PAY-REF-777")
+        self.assertEqual(extract_identifier("payment", pay), "RENTAL-PAY-88")
 
     def test_filter_payload_by_ownership_forward(self):
         # Forward Sync: RentAsst -> Tally
