@@ -42,12 +42,6 @@ class RentAsstClient:
                 data = r.json()
                 return data.get("data", data) if isinstance(data, dict) else data
             except requests.exceptions.JSONDecodeError as e:
-                # A 200 with a non-JSON body means this path isn't a real API route — the
-                # PHP backend's SPA catch-all router served index.html instead of a 404 (same
-                # class of issue already handled for fetch_rental_orders's /rent fallback).
-                # Try the next candidate rather than treating it as a hard failure.
-                if r.status_code == 200:
-                    continue
                 snippet = (r.text or "")[:150].replace("\n", " ").strip()
                 raise RetryableException(
                     f"RentAsst API at {url} returned invalid non-JSON response (Status {r.status_code}): {snippet}"
@@ -105,6 +99,8 @@ class RentAsstClient:
             "login_email": clean_email,
             "login_mail_id": clean_email,
             "username": clean_email,
+            "mobile": clean_email,
+            "phone": clean_email,
         }
         if clean_business_code:
             payload["business_code"] = clean_business_code
@@ -142,8 +138,6 @@ class RentAsstClient:
                         raise Exception(f"RentAsst Authentication Failed ({r.status_code}): {msg}")
                     except requests.exceptions.JSONDecodeError:
                         raise Exception(f"RentAsst Authentication Failed ({r.status_code}).")
-                elif r.status_code not in (404, 405):
-                    last_error = Exception(f"RentAsst API at {url} returned unexpected HTTP {r.status_code}: {(r.text or '')[:150]}")
             except Exception as e:
                 last_error = e
                 if "Authentication Failed" in str(e):
@@ -428,43 +422,6 @@ class RentAsstClient:
             return enriched
         return assets
 
-    def _enrich_rent_items(self, orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        /rent-list only returns a rent_items_count, not the actual line items, so forward
-        sync never had product/quantity/price data to send to Tally in the first place.
-        Fetches the real lines per order via get-rent-items/{id} (confirmed live: returns
-        asset_name, rented_quantity, price, total_price, asset.asset_unit.symbol) and
-        normalizes them into the "rent_items" shape build_sales_order_voucher_xml expects.
-        """
-        for order in orders:
-            if not isinstance(order, dict) or order.get("rent_items"):
-                continue
-            order_id = order.get("id")
-            if not order_id:
-                continue
-            try:
-                raw_items = self._request_with_fallback([f"get-rent-items/{order_id}"])
-            except Exception:
-                continue
-            if not isinstance(raw_items, list):
-                continue
-
-            rent_items = []
-            for it in raw_items:
-                if not isinstance(it, dict):
-                    continue
-                asset = it.get("asset") or {}
-                unit_symbol = (asset.get("asset_unit") or {}).get("symbol") or "Nos"
-                rent_items.append({
-                    "name": it.get("asset_name") or asset.get("name") or "Equipment",
-                    "quantity": it.get("rented_quantity") or 1,
-                    "price": it.get("price") or 0,
-                    "total_price": it.get("total_price") or it.get("grand_total") or 0,
-                    "unit": unit_symbol,
-                })
-            order["rent_items"] = rent_items
-        return orders
-
     def fetch_rental_orders(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
         # Try POST /api/rent-list first (RentAsst primary API)
         url = f"{self.base_url}/rent-list"
@@ -491,7 +448,7 @@ class RentAsstClient:
                     )
                 items = data.get("data", data)
                 if isinstance(items, list):
-                    return self._enrich_rent_items(items)
+                    return items
                 # Unexpected dict shape — return empty rather than falling to broken endpoints
                 return []
 
@@ -507,8 +464,7 @@ class RentAsstClient:
         params: Dict[str, Any] = {}
         if status:
             params["status"] = status
-        fallback_items = self._request_with_fallback(["rent"], params)
-        return self._enrich_rent_items(fallback_items) if isinstance(fallback_items, list) else fallback_items
+        return self._request_with_fallback(["rent"], params)
 
     def fetch_invoices(self) -> List[Dict[str, Any]]:
         return self._request_with_fallback(["invoices", "invoice"])
@@ -517,17 +473,8 @@ class RentAsstClient:
         return self._request_with_fallback(["payment", "payments"])
 
     def fetch_businesses(self) -> List[Dict[str, Any]]:
-        """
-        Fetches list of available RentAsst business companies for multi-tenant company selection.
-
-        get_user_business_list is the real, confirmed route (UserController@getUserActiveBusinesses,
-        routes/api.php:857). The previous candidates ("user/businesses", "business", "tenants",
-        "businesses") were all wrong — none are registered routes, so each one hit the PHP
-        backend's SPA catch-all and returned a 200 with an HTML shell body instead of JSON,
-        which _request_with_fallback then raised as a hard error before ever reaching a real
-        endpoint.
-        """
-        return self._request_with_fallback(["get_user_business_list", "user/businesses", "business", "tenants", "businesses"])
+        """Fetches list of available RentAsst business companies for multi-tenant company selection."""
+        return self._request_with_fallback(["user/businesses", "business", "tenants", "businesses"])
 
     def _post_with_fallback(self, endpoints: List[str], payload: Dict[str, Any]) -> Any:
         last_error = None
@@ -613,38 +560,8 @@ class RentAsstClient:
         return None
 
     def push_rentout(self, rentout_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Push a Tally Sales Order voucher as a Rent Out to RentAsst Cloud API.
-
-        Uses only "create-rent-details" — the real, confirmed RentController@createRentDetails
-        route. Previous fallback candidates ("rent", "rents", "rental-orders", "invoice",
-        "invoices") were wrong: "/rent" has no store() handler (500, not 404), and "/invoice"
-        /"/invoices" are a genuinely different resource (InvoiceRequest requires invoice_date/
-        due_date/bill_from/bill_to, none of which a rent-out payload carries) — silently
-        falling through to them just masked the real error behind an unrelated 422.
-        """
-        url = f"{self.base_url}/create-rent-details"
-        r = self.session.post(url, json=rentout_data, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
-        r.raise_for_status()
-        data = r.json()
-        return data.get("data", data) if isinstance(data, dict) else data
-
-    def push_rentout_item(self, rent_id: Any, item_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Adds one line item to an existing Rent Out via /rent/{rent_id}/add-rent-item.
-
-        create-rent-details silently drops any "items" in its own request body — Rent's
-        fillable fields don't include it (confirmed by reading RentService::createNewRent) —
-        so line items MUST be added via this separate endpoint after the rent-out itself
-        is created. Omitting asset_id lets RentAsst auto-create/match the Asset by
-        asset_name (RentItemsService auto-creates a new Asset inline from asset_name +
-        calculation_method + price when asset_id is absent and asset_type isn't 'free_text').
-        """
-        url = f"{self.base_url}/rent/{rent_id}/add-rent-item"
-        r = self.session.post(url, json=item_data, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
-        r.raise_for_status()
-        data = r.json()
-        return data.get("data", data) if isinstance(data, dict) else data
+        """Push a Tally Sales Register / Voucher as a Rentout / Rental Order to RentAsst Cloud API."""
+        return self._post_with_fallback(["create-rent-details", "rent", "rents", "rental-orders", "invoice", "invoices"], rentout_data)
 
     def push_invoice(self, invoice_data: Dict[str, Any]) -> Dict[str, Any]:
         """Push an invoice record from Tally to RentAsst Cloud API."""

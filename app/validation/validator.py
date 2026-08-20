@@ -122,27 +122,21 @@ class PayloadValidator:
             or data.get("shipping_charge") or data.get("other_charges") or 0
         )
         discount = float(data.get("discount") or data.get("discount_amount") or data.get("discountAmount") or 0)
-        roundoff = float(
-            data.get("roundoff_amount") or data.get("round_off_amount")
-            or data.get("roundoff") or data.get("round_off") or 0
-        )
 
         # Fall back subtotal if not provided separately
         if subtotal == 0 and grand_total > 0:
-            subtotal = max(0.0, grand_total - tax - charges + discount - roundoff)
+            subtotal = max(0.0, grand_total - tax - charges + discount)
 
         doc_type = data.get("document_type")
         if doc_type != "credit_note" and grand_total <= 0:
             return False, f"Invoice grand total must be greater than zero (grand_total: {grand_total})"
 
         # 3. Handle implicit tax/adjustments where grand_total > subtotal + charges - discount
-        if tax == 0 and grand_total > (subtotal + charges - discount + roundoff):
-            tax = round(grand_total - (subtotal + charges - discount + roundoff), 2)
+        if tax == 0 and grand_total > (subtotal + charges - discount):
+            tax = round(grand_total - (subtotal + charges - discount), 2)
 
-        # Invoice Math Validation: subtotal + tax + charges - discount + roundoff = grand_total (±0.05 tolerance)
-        # roundoff accounts for RentAsst's optional invoice-level round-off (e.g. "round to nearest 1"),
-        # which deliberately makes grand_total differ from the raw subtotal/tax/charges/discount sum.
-        calculated_total = round(subtotal + tax + charges - discount + roundoff, 2)
+        # Invoice Math Validation: subtotal + tax + charges - discount = grand_total (±0.05 tolerance)
+        calculated_total = round(subtotal + tax + charges - discount, 2)
         diff = abs(calculated_total - round(grand_total, 2))
         if diff > 0.05:
             return (

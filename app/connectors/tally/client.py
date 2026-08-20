@@ -1,5 +1,4 @@
 import requests
-import xml.etree.ElementTree as ET
 from typing import Dict, Any, List, Optional
 from requests.adapters import HTTPAdapter
 
@@ -108,73 +107,12 @@ class TallyClient:
 
         try:
             r = self.session.post(self.base_url, data=xml.encode("utf-8"), headers={"Content-Type": "text/xml"}, timeout=10)
-            if r.status_code != 200:
-                return False
-            clean = sanitize_tally_xml(r.content)
-
-            if tally_type == "Voucher":
-                # Raw substring matching is unsafe for voucher markers: "RENTAL-ORD-2" is a
-                # substring of "RENTAL-ORD-20", "RENTAL-ORD-21", etc. — a near-guaranteed false
-                # positive once 10+ orders/invoices/payments exist, which wrongly decides "Alter"
-                # for a voucher that was never actually created under that identity (confirmed
-                # live: Tally then returns EXCEPTIONS>0 with LASTVCHID=0 — nothing to alter).
-                # Parse properly and require an exact match on NARRATION or REMOTEID.
-                try:
-                    root = ET.fromstring(clean)
-                except ET.ParseError:
-                    return False
-                target = identifier.strip().lower()
-                for v_node in root.iter("VOUCHER"):
-                    narration = (v_node.findtext("NARRATION") or "").strip().lower()
-                    remote_id = (v_node.attrib.get("REMOTEID") or "").strip().lower()
-                    if target and (narration == target or remote_id == target):
-                        return True
-                return False
-
-            return identifier.lower() in clean.lower()
+            if r.status_code == 200:
+                clean = sanitize_tally_xml(r.content)
+                return identifier.lower() in clean.lower()
         except Exception:
             pass
         return False
-
-    def fetch_ledger_snapshot(self, name: str) -> Optional[Dict[str, Any]]:
-        """
-        Fetches the CURRENT field values of an existing Tally customer ledger, for
-        comparison against RentAsst's data before an Alter — lets the caller detect
-        whether someone edited this ledger directly in Tally (outside the middleware)
-        since the last forward sync. Returns None if the ledger isn't found or the
-        query fails; callers should treat that as "nothing to compare against".
-        """
-        if not name:
-            return None
-        company_name = getattr(self.cfg, "tally_company_name", None)
-        xml = build_export_collection_envelope(
-            "CustomerLedgerSnapshot",
-            "LEDGER",
-            "NAME, LEDGERMOBILE, EMAIL, PARTYGSTIN",
-            company_name=company_name,
-        )
-        try:
-            r = self.session.post(self.base_url, data=xml.encode("utf-8"), headers={"Content-Type": "text/xml"}, timeout=10)
-            if r.status_code != 200:
-                return None
-            clean = sanitize_tally_xml(r.content)
-            root = ET.fromstring(clean)
-            for node in root.iter("LEDGER"):
-                ledger_name = (node.findtext("NAME") or node.attrib.get("NAME") or "").strip()
-                if ledger_name.lower() != name.strip().lower():
-                    continue
-                # Only the flat, unambiguous fields we write verbatim (see build_customer_ledger_xml) —
-                # ADDRESS/STATE/PINCODE are deliberately excluded: they're derived from RentAsst's nested
-                # address object via nontrivial resolution logic, so comparing them here would require
-                # duplicating that logic and risk false-positive conflicts from formatting drift alone.
-                return {
-                    "mobile": (node.findtext("LEDGERMOBILE") or "").strip(),
-                    "email": (node.findtext("EMAIL") or "").strip(),
-                    "gst_number": (node.findtext("PARTYGSTIN") or "").strip(),
-                }
-        except Exception:
-            return None
-        return None
 
     def sync_customer(self, data: Dict[str, Any]) -> str:
         name = (data.get("name") or data.get("business_name") or f"Customer-{data.get('id')}").strip()

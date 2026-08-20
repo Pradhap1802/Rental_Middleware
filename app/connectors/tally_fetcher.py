@@ -13,30 +13,6 @@ def _to_tally_date(value: Optional[str]) -> Optional[str]:
     return digits if len(digits) == 8 else None
 
 
-def _parse_tally_quantity(raw: Optional[str]) -> "tuple[float, str]":
-    """Splits Tally's 'qty unit' export string (e.g. ' 2 pc') into (numeric_qty, unit)."""
-    if not raw:
-        return 0.0, ""
-    match = re.match(r"^\s*(-?[\d.]+)\s*(.*)$", raw)
-    if not match:
-        return 0.0, ""
-    try:
-        qty = float(match.group(1))
-    except ValueError:
-        qty = 0.0
-    return qty, match.group(2).strip()
-
-
-def _parse_tally_rate(raw: Optional[str]) -> float:
-    """Extracts the numeric rate from Tally's 'rate/unit' export string (e.g. '20.00/pc')."""
-    if not raw:
-        return 0.0
-    try:
-        return float(raw.strip().split("/")[0].strip())
-    except ValueError:
-        return 0.0
-
-
 def sanitize_tally_xml(raw: Any) -> str:
     """Sanitizes raw Tally XML responses by stripping control chars, BOM, and numeric entities."""
     if isinstance(raw, bytes):
@@ -93,7 +69,7 @@ class TallyFetcher:
             <TDLMESSAGE>
                <COLLECTION NAME="VouchersCollection" ISMODIFY="No">
                   <TYPE>Voucher</TYPE>
-                  <FETCH>MASTERID, ALTERID, GUID, VOUCHERNUMBER, VOUCHERTYPENAME, DATE, PARTYNAME, PARTYLEDGERNAME, AMOUNT, REFERENCE, NARRATION, ALLLEDGERENTRIES.LIST, ALLINVENTORYENTRIES.LIST, BILLALLOCATIONS.LIST</FETCH>
+                  <FETCH>MASTERID, ALTERID, GUID, VOUCHERNUMBER, VOUCHERTYPENAME, DATE, PARTYNAME, PARTYLEDGERNAME, AMOUNT, REFERENCE, NARRATION, ALLLEDGERENTRIES.LIST, INVENTORYENTRIES.LIST, BILLALLOCATIONS.LIST</FETCH>
                </COLLECTION>
             </TDLMESSAGE>
          </TDL>
@@ -308,30 +284,20 @@ class TallyFetcher:
                                 bill_ref = bill_name
                                 break
 
-                # Parse Inventory Items if present. Tally's native voucher export nests these
-                # under ALLINVENTORYENTRIES.LIST (NOT "INVENTORYENTRIES.LIST" — that tag doesn't
-                # exist in Tally's own export; it was only ever the import-side wrapper name we
-                # use when building outbound XML, which is a different, non-symmetric structure
-                # from what Tally hands back). ACTUALQTY/RATE come back as combined "qty unit" /
-                # "rate/unit" strings (e.g. " 2 pc", "20.00/pc"), so split the unit out.
+                # Parse Inventory Items if present
                 items = []
-                for item_node in v_node.findall(".//ALLINVENTORYENTRIES.LIST"):
-                    item_name = (item_node.findtext("STOCKITEMNAME") or "").strip()
-                    if not item_name:
-                        continue
-                    qty, unit = _parse_tally_quantity(item_node.findtext("ACTUALQTY") or item_node.findtext("BILLEDQTY"))
-                    rate = _parse_tally_rate(item_node.findtext("RATE"))
-                    try:
-                        item_amt = abs(float(item_node.findtext("AMOUNT") or 0))
-                    except ValueError:
-                        item_amt = 0.0
-                    items.append({
-                        "name": item_name,
-                        "quantity": qty,
-                        "unit": unit,
-                        "rate": rate,
-                        "amount": item_amt,
-                    })
+                for item_node in v_node.findall(".//INVENTORYENTRIES.LIST"):
+                    item_name = item_node.findtext("STOCKITEMNAME")
+                    qty = item_node.findtext("ACTUALQTY") or item_node.findtext("BILLEDQTY")
+                    rate = item_node.findtext("RATE")
+                    item_amt = item_node.findtext("AMOUNT")
+                    if item_name:
+                        items.append({
+                            "name": item_name,
+                            "quantity": qty,
+                            "rate": rate,
+                            "amount": item_amt
+                        })
 
                 if guid or v_no or alter_id > 0:
                     vouchers.append({
