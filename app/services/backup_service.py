@@ -2,7 +2,7 @@ import os
 import shutil
 import sqlite3
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from ..models.domain import BackupModel
 from ..logging.logger import log_event
 

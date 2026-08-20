@@ -1,5 +1,5 @@
 import re
-from typing import Any, Dict, List, Union, Optional
+from typing import Any, Optional
 
 SENSITIVE_KEYS = {
     "password", "token", "api_key", "secret", "authorization", "auth",

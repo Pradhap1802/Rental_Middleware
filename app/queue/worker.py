@@ -1,7 +1,7 @@
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Callable, Any, Dict
+from typing import Optional, Callable, Any
 from .queue_store import QueueStore
 from ..logging.logger import log_event
 from ..retry.engine import is_retryable_exception, get_backoff_delay_seconds

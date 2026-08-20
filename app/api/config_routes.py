@@ -1,4 +1,4 @@
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from fastapi import APIRouter, Depends, Request
 from ..models.domain import AppConfig
 from ..services.config_service import ConfigService

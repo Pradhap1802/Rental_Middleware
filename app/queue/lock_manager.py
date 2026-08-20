@@ -1,5 +1,4 @@
 import sqlite3
-import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from ..database.connection import DatabaseManager

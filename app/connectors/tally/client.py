@@ -4,7 +4,7 @@ from requests.adapters import HTTPAdapter
 
 from ...models.domain import AppConfig
 from .xml_builder import sanitize_tally_xml, build_export_collection_envelope
-from .parser import validate_tally_accounting_success, parse_tally_xml
+from .parser import validate_tally_accounting_success
 from .company import build_fetch_companies_xml, parse_fetch_companies_response
 from .ledger import build_customer_ledger_xml
 from .stock_item import build_stock_item_xml

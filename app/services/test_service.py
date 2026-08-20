@@ -1,4 +1,3 @@
-import requests
 from typing import Dict, Any
 from ..configuration.store import ConfigStore
 from ..clients.rentasst_client import RentAsstClient

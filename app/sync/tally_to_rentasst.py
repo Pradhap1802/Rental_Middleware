@@ -17,7 +17,6 @@ from ..mapping.store import MappingStore
 from ..logging.logger import log_event
 from .idempotency import generate_integration_key
 from .ownership import filter_payload_by_ownership
-from .conflicts import ConflictDetector
 from ..validation.validator import validate_entity_payload
 
 
@@ -245,12 +244,11 @@ def sync_tally_to_rentasst(
     """
     Production-grade reverse synchronization runner:
     Fetches Vouchers (Sales Orders, Sales Invoices, Receipts) from Tally Prime, applies reverse field-ownership policy filtering,
-    detects conflicts, validates payload schemas, posts to RentAsst Cloud API, and persists SQLite mapping 
+    validates payload schemas, posts to RentAsst Cloud API, and persists SQLite mapping
     ONLY AFTER confirmed HTTP success response.
     """
     stats = {"processed": 0, "created": 0, "updated": 0, "failed": 0, "skipped": 0}
     start_time = time.time()
-    detector = ConflictDetector(store)
 
     fetcher = TallyFetcher(ext_client.cfg)
     if force_full_sync:

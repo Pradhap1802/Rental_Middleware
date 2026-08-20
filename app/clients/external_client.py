@@ -1,14 +1,8 @@
 import requests
 from requests.adapters import HTTPAdapter
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from ..models.domain import AppConfig
-from ..connectors.tally import (
-    TallyClient,
-    sanitize_tally_xml,
-    escape_xml,
-    format_tally_date,
-    normalize_state_name,
-)
+from ..connectors.tally import TallyClient
 
 
 class ExternalClient:

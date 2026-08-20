@@ -1,7 +1,7 @@
 import html
 import re
 from datetime import datetime
-from typing import Any, Optional, Dict
+from typing import Any, Optional
 
 
 def sanitize_tally_xml(raw: Any) -> str:

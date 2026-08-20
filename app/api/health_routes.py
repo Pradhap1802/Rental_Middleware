@@ -1,10 +1,8 @@
 import time
-import sqlite3
 from fastapi import APIRouter, Request, Response, status
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 from ..mapping.store import MappingStore
-from ..security.masking import mask_secret
 
 health_router = APIRouter(prefix="", tags=["health"])
 
