@@ -4,14 +4,16 @@ from .xml_builder import escape_xml, format_tally_date, build_import_envelope
 
 def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", company_name: Optional[str] = None) -> str:
     """
-    Builds Tally VOUCHER XML for Rent Outs, using Tally's "Memorandum" voucher type
-    rather than Sales Order. Sales Order requires "Order Processing" to be enabled under
-    the Tally company's F11 features (confirmed live: rejected with EXCEPTIONS>0
-    otherwise), which is a Tally application setting outside the middleware's control.
-    Memorandum is one of Tally's default voucher types present in every company (verified
-    live via the VoucherType collection) and is semantically the right fit for a Rent Out
-    — a provisional/reservation record that doesn't post to the books until it's actually
-    confirmed as a sale (handled separately by Invoice sync).
+    Builds Tally VOUCHER XML for Rent Outs, using Tally's "Sales Order" voucher type so
+    the order shows up in Tally's own Sales Order Book/Order Outstanding reports as soon
+    as it's created in RentAsst.
+
+    Requires "Order Processing" to be enabled under the Tally company's F11 features —
+    without it, Tally rejects this voucher type with EXCEPTIONS>0 (confirmed live). This
+    is a Tally application setting the client must enable; the middleware cannot toggle it.
+
+    Invoice sync (build_sales_invoice_voucher_xml) references this order's VOUCHERNUMBER
+    via ORDERALLOCATIONS.LIST so Tally can track fulfillment from order to invoice.
     """
     num = (
         data.get("number") or data.get("rent_code") or data.get("rent_number")
@@ -79,11 +81,11 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
               <AMOUNT>{amount:.2f}</AMOUNT>{inventory_allocations}
             </ALLLEDGERENTRIES.LIST>"""
 
-    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="Memorandum" ACTION="{action}" REMOTEID="RENTAL-ORD-{data.get('id')}">
+    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="Sales Order" ACTION="{action}" REMOTEID="RENTAL-ORD-{data.get('id')}">
             <REMOTEID>RENTAL-ORD-{data.get('id')}</REMOTEID>
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
-            <VOUCHERTYPENAME>Memorandum</VOUCHERTYPENAME>
+            <VOUCHERTYPENAME>Sales Order</VOUCHERTYPENAME>
             <VOUCHERNUMBER>{escape_xml(num)}</VOUCHERNUMBER>
             <NARRATION>RENTAL-ORD-{data.get('id')}</NARRATION>
             <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{party_entry}{sales_entry}
@@ -93,10 +95,21 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
 
 
 def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create", company_state: str = "", company_name: Optional[str] = None) -> str:
-    """Builds Tally VOUCHER XML for Sales Invoices and Credit Notes."""
+    """
+    Builds Tally VOUCHER XML for Sales Invoices and Credit Notes.
+
+    When the invoice originated from a Rent Out, RentAsst's API includes a nested
+    `rent: {id, number, status}` object (no date field at list-endpoint granularity).
+    We reference that rent's `number` — the same VOUCHERNUMBER used by the Sales Order
+    voucher built in build_sales_order_voucher_xml — via ORDERALLOCATIONS.LIST on each
+    inventory line, plus a voucher-level REFERENCE, so Tally can track order fulfillment.
+    This linkage needs live verification against a Tally company with Order Processing
+    enabled (not available during this change) before relying on it in production.
+    """
     raw_num = str(data.get("number") or data.get("invoice_number") or "").strip()
     num = raw_num if raw_num and raw_num != "0" else f"INV-{data.get('id')}"
     cust_name = (data.get("customer") or {}).get("name") or data.get("customer_name") or f"Customer-{data.get('customer_id')}"
+    order_number = str((data.get("rent") or {}).get("number") or data.get("rent_number") or "").strip()
 
     grand_total = float(data.get("grand_total") or data.get("total_amount") or data.get("amount") or 0)
     subtotal = float(data.get("subtotal") or 0)
@@ -148,6 +161,11 @@ def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create"
               <AMOUNT>-{grand_total:.2f}</AMOUNT>
             </ALLLEDGERENTRIES.LIST>"""
 
+    order_allocation = f"""
+                <ORDERALLOCATIONS.LIST>
+                  <ORDERNO>{escape_xml(order_number)}</ORDERNO>
+                </ORDERALLOCATIONS.LIST>""" if order_number else ""
+
     items = data.get("items") or []
     inventory_allocations = ""
     if isinstance(items, list) and len(items) > 0:
@@ -166,7 +184,7 @@ def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create"
                 <RATE>{price:.2f}/{escape_xml(unit)}</RATE>
                 <AMOUNT>{total:.2f}</AMOUNT>
                 <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
-                <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
+                <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>{order_allocation}
                 <BATCHALLOCATIONS.LIST>
                   <GODOWNNAME>Main Location</GODOWNNAME>
                   <BATCHNAME>Primary Batch</BATCHNAME>
@@ -207,13 +225,14 @@ def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create"
               <AMOUNT>{sgst_val:.2f}</AMOUNT>
             </ALLLEDGERENTRIES.LIST>"""
 
+    reference_tag = f"<REFERENCE>{escape_xml(order_number)}</REFERENCE>\n            " if order_number else ""
     msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="{vtype}" ACTION="{action}" REMOTEID="RENTAL-INV-{data.get('id')}">
             <REMOTEID>RENTAL-INV-{data.get('id')}</REMOTEID>
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
             <VOUCHERTYPENAME>{vtype}</VOUCHERTYPENAME>
             <VOUCHERNUMBER>{num}</VOUCHERNUMBER>
-            <NARRATION>RENTAL-INV-{data.get('id')}</NARRATION>
+            {reference_tag}<NARRATION>RENTAL-INV-{data.get('id')}</NARRATION>
             <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{party_entry}{income_entry}{tax_entries}
           </VOUCHER>"""
 

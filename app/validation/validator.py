@@ -56,9 +56,11 @@ class PayloadValidator:
         if not cust:
             return False, "Rental Order is missing required customer reference ('customer_id' or 'customer_name')"
 
-        amount = float(data.get("amount") or data.get("total_amount") or 0)
+        amount = float(data.get("amount") or data.get("total_amount") or data.get("grand_total") or data.get("rent_amount") or 0)
         if amount < 0:
             return False, f"Rental Order amount cannot be negative (amount: {amount})"
+        if amount <= 0:
+            return False, f"Rental Order has no amount to sync yet (amount: {amount}) — likely an incomplete/draft order in RentAsst"
 
         return True, None
 
