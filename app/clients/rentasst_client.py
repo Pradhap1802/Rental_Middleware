@@ -594,6 +594,22 @@ class RentAsstClient:
         """
         return self._post_with_fallback(["create-rent-details"], rentout_data)
 
+    def update_rentout(self, rent_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Updates header fields on an existing RentAsst rentout via the same
+        create-rent-details endpoint used to create it (POST, not PUT — confirmed against
+        RentAsst's own routes/api.php: 'update-rent-details/{id}' is a POST route, and
+        RentDetailsRequest's rules() branch on $this->isMethod('post')/('put'), not the
+        HTTP verb's REST semantics). Used to patch a rentout's 'settings' column when it's
+        null — see DEFAULT_RENTOUT_SETTINGS in tally_to_rentasst.py for why that's needed
+        before rent items can be added to it.
+        """
+        url = f"{self.base_url}/update-rent-details/{rent_id}"
+        r = self.session.post(url, json=payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("data", data) if isinstance(data, dict) else data
+
     def push_rentout_items(self, rent_id: str, items: List[Dict[str, Any]]) -> Any:
         """
         Creates rent items (asset, quantity, price) on an existing RentAsst rentout via

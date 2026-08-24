@@ -334,6 +334,142 @@ class TestReverseSyncHardening(unittest.TestCase):
         self.assertEqual(pushed_items[0]["rented_quantity"], 1)
         self.assertEqual(pushed_items[0]["price"], 97.0)
         self.assertEqual(pushed_items[0]["total_price"], 97.0)
+        # These three are RentAsst-side quirks confirmed live (see the comments on
+        # DEFAULT_RENTOUT_SETTINGS and the item dict in tally_to_rentasst.py): a null id
+        # crashes an availability check, identical rent_from/rent_to fails RentAsst's own
+        # duration validation, and a missing discount_is_percentage violates a NOT NULL
+        # DB constraint.
+        self.assertIsNone(pushed_items[0]["id"])
+        self.assertNotEqual(pushed_items[0]["rent_from"], pushed_items[0]["rent_to"])
+        self.assertEqual(pushed_items[0]["discount_is_percentage"], False)
+
+        # The rentout header itself must carry a non-empty settings object — an empty {}
+        # round-trips through RentAsst's own request parsing as a PHP array, not an
+        # object, and crashes identically (see DEFAULT_RENTOUT_SETTINGS).
+        pushed_rentout = mock_ra_client.push_rentout.call_args[0][0]
+        self.assertTrue(pushed_rentout["settings"])
+        self.assertIn("refund_type", pushed_rentout["settings"])
+
+    def test_reverse_sync_backfill_patches_null_settings_before_pushing_items(self):
+        """
+        A rentout created before 'settings' was included on create (or created directly
+        via this reverse-sync path some other way) still has a null settings column —
+        RentAsst's own RentItemsService::updateRentDeposit() reads
+        $rent->settings->refund_type unconditionally, and a null settings crashes that
+        whole DB transaction, rolling back the item insert too. The backfill path must
+        patch settings first whenever it's missing.
+        """
+        self.store.save_mapping(
+            entity_type="equipment",
+            source_id="Earphone",
+            target_id="4",
+            source_system="tally",
+            target_system="rentasst",
+        )
+        tally_guid = "GUID-NULL-SETTINGS-ORD"
+        rev_key = generate_integration_key("default", "rental_order", tally_guid, "reverse")
+        self.store.save_mapping(
+            entity_type="rental_order",
+            source_id=tally_guid,
+            target_id="17",
+            source_system="tally",
+            target_system="rentasst",
+            integration_key=rev_key,
+            status="synced",
+        )
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.get_rentout.return_value = {"id": "17", "rent_items_count": 0, "settings": None, "status": 1}
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        voucher = {
+            "tally_guid": tally_guid,
+            "alter_id": 44,
+            "voucher_type": "Sales Order",
+            "voucher_number": "ORD-NULL-SETTINGS",
+            "party_name": "Acme Corp",
+            "date": "2026-08-20",
+            "amount": 50.0,
+            "items": [{"name": "Earphone", "quantity": "1 Piece", "rate": "50.00/Piece", "amount": "50.00"}],
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_vouchers.return_value = [voucher]
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            sync_tally_to_rentasst(
+                ra_client=mock_ra_client,
+                ext_client=mock_ext_client,
+                store=self.store,
+                force_full_sync=True,
+            )
+
+        mock_ra_client.update_rentout.assert_called_once()
+        patched_id, patched_payload = mock_ra_client.update_rentout.call_args[0]
+        self.assertEqual(patched_id, "17")
+        self.assertTrue(patched_payload["settings"])
+        # The settings patch must happen BEFORE the items push, not after — otherwise the
+        # DB transaction the item insert runs inside would still crash on the old null
+        # settings.
+        self.assertLess(
+            mock_ra_client.method_calls.index(unittest.mock.call.update_rentout(patched_id, patched_payload)),
+            mock_ra_client.method_calls.index(unittest.mock.call.push_rentout_items("17", mock_ra_client.push_rentout_items.call_args[0][1])),
+        )
+
+    def test_reverse_sync_backfill_skips_settings_patch_when_already_present(self):
+        """The mirror case: a rentout that already has a non-null settings object must
+        not get a needless extra update_rentout call on every sync."""
+        self.store.save_mapping(
+            entity_type="equipment",
+            source_id="Earphone",
+            target_id="4",
+            source_system="tally",
+            target_system="rentasst",
+        )
+        tally_guid = "GUID-HAS-SETTINGS-ORD"
+        rev_key = generate_integration_key("default", "rental_order", tally_guid, "reverse")
+        self.store.save_mapping(
+            entity_type="rental_order",
+            source_id=tally_guid,
+            target_id="18",
+            source_system="tally",
+            target_system="rentasst",
+            integration_key=rev_key,
+            status="synced",
+        )
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.get_rentout.return_value = {"id": "18", "rent_items_count": 0, "settings": {"refund_type": 1}, "status": 1}
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        voucher = {
+            "tally_guid": tally_guid,
+            "alter_id": 45,
+            "voucher_type": "Sales Order",
+            "voucher_number": "ORD-HAS-SETTINGS",
+            "party_name": "Acme Corp",
+            "date": "2026-08-20",
+            "amount": 50.0,
+            "items": [{"name": "Earphone", "quantity": "1 Piece", "rate": "50.00/Piece", "amount": "50.00"}],
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_vouchers.return_value = [voucher]
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            sync_tally_to_rentasst(
+                ra_client=mock_ra_client,
+                ext_client=mock_ext_client,
+                store=self.store,
+                force_full_sync=True,
+            )
+
+        mock_ra_client.update_rentout.assert_not_called()
+        mock_ra_client.push_rentout_items.assert_called_once()
 
     def test_reverse_sync_backfills_missing_invoice_items_on_existing_invoice(self):
         """

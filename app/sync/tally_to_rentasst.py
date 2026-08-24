@@ -1,7 +1,7 @@
 import time
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
 # REMOTEID prefixes the forward (RentAsst -> Tally) sync stamps onto every voucher it
@@ -11,6 +11,42 @@ from typing import Dict, Any, Optional
 # back — doing so would create a duplicate record in RentAsst.
 FORWARD_REMOTE_ID_PATTERN = re.compile(r"^RENTAL-(ORD|INV|PAY)-(\d+)$")
 FORWARD_ENTITY_BY_PREFIX = {"ORD": "rental_order", "INV": "invoice", "PAY": "payment"}
+
+# RentAsst's Rent.settings column is cast to a PHP object, and several of its own
+# services (confirmed live: RentItemsService::updateRentDeposit()) read
+# $rent->settings->refund_type / ->global_deposit with no null-safe fallback — a rentout
+# with a null settings column throws "Attempt to read property on null" as soon as its
+# first rent item is created, which aborts that whole DB transaction (the item insert
+# gets rolled back too). RentAsst's own frontend always sends a fully-populated settings
+# object, which is why this only surfaces for rentouts created through this API-only
+# path. Sending an empty {} does NOT fix it either — RentDetailsRequest::all() decodes
+# settings with json_decode(..., true), so an empty object becomes an empty PHP array,
+# which round-trips through the 'object' cast as an empty array too (json_encode([]) is
+# "[]", not "{}") — ->refund_type on an array is a different, equally fatal error. This
+# needs at least one real key so PHP's json_encode emits a JSON object, not an array.
+DEFAULT_RENTOUT_SETTINGS = {
+    "refund_type": 1,  # RefundTypes::TOTAL_DEPOSIT_REFUND — same default used elsewhere
+    "roundoff_enabled": False,
+    "gst_enabled": False,
+    "is_discount": False,
+    "is_draft": False,
+    "is_due_notified": False,
+    "enable_discount_slabs": False,
+    "can_suggest_coupon": False,
+    "calculate_without_rent_amount": False,
+    "enable_discount": False,
+    "enable_shipping": False,
+    "invoice_enabled": False,
+    "global_rent_amount": False,
+    "enable_payment_type": False,
+    "enable_labour_charge": False,
+    "enable_other_amounts": False,
+    "enable_transfer_order": False,
+    "calendar_month_rental_duration": False,
+    "date_to_date_monthly_rental_duration": False,
+    "collect_deposit_with_rent_payment": False,
+    "global_deposit": False,
+}
 
 from ..connectors.tally_fetcher import TallyFetcher
 from ..mapping.store import MappingStore
@@ -457,6 +493,12 @@ def sync_tally_to_rentasst(
                     # fails Laravel's date_format validation with a 422, confirmed against
                     # RentAsst's own RentDetailsRequest::rules() source.
                     iso_datetime = f"{iso_date} 00:00:00"
+                    # Rent ITEMS need a genuinely non-zero rent_from/rent_to gap — RentAsst
+                    # rejects an item with identical start/end ("Invalid rental duration:
+                    # Start and end times are identical") even though the Rent header itself
+                    # is perfectly valid as a same-day order. One day is the same minimum
+                    # RentAsst's own rental_duration_value validation enforces elsewhere.
+                    item_rent_to_datetime = f"{(datetime.strptime(iso_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')} 00:00:00"
 
                     rentout_payload = {
                         "number": str(v.get("voucher_number") or f"ORD-{tally_guid[:8]}"),
@@ -472,6 +514,7 @@ def sync_tally_to_rentasst(
                         "status": 1,
                         "notes": f"Imported from Tally Sales Order #{v.get('voucher_number')}",
                         "tally_guid": tally_guid,
+                        "settings": DEFAULT_RENTOUT_SETTINGS,
                     }
 
                     # RentAsst's create-rent-details endpoint silently drops an 'items'
@@ -489,11 +532,25 @@ def sync_tally_to_rentasst(
                         price = _parse_leading_number(it.get("rate"))
                         total_price = _parse_leading_number(it.get("amount")) or round(price * qty, 2)
                         resolved_items.append({
+                            # 'id' must be present (even as None/new) — RentAsst's own
+                            # RentService::prepareAssetAvailabilityData() unconditionally
+                            # reads $item['id']/$item['rent_from']/$item['rent_to'] before an
+                            # item exists, for every item with a non-null asset_id (confirmed
+                            # live: omitting rent_from raised "Undefined array key 'rent_from'"
+                            # inside that availability check and surfaced as an HTTP 500).
+                            "id": None,
                             "asset_id": _int_or_none(store.get_external_id("equipment", item_name)),
                             "asset_name": item_name,
                             "rented_quantity": qty,
                             "price": price,
                             "total_price": total_price,
+                            "rent_from": iso_datetime,
+                            "rent_to": item_rent_to_datetime,
+                            # discount_is_percentage has a NOT NULL DB constraint with no
+                            # default — confirmed live via a raw SQLSTATE[23502] error when
+                            # omitted.
+                            "discount_value": 0,
+                            "discount_is_percentage": False,
                         })
 
                     # 1. Field Ownership Policy Filter (Reverse Direction: Tally -> RentAsst)
@@ -518,6 +575,19 @@ def sync_tally_to_rentasst(
                                 current = ra_client.get_rentout(existing_ra_id)
                                 current_count = (current.get("rent_items_count") or 0) if isinstance(current, dict) else 0
                                 if not current_count:
+                                    # A rentout created before 'settings' was included on
+                                    # create (below) still has a null settings column, which
+                                    # crashes RentAsst's own item-creation transaction (see
+                                    # DEFAULT_RENTOUT_SETTINGS) — patch it first so the
+                                    # backfill below doesn't get silently rolled back.
+                                    if isinstance(current, dict) and not current.get("settings"):
+                                        ra_client.update_rentout(existing_ra_id, {
+                                            "settings": DEFAULT_RENTOUT_SETTINGS,
+                                            "status": current.get("status") or 1,
+                                            "customer_id": cust_id,
+                                            "rent_from": iso_datetime,
+                                            "rent_to": iso_datetime,
+                                        })
                                     ra_client.push_rentout_items(existing_ra_id, resolved_items)
                                     store.add_history("rental_order", existing_ra_id, "synced", external_id=tally_guid, details="Tally Sales Order Reverse Sync — backfilled missing rent items")
                                     stats["updated"] += 1
