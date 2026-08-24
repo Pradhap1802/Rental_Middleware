@@ -171,6 +171,75 @@ class TestIdempotencyMechanism(unittest.TestCase):
         self.assertIsNotNone(mapping)
         self.assertEqual(mapping["target_id"], "TALLY-CONC-303")
 
+    def test_forward_sync_never_repushes_a_record_reverse_sync_created(self):
+        """
+        A RentAsst rental_order/invoice/payment created by reverse sync (Tally -> RentAsst)
+        must never be forward-synced back to Tally. Confirmed live: RentAsst never persists
+        our tally_guid on the Rent/Invoice model (not a fillable column), so a Tally-native
+        voucher forward-synced again looks like a brand-new record to sync_rental_order's
+        REMOTEID-based existence check — Tally then rejects the duplicate-creation attempt
+        with an opaque "EXCEPTIONS>0" business error every single scheduled sync.
+        """
+        self.store.save_mapping(
+            entity_type="rental_order",
+            source_id="TALLY-GUID-ABC",
+            target_id="17",
+            source_system="tally",
+            target_system="rentasst",
+            status="synced",
+        )
+
+        mock_ext_client = MagicMock()
+        mock_ext_client.ping.return_value = True
+
+        sync_call_count = 0
+
+        def mock_sync_func(item):
+            nonlocal sync_call_count
+            sync_call_count += 1
+            return f"RENTAL-ORD-{item['id']}"
+
+        items = [{"id": "17", "number": "R100013", "customer_id": 4, "amount": 50.0}]
+
+        stats = run_sync_pipeline(
+            entity_type="rental_order",
+            fetch_func=lambda: items,
+            sync_func=mock_sync_func,
+            store=self.store,
+            external_client=mock_ext_client,
+        )
+
+        self.assertEqual(sync_call_count, 0)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(stats["failed"], 0)
+
+    def test_forward_sync_still_pushes_a_rentasst_native_record(self):
+        """The mirror case: a record with no reverse-sync mapping (genuinely created in
+        RentAsst, never touched by reverse sync) must still forward-sync normally."""
+        mock_ext_client = MagicMock()
+        mock_ext_client.ping.return_value = True
+        mock_ext_client.check_exists_in_tally.return_value = False
+
+        sync_call_count = 0
+
+        def mock_sync_func(item):
+            nonlocal sync_call_count
+            sync_call_count += 1
+            return f"RENTAL-ORD-{item['id']}"
+
+        items = [{"id": "18", "number": "R100014", "customer_name": "New Customer", "amount": 100.0}]
+
+        stats = run_sync_pipeline(
+            entity_type="rental_order",
+            fetch_func=lambda: items,
+            sync_func=mock_sync_func,
+            store=self.store,
+            external_client=mock_ext_client,
+        )
+
+        self.assertEqual(sync_call_count, 1)
+        self.assertEqual(stats["created"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

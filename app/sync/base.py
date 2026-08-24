@@ -121,6 +121,24 @@ def run_sync_pipeline(
             for item in batch:
                 stats["processed"] += 1
                 item_id = str(item.get("id"))
+
+                # Reverse sync (Tally -> RentAsst) saves its own mapping the moment a
+                # record originates from Tally (source_system="tally", target_id=this
+                # RentAsst id) — forward-syncing that same record back to Tally isn't
+                # just redundant, it's a genuine duplicate-creation attempt for vouchers:
+                # Tally never recognizes it as pre-existing (only vouchers WE create
+                # forward carry the REMOTEID/NARRATION marker checked elsewhere), so
+                # Tally rejects the import with an opaque "EXCEPTIONS>0" business error.
+                # Confirmed live: a RentAsst rentout created by reverse sync from a real
+                # Tally Sales Order got re-pushed by every scheduled forward sync and
+                # failed with exactly that error every time.
+                reverse_mapping = store.find_by_target(
+                    entity_type, item_id, target_system="rentasst", target_company_id=target_company_id
+                )
+                if reverse_mapping and reverse_mapping.get("source_system") == "tally":
+                    stats["skipped"] += 1
+                    continue
+
                 payload_hash = compute_payload_hash(item)
                 identifier = extract_identifier(entity_type, item)
                 integration_key = generate_integration_key(
