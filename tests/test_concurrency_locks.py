@@ -10,6 +10,9 @@ from app.queue.lock_manager import LockManager
 from app.queue.queue_store import QueueStore, normalize_entity_type
 from app.mapping.store import MappingStore
 from app.sync.base import run_sync_pipeline
+from app.connectors.tally.client import TallyClient
+from app.models.domain import AppConfig
+import threading
 
 
 class TestConcurrencyAndLocks(unittest.TestCase):
@@ -131,6 +134,48 @@ class TestConcurrencyAndLocks(unittest.TestCase):
         total_skipped = res1["skipped"] + res2["skipped"]
         self.assertEqual(total_created, 1)
         self.assertEqual(total_skipped, 1)
+
+    def test_tally_client_serializes_concurrent_requests_across_instances(self):
+        """
+        Tally Prime's XML HTTP server cannot safely handle overlapping requests — confirmed
+        live as 'Tally Business Error: Could not set SVCurrentCompany' when the queue
+        worker's thread pool ran multiple entity syncs (each with its own TallyClient/
+        session) at the same time. The fix is a process-wide lock, so this proves it holds
+        even across five entirely separate TallyClient instances/sessions, not just within one.
+        """
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        state_lock = threading.Lock()
+        concurrent_count = 0
+        max_concurrent = 0
+
+        class SlowMockSession:
+            def post(self, *args, **kwargs):
+                nonlocal concurrent_count, max_concurrent
+                with state_lock:
+                    concurrent_count += 1
+                    max_concurrent = max(max_concurrent, concurrent_count)
+                time.sleep(0.05)
+                with state_lock:
+                    concurrent_count -= 1
+                resp = MagicMock()
+                resp.status_code = 200
+                resp.content = (
+                    b"<ENVELOPE><HEADER><VERSION>1</VERSION></HEADER><BODY>"
+                    b"<IMPORTRESULT><CREATED>1</CREATED></IMPORTRESULT></BODY></ENVELOPE>"
+                )
+                return resp
+
+        def worker():
+            client = TallyClient(cfg, session=SlowMockSession())
+            client.send_xml("<ENVELOPE>Test</ENVELOPE>")
+
+        threads = [threading.Thread(target=worker) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(max_concurrent, 1)
 
 
 if __name__ == "__main__":

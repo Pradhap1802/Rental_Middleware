@@ -152,6 +152,10 @@ def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create"
             <PARENT>Duties &amp; Taxes</PARENT>
             <TAXTYPE>GST</TAXTYPE>
             <GSTDUTYHEAD>Integrated Tax</GSTDUTYHEAD>
+          </LEDGER>
+          <LEDGER NAME="Round Off" ACTION="Create">
+            <NAME>Round Off</NAME>
+            <PARENT>Indirect Expenses</PARENT>
           </LEDGER>\n"""
 
     party_entry = f"""            <ALLLEDGERENTRIES.LIST>
@@ -225,15 +229,31 @@ def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create"
               <AMOUNT>{sgst_val:.2f}</AMOUNT>
             </ALLLEDGERENTRIES.LIST>"""
 
+    # RentAsst commonly rounds grand_total to the nearest whole rupee while subtotal/tax
+    # keep paise precision (e.g. grand_total=409 for a 409.46 subtotal) — a standard "round
+    # off" convention, not a data error. Without accounting for it, party (debit, grand_total)
+    # wouldn't balance against income+tax (credit, subtotal+tax_amount), and Tally requires
+    # every voucher's ledger entries to sum to zero.
+    round_off_amount = round(grand_total - subtotal - tax_amount, 2)
+    round_off_entry = ""
+    if abs(round_off_amount) >= 0.01:
+        sign = "YES" if round_off_amount < 0 else "NO"
+        round_off_entry = f"""
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Round Off</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>{sign}</ISDEEMEDPOSITIVE>
+              <AMOUNT>{round_off_amount:.2f}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>"""
+
     reference_tag = f"<REFERENCE>{escape_xml(order_number)}</REFERENCE>\n            " if order_number else ""
     msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="{vtype}" ACTION="{action}" REMOTEID="RENTAL-INV-{data.get('id')}">
             <REMOTEID>RENTAL-INV-{data.get('id')}</REMOTEID>
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
             <VOUCHERTYPENAME>{vtype}</VOUCHERTYPENAME>
-            <VOUCHERNUMBER>{num}</VOUCHERNUMBER>
+            <VOUCHERNUMBER>{escape_xml(num)}</VOUCHERNUMBER>
             {reference_tag}<NARRATION>RENTAL-INV-{data.get('id')}</NARRATION>
-            <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{party_entry}{income_entry}{tax_entries}
+            <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{party_entry}{income_entry}{tax_entries}{round_off_entry}
           </VOUCHER>"""
 
     return build_import_envelope(msg, report_name="Vouchers", company_name=company_name)

@@ -171,8 +171,24 @@ def run_sync_pipeline(
                     # 3. Integration Key & Content Hash Deduplication Check
                     existing_key_mapping = store.find_by_integration_key(integration_key)
                     if existing_key_mapping and store.is_duplicate(entity_type, item_id, payload_hash, source_company_id=source_company_id):
-                        stats["skipped"] += 1
-                        continue
+                        # A matching local hash only proves the payload hasn't changed since our
+                        # last successful sync — it does NOT prove the record still exists at the
+                        # destination. Tally data can be wiped/reloaded independently of this
+                        # mapping table, which otherwise causes every record to be skipped forever.
+                        if identifier and not check_target_system_record_exists(
+                            entity_type=entity_type,
+                            identifier=identifier,
+                            sync_direction="forward",
+                            external_client=external_client,
+                            ra_client=ra_client,
+                        ):
+                            log_event(
+                                "Idempotency",
+                                f"Record '{identifier}' for entity '{entity_type}' #{item_id} was marked synced but no longer exists in target system — re-syncing instead of skipping.",
+                            )
+                        else:
+                            stats["skipped"] += 1
+                            continue
 
 
                     # 4. Timeout Recovery / Target System Pre-Check

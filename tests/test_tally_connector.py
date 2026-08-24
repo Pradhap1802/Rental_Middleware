@@ -8,6 +8,7 @@ from app.connectors.tally.parser import validate_tally_accounting_success, extra
 from app.connectors.tally.client import TallyClient
 from app.connectors.tally.ledger import build_customer_ledger_xml
 from app.connectors.tally.sales_voucher import build_sales_invoice_voucher_xml
+from app.connectors.tally.receipt_voucher import build_receipt_voucher_xml
 
 
 class TestTallyConnectorAndValidation(unittest.TestCase):
@@ -134,6 +135,99 @@ class TestTallyConnectorAndValidation(unittest.TestCase):
         self.assertIn("<VOUCHERNUMBER>INV-2026-001</VOUCHERNUMBER>", xml)
         self.assertIn("<AMOUNT>-11800.00</AMOUNT>", xml)
         self.assertIn("<LEDGERNAME>CGST</LEDGERNAME>", xml)
+
+    def test_sales_invoice_voucher_escapes_voucher_number(self):
+        """
+        VOUCHERNUMBER must be escaped like every other interpolated field — otherwise a
+        crafted invoice number containing '</VOUCHERNUMBER><VOUCHER ...>' could break out
+        of the tag and inject arbitrary sibling XML into the Tally import message.
+        """
+        inv_data = {
+            "id": 999,
+            "number": 'INV-1</VOUCHERNUMBER><VOUCHER VTYPE="Injected" ACTION="Create">',
+            "customer_name": "Test Client",
+            "subtotal": 100,
+            "grand_total": 118,
+        }
+        xml = build_sales_invoice_voucher_xml(inv_data)
+        self.assertNotIn('<VOUCHER VTYPE="Injected"', xml)
+        self.assertIn("&lt;/VOUCHERNUMBER&gt;", xml)
+
+    def test_receipt_voucher_escapes_voucher_number(self):
+        """Same injection risk as the invoice voucher, via reference_id/payment_number."""
+        pay_data = {
+            "id": 1,
+            "reference_id": 'PAY-1</VOUCHERNUMBER><VOUCHER VTYPE="Injected" ACTION="Create">',
+            "amount": 500,
+        }
+        xml = build_receipt_voucher_xml(pay_data)
+        self.assertNotIn('<VOUCHER VTYPE="Injected"', xml)
+        self.assertIn("&lt;/VOUCHERNUMBER&gt;", xml)
+
+    def test_send_xml_escapes_company_name_in_static_variables(self):
+        """
+        send_xml()'s fallback STATICVARIABLES injection must escape the company name like
+        build_import_envelope/build_export_collection_envelope already do for the same
+        field elsewhere, rather than interpolating it raw.
+        """
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        cfg.tally_company_name = 'Rental & Co</SVCURRENTCOMPANY></STATICVARIABLES><INJECTED/>'
+        mock_session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b"<ENVELOPE><HEADER><VERSION>1</VERSION></HEADER><BODY><IMPORTRESULT><CREATED>1</CREATED></IMPORTRESULT></BODY></ENVELOPE>"
+        mock_session.post.return_value = mock_resp
+
+        client = TallyClient(cfg, session=mock_session)
+        client.send_xml("<ENVELOPE><BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME></REQUESTDESC></IMPORTDATA></BODY></ENVELOPE>")
+
+        sent_xml = mock_session.post.call_args.kwargs["data"].decode("utf-8")
+        self.assertNotIn("<INJECTED/>", sent_xml)
+        self.assertIn("&amp;", sent_xml)
+
+    def test_invoice_math_validation_allows_rupee_round_off(self):
+        """
+        RentAsst rounds grand_total to the nearest whole rupee while subtotal keeps paise
+        precision (e.g. subtotal=409.46, grand_total=409) — a standard round-off convention,
+        not a data error. The validator must accept this (previously rejected at >0.05).
+        """
+        from app.validation.validator import PayloadValidator
+        inv_data = {
+            "id": 28,
+            "customer_id": 5,
+            "subtotal": 409.46,
+            "grand_total": 409,
+        }
+        is_valid, err = PayloadValidator.validate_invoice(inv_data)
+        self.assertTrue(is_valid, err)
+
+    def test_sales_invoice_voucher_balances_with_rupee_round_off(self):
+        """
+        When grand_total is rounded to the nearest rupee but subtotal/tax carry paise
+        precision, the voucher's ledger entries must still sum to zero (Tally requires
+        every voucher to balance) via an explicit Round Off ledger entry.
+        """
+        inv_data = {
+            "id": 28,
+            "number": "28",
+            "customer_name": "Cash Customer",
+            "subtotal": 409.46,
+            "grand_total": 409,
+            "items": [{"name": "Moto G45", "quantity": 1, "price": 409.46, "unit": "Nos", "total_price": 409.46}],
+        }
+        xml = build_sales_invoice_voucher_xml(inv_data)
+        self.assertIn("<LEDGERNAME>Round Off</LEDGERNAME>", xml)
+        self.assertIn("<AMOUNT>-0.46</AMOUNT>", xml)
+
+        import re
+        amounts = [float(m) for m in re.findall(r"<AMOUNT>(-?\d+\.\d+)</AMOUNT>", xml)]
+        # STOCKITEMNAME inventory allocation AMOUNT is nested inside the income ledger entry
+        # and must not be double-counted — only ALLLEDGERENTRIES.LIST-level amounts balance.
+        ledger_amounts = [float(m) for m in re.findall(
+            r"<ALLLEDGERENTRIES\.LIST>\s*<LEDGERNAME>[^<]*</LEDGERNAME>\s*(?:<ISPARTYLEDGER>[^<]*</ISPARTYLEDGER>\s*)?<ISDEEMEDPOSITIVE>[^<]*</ISDEEMEDPOSITIVE>\s*<AMOUNT>(-?\d+\.\d+)</AMOUNT>",
+            xml,
+        )]
+        self.assertEqual(round(sum(ledger_amounts), 2), 0.0)
 
 
 if __name__ == "__main__":

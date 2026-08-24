@@ -1,15 +1,43 @@
+import threading
+import time
 import requests
 from typing import Dict, Any, List, Optional
 from requests.adapters import HTTPAdapter
 
 from ...models.domain import AppConfig
-from .xml_builder import sanitize_tally_xml, build_export_collection_envelope
+from .xml_builder import sanitize_tally_xml, build_export_collection_envelope, escape_xml
 from .parser import validate_tally_accounting_success
 from .company import build_fetch_companies_xml, parse_fetch_companies_response
 from .ledger import build_customer_ledger_xml
 from .stock_item import build_stock_item_xml
 from .sales_voucher import build_sales_order_voucher_xml, build_sales_invoice_voucher_xml
 from .receipt_voucher import build_receipt_voucher_xml
+
+# Tally Prime's XML/HTTP server cannot safely handle overlapping requests — concurrent
+# imports/exports corrupt its current-company context (observed live as "Tally Business
+# Error: Could not set 'SVCurrentCompany' to '<name>'"), stall until one request times out,
+# or in the worst case crash the whole Tally process (native "Memory Access Violation",
+# observed live after a burst of back-to-back STOCKITEM imports with no gap between them).
+# The middleware's queue worker runs multiple entity syncs in parallel threads, each with
+# its own TallyClient/session, so this lock is process-wide (not per-instance) to serialize
+# every request actually reaching Tally, regardless of which client made it. The minimum
+# spacing below additionally paces consecutive requests so Tally's single-threaded import
+# pipeline gets a moment to settle, rather than being hit again the instant it responds.
+_TALLY_HTTP_LOCK = threading.Lock()
+_TALLY_MIN_REQUEST_INTERVAL_SECONDS = 0.4
+_last_tally_request_at = 0.0
+
+
+def _tally_post(session: requests.Session, base_url: str, data: bytes, timeout: float) -> requests.Response:
+    global _last_tally_request_at
+    with _TALLY_HTTP_LOCK:
+        wait = _TALLY_MIN_REQUEST_INTERVAL_SECONDS - (time.monotonic() - _last_tally_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            return session.post(base_url, data=data, headers={"Content-Type": "text/xml"}, timeout=timeout)
+        finally:
+            _last_tally_request_at = time.monotonic()
 
 
 class TallyClient:
@@ -31,7 +59,8 @@ class TallyClient:
 
     def ping(self) -> bool:
         try:
-            r = self.session.get(self.base_url, timeout=5, verify=self.cfg.verify_ssl)
+            with _TALLY_HTTP_LOCK:
+                r = self.session.get(self.base_url, timeout=5, verify=self.cfg.verify_ssl)
             return r.status_code in (200, 204, 404, 405)
         except Exception:
             return False
@@ -48,11 +77,10 @@ class TallyClient:
         """
         company_name = getattr(self.cfg, "tally_company_name", None)
         if company_name and "<STATICVARIABLES>" not in xml_string:
-            company_var = f"<STATICVARIABLES><SVCURRENTCOMPANY>{company_name}</SVCURRENTCOMPANY></STATICVARIABLES>"
+            company_var = f"<STATICVARIABLES><SVCURRENTCOMPANY>{escape_xml(company_name)}</SVCURRENTCOMPANY></STATICVARIABLES>"
             xml_string = xml_string.replace("<REQUESTDESC>", f"<REQUESTDESC>{company_var}")
 
-        headers = {"Content-Type": "text/xml"}
-        r = self.session.post(self.base_url, data=xml_string.encode("utf-8"), headers=headers, timeout=15)
+        r = _tally_post(self.session, self.base_url, xml_string.encode("utf-8"), timeout=15)
         r.raise_for_status()
 
         clean_content = sanitize_tally_xml(r.content)
@@ -66,7 +94,7 @@ class TallyClient:
     def fetch_companies(self) -> List[Dict[str, str]]:
         xml = build_fetch_companies_xml()
         try:
-            r = self.session.post(self.base_url, data=xml.encode("utf-8"), headers={"Content-Type": "text/xml"}, timeout=10)
+            r = _tally_post(self.session, self.base_url, xml.encode("utf-8"), timeout=10)
             if r.status_code == 200:
                 return parse_fetch_companies_response(r.content)
         except Exception:
@@ -106,7 +134,7 @@ class TallyClient:
 
 
         try:
-            r = self.session.post(self.base_url, data=xml.encode("utf-8"), headers={"Content-Type": "text/xml"}, timeout=10)
+            r = _tally_post(self.session, self.base_url, xml.encode("utf-8"), timeout=10)
             if r.status_code == 200:
                 clean = sanitize_tally_xml(r.content)
                 return identifier.lower() in clean.lower()

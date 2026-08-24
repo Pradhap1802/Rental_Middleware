@@ -28,7 +28,7 @@ def build_receipt_voucher_xml(data: Dict[str, Any], action: str = "Create", comp
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
             <VOUCHERTYPENAME>Receipt</VOUCHERTYPENAME>
-            <VOUCHERNUMBER>{ref}</VOUCHERNUMBER>
+            <VOUCHERNUMBER>{escape_xml(ref)}</VOUCHERNUMBER>
             <NARRATION>RENTAL-PAY-{data.get('id')}</NARRATION>
             <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>
             <ALLLEDGERENTRIES.LIST>

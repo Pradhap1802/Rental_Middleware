@@ -135,10 +135,14 @@ class PayloadValidator:
         if tax == 0 and grand_total > (subtotal + charges - discount):
             tax = round(grand_total - (subtotal + charges - discount), 2)
 
-        # Invoice Math Validation: subtotal + tax + charges - discount = grand_total (±0.05 tolerance)
+        # Invoice Math Validation: subtotal + tax + charges - discount = grand_total.
+        # Tolerance is 1 rupee, not a few paise — RentAsst commonly rounds the final payable
+        # amount to the nearest whole rupee (e.g. grand_total=409 for a 409.46 subtotal), a
+        # standard "round off" convention, not a data error. Anything past that is a real
+        # mismatch worth blocking on.
         calculated_total = round(subtotal + tax + charges - discount, 2)
         diff = abs(calculated_total - round(grand_total, 2))
-        if diff > 0.05:
+        if diff > 1.00:
             return (
                 False,
                 f"Invoice math validation failure: subtotal ({subtotal:.2f}) + tax ({tax:.2f}) + charges ({charges:.2f}) - discount ({discount:.2f}) = {calculated_total:.2f}, but grand_total is {grand_total:.2f} (diff: {diff:.2f})",
