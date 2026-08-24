@@ -12,9 +12,10 @@ from app.security.auth import require_api_key
 class TestApiAuthentication(unittest.TestCase):
     """
     Before this, every /api/* route (including one that writes RentAsst/Tally
-    credentials and one that restores a backup) had no authentication at all, on an
-    app that binds 0.0.0.0 by default. These tests cover the local API key that now
-    guards every route in app.api.all_routers.
+    credentials and one that restores a backup) had no authentication at all. These
+    tests cover the local API key that now guards every route in app.api.all_routers —
+    still needed even bound to 127.0.0.1, since it's the only thing standing between
+    another process/user on the same machine and those routes.
     """
 
     def setUp(self):

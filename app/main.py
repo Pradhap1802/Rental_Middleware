@@ -75,9 +75,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Every /api/* route requires this key (see security/auth.py) — the app binds
-# 0.0.0.0 by default, so without this any process able to reach the port could
-# read/write RentAsst and Tally credentials, trigger syncs, or restore a backup.
+# Every /api/* route requires this key (see security/auth.py). This deployment binds
+# 127.0.0.1 (see run.py/service.py), but the key still matters as defense in depth —
+# without it, any other process or user on the same machine could read/write RentAsst
+# and Tally credentials, trigger syncs, or restore a backup. If a future deployment
+# needs LAN-wide access (host="0.0.0.0"), this key becomes the only thing standing
+# between the network and those same actions.
 app.state.api_key = get_or_create_api_key(DATA_DIR)
 
 

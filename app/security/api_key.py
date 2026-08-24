@@ -5,8 +5,8 @@ import secrets
 def get_or_create_api_key(data_dir: str) -> str:
     """
     Returns the middleware's own local API key, generating and persisting one on
-    first run. This exists so every /api/* route requires a shared secret — before
-    this, any process able to reach the port (the app binds 0.0.0.0 by default) could
+    first run. This exists so every /api/* route requires a shared secret — even
+    bound to 127.0.0.1, any other process or user on the same machine could otherwise
     read/write RentAsst and Tally credentials, trigger syncs, or restore a backup.
     """
     key_path = os.path.join(data_dir, "api.key")

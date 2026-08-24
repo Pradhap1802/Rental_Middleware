@@ -48,7 +48,8 @@ if WIN32_AVAILABLE:
                 servicemanager.PYS_SERVICE_STARTED,
                 (self._svc_name_, ""),
             )
-            config = uvicorn.Config(app, host="0.0.0.0", port=8088, log_level="info")
+            # Localhost only — see the same note in run.py.
+            config = uvicorn.Config(app, host="127.0.0.1", port=8088, log_level="info")
             self.server = uvicorn.Server(config)
 
             thread = threading.Thread(target=self.server.run, daemon=True)
@@ -63,7 +64,8 @@ if WIN32_AVAILABLE:
 
 def _run_standalone():
     print("Starting RentAsst Middleware in standalone mode...")
-    uvicorn.run(app, host="0.0.0.0", port=8088, reload=False)
+    # Localhost only — see the same note in run.py.
+    uvicorn.run(app, host="127.0.0.1", port=8088, reload=False)
 
 
 if __name__ == "__main__":
