@@ -365,6 +365,19 @@
   </div>
 
   <script>
+    // Every /api/* route requires the X-Middleware-Key header (see app/security/auth.py).
+    // The server injects the current key as window.MW_API_KEY when it serves this page,
+    // so wrapping fetch here attaches it to every existing call below automatically —
+    // no need to touch each call site individually.
+    (function () {
+      const originalFetch = window.fetch;
+      window.fetch = function (url, options) {
+        options = options || {};
+        options.headers = Object.assign({}, options.headers, { 'X-Middleware-Key': window.MW_API_KEY || '' });
+        return originalFetch(url, options);
+      };
+    })();
+
     function setText(id, text) {
       const el = document.getElementById(id);
       if (el) el.innerText = text;

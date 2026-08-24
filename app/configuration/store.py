@@ -1,7 +1,5 @@
 import json
 import os
-import base64
-import hashlib
 from typing import Optional, Dict, Any
 from cryptography.fernet import Fernet
 from ..models.domain import AppConfig
@@ -21,10 +19,16 @@ class ConfigStore:
         if env_key:
             try:
                 return Fernet(env_key.encode("utf-8"))
-            except Exception:
-                key_bytes = hashlib.sha256(env_key.encode("utf-8")).digest()
-                b64_key = base64.urlsafe_b64encode(key_bytes)
-                return Fernet(b64_key)
+            except Exception as e:
+                # Deliberately fail loudly rather than silently deriving a key from
+                # whatever string was provided (e.g. a weak passphrase) — that would
+                # accept low-entropy input as if it were a real key with no warning.
+                raise ValueError(
+                    "RENTAL_MIDDLEWARE_SECRET_KEY is set but is not a valid Fernet key "
+                    "(must be a URL-safe base64-encoded 32-byte key, e.g. from "
+                    "`Fernet.generate_key()`). Unset it to use the file-based key instead, "
+                    "or provide a properly generated key."
+                ) from e
 
         # Priority 2: Protected persistent key file
         if not os.path.exists(self.key_path):
@@ -47,8 +51,13 @@ class ConfigStore:
             self.save(auto_cfg)
             cfg = auto_cfg
         else:
+            # A misconfigured secret key (ValueError from _get_fernet) is a real
+            # operator error and must not be masked behind a silent fallback to
+            # auto-discovered defaults — that would silently discard the user's real
+            # saved config. Only genuine data problems (corrupt file, stale key) fall
+            # back to auto-discovery.
+            fernet = self._get_fernet()
             try:
-                fernet = self._get_fernet()
                 with open(self.cfg_path, "rb") as f:
                     enc = f.read()
                 raw = fernet.decrypt(enc)

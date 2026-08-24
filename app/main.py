@@ -1,7 +1,7 @@
 import os
 import sys
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.responses import JSONResponse
 
 from .configuration.store import ConfigStore
@@ -13,6 +13,9 @@ from .clients.rentasst_client import RentAsstClient
 from .clients.external_client import ExternalClient
 from .dashboard import dashboard_router
 from .api import all_routers
+from .api.health_routes import health_router
+from .security.api_key import get_or_create_api_key
+from .security.auth import require_api_key
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -72,15 +75,27 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Every /api/* route requires this key (see security/auth.py) — the app binds
+# 0.0.0.0 by default, so without this any process able to reach the port could
+# read/write RentAsst and Tally credentials, trigger syncs, or restore a backup.
+app.state.api_key = get_or_create_api_key(DATA_DIR)
+
 
 @app.exception_handler(ValueError)
 def value_error_handler(request, exc: ValueError):
     return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})
 
 
-# Mount Dashboard UI Router
+# Mount Dashboard UI Router — deliberately unauthenticated, since it's what serves
+# the browser the API key in the first place (see dashboard/routes.py).
 app.include_router(dashboard_router)
 
-# Mount Modular API Routers
+# Mount Modular API Routers, all behind the local API key — except health_router,
+# which sets its own per-route dependency (its /health/live and /health/ready probes
+# stay open for orchestration tooling like k8s, matching the standard liveness/
+# readiness pattern; its other routes leak operational detail and stay protected).
 for r in all_routers:
-    app.include_router(r)
+    if r is health_router:
+        app.include_router(r)
+    else:
+        app.include_router(r, dependencies=[Depends(require_api_key)])

@@ -88,6 +88,29 @@ class TestSecurityAndMasking(unittest.TestCase):
         self.assertEqual(reloaded.rentasst_api_key, "original_secret_token_777")
         self.assertEqual(reloaded.sync_interval_minutes, 15)
 
+    def test_invalid_env_secret_key_fails_loudly(self):
+        """
+        An invalid RENTAL_MIDDLEWARE_SECRET_KEY must raise, not silently downgrade to a
+        SHA-256-derived key from whatever string was provided — a weak passphrase should
+        never be silently accepted as if it were a real Fernet key.
+        """
+        with patch.dict(os.environ, {"RENTAL_MIDDLEWARE_SECRET_KEY": "not-a-valid-fernet-key"}):
+            with self.assertRaises(ValueError):
+                self.store._get_fernet()
+
+    def test_invalid_env_secret_key_not_masked_by_load_safe(self):
+        """
+        load_safe()'s broad except-and-fallback-to-auto-discovery must not swallow a
+        misconfigured secret key — that would silently discard the user's real saved
+        config in favor of auto-discovered defaults instead of surfacing the real problem.
+        """
+        cfg = AppConfig(rentasst_url="http://localhost:8000", rentasst_api_key="real_token")
+        self.store.save(cfg)
+
+        with patch.dict(os.environ, {"RENTAL_MIDDLEWARE_SECRET_KEY": "not-a-valid-fernet-key"}):
+            with self.assertRaises(ValueError):
+                self.store.load_safe()
+
 
 if __name__ == "__main__":
     unittest.main()

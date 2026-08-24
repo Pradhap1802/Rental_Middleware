@@ -1,8 +1,9 @@
 import time
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from typing import Dict, Any
 
 from ..mapping.store import MappingStore
+from ..security.auth import require_api_key
 
 health_router = APIRouter(prefix="", tags=["health"])
 
@@ -80,7 +81,7 @@ def check_scheduler_health(request: Request) -> Dict[str, Any]:
     }
 
 
-@health_router.get("/health", response_model=Dict[str, Any])
+@health_router.get("/health", response_model=Dict[str, Any], dependencies=[Depends(require_api_key)])
 def health_overview(request: Request):
     """Comprehensive health check combining RentAsst, Tally, Database, Worker, and Scheduler status."""
     db_info = check_db_health(request)
@@ -127,13 +128,13 @@ def readiness_probe(request: Request, response: Response):
     return {"status": "READY", "database": db_info, "worker": worker_info}
 
 
-@health_router.get("/health/rentasst", response_model=Dict[str, Any])
+@health_router.get("/health/rentasst", response_model=Dict[str, Any], dependencies=[Depends(require_api_key)])
 def rentasst_health(request: Request):
     """Dedicated probe for RentAsst API connectivity."""
     return check_rentasst_health(request)
 
 
-@health_router.get("/health/tally", response_model=Dict[str, Any])
+@health_router.get("/health/tally", response_model=Dict[str, Any], dependencies=[Depends(require_api_key)])
 def tally_health(request: Request):
     """Dedicated probe for Tally Prime XML server connectivity."""
     return check_tally_health(request)
