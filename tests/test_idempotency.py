@@ -86,6 +86,55 @@ class TestIdempotencyMechanism(unittest.TestCase):
         self.assertEqual(creation_call_count, 1)  # Creation count remains 1!
         self.assertEqual(stats2["skipped"], 1)
 
+    def test_rental_order_second_pass_skips_instead_of_repushing(self):
+        """
+        Confirmed live: extract_identifier() used to build a rental_order's identifier
+        from RentAsst's own display 'number' (e.g. 'R100016'), but Tally never echoes
+        that value back anywhere in its export (it auto-assigns its own VOUCHERNUMBER),
+        so check_target_system_record_exists()'s substring search against Tally's
+        NARRATION/VOUCHERNUMBER fields always failed to find an already-synced order —
+        every single sync cycle concluded "no longer exists in target system" and
+        needlessly re-pushed it as an Alter, forever, on two consecutive full runs.
+        The identifier must be the deterministic RENTAL-ORD-{id} marker instead, which
+        Tally actually stores in NARRATION and the check can reliably find.
+        """
+        mock_ext_client = MagicMock()
+        mock_ext_client.ping.return_value = True
+        # Doesn't exist yet on the first pass; simulates Tally's real check_exists() only
+        # ever matching the deterministic marker, never RentAsst's own display number
+        # ('R100016' would never be found in Tally's export).
+        mock_ext_client.check_exists_in_tally.return_value = False
+
+        def mock_sync(item):
+            mock_ext_client.check_exists_in_tally.side_effect = (
+                lambda ent, identifier: identifier == "RENTAL-ORD-20"
+            )
+            return "RENTAL-ORD-20"
+
+        mock_ext_client.sync_rental_order.side_effect = mock_sync
+
+        items = [{"id": 20, "number": "R100016", "status": 1, "amount": 118.0, "customer_name": "Test"}]
+
+        stats1 = run_sync_pipeline(
+            entity_type="rental_order",
+            fetch_func=lambda: items,
+            sync_func=mock_ext_client.sync_rental_order,
+            store=self.store,
+            external_client=mock_ext_client,
+        )
+        self.assertEqual(stats1["created"], 1)
+        mock_ext_client.sync_rental_order.assert_called_once()
+
+        stats2 = run_sync_pipeline(
+            entity_type="rental_order",
+            fetch_func=lambda: items,
+            sync_func=mock_ext_client.sync_rental_order,
+            store=self.store,
+            external_client=mock_ext_client,
+        )
+        self.assertEqual(stats2["skipped"], 1)
+        mock_ext_client.sync_rental_order.assert_called_once()  # still just the one call
+
     def test_timeout_scenario_recovery(self):
         """
         Simulates scenario where Tally successfully created a record on a previous request,

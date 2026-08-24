@@ -63,20 +63,34 @@ def _parse_date_boundary(value: Optional[str], end_of_day: bool = False) -> Opti
 
 
 def extract_identifier(entity_type: str, item: Dict[str, Any]) -> str:
+    """
+    Builds the identifier used to ask the target system "does this record already exist"
+    (check_target_system_record_exists) and, on a timeout-recovery adopt, saved as the
+    mapping's target_id.
+
+    For vouchers (rental_order/invoice/payment), this MUST be the same deterministic
+    RENTAL-{ORD,INV,PAY}-{id} marker TallyClient.sync_rental_order/sync_invoice/
+    sync_payment stamps into REMOTEID/NARRATION on creation (and returns as their own
+    result) — confirmed live that RentAsst's own display number (e.g. 'R100016') never
+    appears anywhere in Tally's export (Tally auto-assigns its own VOUCHERNUMBER and does
+    not echo back what's sent), so using it here made check_exists()'s substring search
+    against Tally's NARRATION/VOUCHERNUMBER fields fail for every already-synced
+    voucher, every single cycle — the pipeline concluded "no longer exists in target
+    system" and needlessly re-pushed an Alter forever, even though nothing had changed
+    (confirmed live across two consecutive full sync passes: rental_order and payment
+    entities never stabilized to a full skip, unlike customer/equipment/invoice).
+    """
     ent = (entity_type or "").lower().strip()
     if ent in ("customer", "customers"):
         return str(item.get("name") or item.get("business_name") or "").strip()
     elif ent in ("equipment", "product", "products"):
         return str(item.get("name") or "").strip()
     elif ent in ("rental_orders", "rental_order", "order", "orders"):
-        raw_num = str(item.get("number") or item.get("rent_code") or "").strip()
-        return raw_num if raw_num and raw_num != "0" else f"ORD-{item.get('id')}"
+        return f"RENTAL-ORD-{item.get('id')}"
     elif ent in ("invoices", "invoice"):
-        raw_num = str(item.get("number") or item.get("invoice_number") or "").strip()
-        return raw_num if raw_num and raw_num != "0" else f"INV-{item.get('id')}"
+        return f"RENTAL-INV-{item.get('id')}"
     elif ent in ("payments", "payment"):
-        raw_ref = str(item.get("reference_id") or item.get("payment_number") or item.get("number") or "").strip()
-        return raw_ref if raw_ref and raw_ref != "0" else f"PAY-{item.get('id')}"
+        return f"RENTAL-PAY-{item.get('id')}"
     return ""
 
 

@@ -17,14 +17,26 @@ class TestHashingAndTransformers(unittest.TestCase):
         self.assertEqual(len(hash_a), 64)  # SHA-256 hex string length
 
     def test_extract_identifier(self):
+        """
+        rental_order/invoice/payment identifiers must be the deterministic
+        RENTAL-{ORD,INV,PAY}-{id} marker, not RentAsst's own display number/reference —
+        that display value never appears anywhere in Tally's export (Tally auto-assigns
+        its own VOUCHERNUMBER and doesn't echo back what's sent), so using it made
+        check_target_system_record_exists() always report "doesn't exist" for an
+        already-synced voucher, needlessly re-pushing it on every single sync cycle
+        forever (confirmed live across two consecutive full sync passes).
+        """
         cust = {"name": "Acme Rentals"}
         self.assertEqual(extract_identifier("customer", cust), "Acme Rentals")
 
+        order = {"id": 55, "number": "R100099"}
+        self.assertEqual(extract_identifier("rental_order", order), "RENTAL-ORD-55")
+
         inv = {"id": 55, "number": "INV-2026-99"}
-        self.assertEqual(extract_identifier("invoice", inv), "INV-2026-99")
+        self.assertEqual(extract_identifier("invoice", inv), "RENTAL-INV-55")
 
         pay = {"id": 88, "reference_id": "PAY-REF-777"}
-        self.assertEqual(extract_identifier("payment", pay), "PAY-REF-777")
+        self.assertEqual(extract_identifier("payment", pay), "RENTAL-PAY-88")
 
     def test_filter_payload_by_ownership_forward(self):
         # Forward Sync: RentAsst -> Tally
