@@ -16,6 +16,7 @@ class SyncScheduler:
         self.queue_store = QueueStore(f"{data_dir}/state.db")
         self.is_running = False
         self.is_paused = False
+        self._was_shutdown = False
 
     def _sync_job(self):
         log_event("Scheduler", "Executing scheduled sync job enqueue...")
@@ -49,6 +50,18 @@ class SyncScheduler:
 
     def start(self, interval_minutes: int = 10):
         if not self.is_running:
+            if self._was_shutdown:
+                # BackgroundScheduler.shutdown() permanently kills its executor's
+                # underlying concurrent.futures.ThreadPoolExecutor — calling start() again
+                # on the same instance resumes the scheduler loop and its interval
+                # triggers fine, but every actual job submission then fails with
+                # "cannot schedule new futures after shutdown" once the interval fires.
+                # Observed live: login/logout toggles auto_sync_enabled, which calls
+                # stop() then start() on this same SyncScheduler singleton — a fresh
+                # BackgroundScheduler is required here rather than reusing the shut-down
+                # one.
+                self.scheduler = BackgroundScheduler()
+                self._was_shutdown = False
             self.scheduler.add_job(
                 self._sync_job,
                 "interval",
@@ -71,6 +84,7 @@ class SyncScheduler:
     def stop(self):
         if self.is_running:
             self.scheduler.shutdown(wait=False)
+            self._was_shutdown = True
             self.is_running = False
             self.is_paused = False
             log_event("Scheduler", "Sync scheduler stopped.")
