@@ -69,7 +69,7 @@ class TallyFetcher:
             <TDLMESSAGE>
                <COLLECTION NAME="VouchersCollection" ISMODIFY="No">
                   <TYPE>Voucher</TYPE>
-                  <FETCH>MASTERID, ALTERID, GUID, VOUCHERNUMBER, VOUCHERTYPENAME, DATE, PARTYNAME, PARTYLEDGERNAME, AMOUNT, REFERENCE, NARRATION, ALLLEDGERENTRIES.LIST, INVENTORYENTRIES.LIST, BILLALLOCATIONS.LIST</FETCH>
+                  <FETCH>MASTERID, ALTERID, GUID, VOUCHERNUMBER, VOUCHERTYPENAME, DATE, PARTYNAME, PARTYLEDGERNAME, AMOUNT, REFERENCE, NARRATION, ALLLEDGERENTRIES.LIST, ALLINVENTORYENTRIES.LIST, BILLALLOCATIONS.LIST</FETCH>
                </COLLECTION>
             </TDLMESSAGE>
          </TDL>
@@ -284,9 +284,14 @@ class TallyFetcher:
                                 bill_ref = bill_name
                                 break
 
-                # Parse Inventory Items if present
+                # Parse Inventory Items if present. Confirmed live against real Tally XML
+                # export (both "Sales Order" and "Sales" voucher types): the actual tag is
+                # ALLINVENTORYENTRIES.LIST — there is no bare INVENTORYENTRIES.LIST tag in
+                # Tally's response at all, so this always returned zero items regardless of
+                # voucher type, silently defeating push_invoice_items()/push_rentout_items()
+                # every single time (they always received an empty list to push).
                 items = []
-                for item_node in v_node.findall(".//INVENTORYENTRIES.LIST"):
+                for item_node in v_node.findall(".//ALLINVENTORYENTRIES.LIST"):
                     item_name = item_node.findtext("STOCKITEMNAME")
                     qty = item_node.findtext("ACTUALQTY") or item_node.findtext("BILLEDQTY")
                     rate = item_node.findtext("RATE")
