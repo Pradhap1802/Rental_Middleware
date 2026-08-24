@@ -167,6 +167,58 @@ class TestReverseSyncHardening(unittest.TestCase):
         self.assertEqual(pushed_items[0]["price"], 97.0)
         self.assertEqual(pushed_items[0]["total_price"], 97.0)
 
+    def test_reverse_sync_derives_invoice_item_price_from_amount_when_rate_is_blank(self):
+        """
+        Confirmed live: a Tally "Sales" voucher's inventory lines carry AMOUNT but leave
+        RATE blank (unlike "Sales Order" lines, which always populate both) — parsing RATE
+        alone left price=0 for every item on an invoice created this way. RentAsst's
+        InvoiceItem::calculateAllAmounts() always recomputes total_price server-side as
+        quantity*price, discarding whatever total_price the client sends, so a zero price
+        here becomes a permanently zero item and a zero invoice grand_total regardless of
+        what total_price is pushed. price must be derived from amount/quantity when rate
+        can't be parsed.
+        """
+        self.store.save_mapping(
+            entity_type="equipment",
+            source_id="Dell Keyboard",
+            target_id="17",
+            source_system="tally",
+            target_system="rentasst",
+        )
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.push_invoice.return_value = {"id": "CLOUD-INV-201"}
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        voucher = {
+            "tally_guid": "GUID-BLANK-RATE",
+            "alter_id": 20,
+            "voucher_type": "Sales",
+            "voucher_number": "INV-201",
+            "party_name": "Acme Corp",
+            "date": "2026-08-20",
+            "amount": 40.0,
+            "items": [{"name": "Dell Keyboard", "quantity": "", "rate": "", "amount": "40.00"}],
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_vouchers.return_value = [voucher]
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            sync_tally_to_rentasst(
+                ra_client=mock_ra_client,
+                ext_client=mock_ext_client,
+                store=self.store,
+                force_full_sync=True,
+            )
+
+        pushed_items = mock_ra_client.push_invoice_items.call_args[0][1]
+        self.assertEqual(pushed_items[0]["quantity"], 1)
+        self.assertEqual(pushed_items[0]["price"], 40.0)
+        self.assertEqual(pushed_items[0]["total_price"], 40.0)
+
     def test_reverse_sync_updates_existing_invoice_instead_of_skipping(self):
         """
         A previously reverse-synced invoice must be refreshed (status/amount) on later
@@ -230,6 +282,59 @@ class TestReverseSyncHardening(unittest.TestCase):
         self.assertEqual(update_args[0][0], "CLOUD-INV-EXISTING")
         self.assertEqual(update_args[0][1]["status"], "paid")
         self.assertGreaterEqual(stats["updated"], 1)
+
+    def test_reverse_sync_never_retries_status_update_on_a_locked_invoice(self):
+        """
+        An invoice that's already 'paid' in RentAsst permanently rejects header edits
+        (RentAsst's canEditInvoice() lock) — confirmed live, a 422 on every single cycle.
+        Comparing current vs. recomputed target status isn't enough to catch this: if the
+        settling receipt isn't in THIS run's fetch batch, invoice_status recomputes as
+        'confirmed' even though the invoice is really 'paid', so a naive status-mismatch
+        check would retry the doomed update forever. update_invoice must never be called
+        once the invoice is in a known-locked status, regardless of the recomputed target.
+        """
+        tally_guid = "GUID-LOCKED-INV"
+        rev_key = generate_integration_key("default", "invoice", tally_guid, "reverse")
+        self.store.save_mapping(
+            entity_type="invoice",
+            source_id=tally_guid,
+            target_id="CLOUD-INV-LOCKED",
+            source_system="tally",
+            target_system="rentasst",
+            integration_key=rev_key,
+            status="synced",
+        )
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.get_invoice.return_value = {"id": "CLOUD-INV-LOCKED", "status": "paid", "items": [{"id": 1}]}
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        # No settling receipt in this batch — invoice_status recomputes as "confirmed",
+        # which differs from the live "paid" status, but the update must still be skipped.
+        invoice_voucher = {
+            "tally_guid": tally_guid,
+            "alter_id": 22,
+            "voucher_type": "Sales",
+            "voucher_number": "INV-LOCKED",
+            "party_name": "Acme Corp",
+            "date": "2026-08-20",
+            "amount": 500.0,
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_vouchers.return_value = [invoice_voucher]
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            sync_tally_to_rentasst(
+                ra_client=mock_ra_client,
+                ext_client=mock_ext_client,
+                store=self.store,
+                force_full_sync=True,
+            )
+
+        mock_ra_client.update_invoice.assert_not_called()
 
     def test_reverse_sync_sales_order_uses_valid_rentasst_date_and_status_format(self):
         """
@@ -342,6 +447,14 @@ class TestReverseSyncHardening(unittest.TestCase):
         self.assertIsNone(pushed_items[0]["id"])
         self.assertNotEqual(pushed_items[0]["rent_from"], pushed_items[0]["rent_to"])
         self.assertEqual(pushed_items[0]["discount_is_percentage"], False)
+        # RentAsst's RentService::calculateStandardPrice() always overwrites total_price
+        # server-side as quantity*price*duration, where duration comes from matching
+        # calculation_method against 1/2/3 (days/hours/months) and silently defaults to 0
+        # for anything else including a missing field — confirmed live: every rentout item
+        # landed at total_price=0 (and the whole rentout's grand_total with it) because this
+        # was never sent. 4 = AssetCalculationMethods::FLAT_PRICE (quantity*price, no
+        # duration multiplier), the correct mode for a one-time Tally sale line.
+        self.assertEqual(pushed_items[0]["calculation_method"], 4)
 
         # The rentout header itself must carry a non-empty settings object — an empty {}
         # round-trips through RentAsst's own request parsing as a PHP array, not an

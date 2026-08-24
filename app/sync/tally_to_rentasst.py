@@ -87,6 +87,28 @@ def _int_or_none(value: Optional[str]) -> Optional[int]:
     return int(text) if text.isdigit() else None
 
 
+def _resolve_price_and_total(rate: Any, amount: Any, qty: int) -> "tuple[float, float]":
+    """
+    Derives a consistent (price, total_price) pair from Tally's per-item RATE/AMOUNT
+    fields. Confirmed live: a "Sales" voucher's inventory lines carry AMOUNT but leave
+    RATE blank (unlike "Sales Order" lines, which always populate both) — parsing RATE
+    alone left price=0 for every invoice item pushed from a Sales voucher. RentAsst's own
+    item-creation endpoints then compound this: invoice items always recompute
+    total_price server-side as quantity*price (discarding whatever total_price the
+    client sends), and rent items derive their total_price from price*quantity*duration
+    — either way, a zero price here becomes a zero total on the RentAsst side no matter
+    what total_price value is sent, so price must never come out 0 while a real amount
+    exists.
+    """
+    price = _parse_leading_number(rate)
+    total_price = _parse_leading_number(amount)
+    if not price and qty:
+        price = round(total_price / qty, 2) if total_price else 0.0
+    if not total_price:
+        total_price = round(price * qty, 2)
+    return price, total_price
+
+
 def resolve_customer_id(party_name: str, ra_client: Any, store: MappingStore) -> int:
     """Finds or resolves Customer ID from RentAsst DB or auto-creates it if new in Tally."""
     if not party_name or party_name.lower() in ("cash", "bank", "sales"):
@@ -529,8 +551,7 @@ def sync_tally_to_rentasst(
                         if not item_name:
                             continue
                         qty = int(_parse_leading_number(it.get("quantity"))) or 1
-                        price = _parse_leading_number(it.get("rate"))
-                        total_price = _parse_leading_number(it.get("amount")) or round(price * qty, 2)
+                        price, total_price = _resolve_price_and_total(it.get("rate"), it.get("amount"), qty)
                         resolved_items.append({
                             # 'id' must be present (even as None/new) — RentAsst's own
                             # RentService::prepareAssetAvailabilityData() unconditionally
@@ -551,6 +572,18 @@ def sync_tally_to_rentasst(
                             # omitted.
                             "discount_value": 0,
                             "discount_is_percentage": False,
+                            # RentAsst's RentService::calculateStandardPrice() always
+                            # overwrites total_price server-side as
+                            # rented_quantity*price*duration, where duration comes from
+                            # matching calculation_method against 1=days/2=hours/3=months
+                            # and DEFAULTS TO 0 for any other value including null/missing
+                            # — confirmed live: every rentout item silently landed at
+                            # total_price=0 (and the whole rentout's grand_total with it)
+                            # because this field was never sent. 4 = AssetCalculationMethods
+                            # ::FLAT_PRICE, which computes total_price = quantity*price with
+                            # no duration multiplier — correct for a one-time Tally sale line
+                            # rather than a per-day/hour/month rental rate.
+                            "calculation_method": 4,
                         })
 
                     # 1. Field Ownership Policy Filter (Reverse Direction: Tally -> RentAsst)
@@ -679,8 +712,7 @@ def sync_tally_to_rentasst(
                         if not item_name:
                             continue
                         qty = int(_parse_leading_number(it.get("quantity"))) or 1
-                        price = _parse_leading_number(it.get("rate"))
-                        total_price = _parse_leading_number(it.get("amount")) or round(price * qty, 2)
+                        price, total_price = _resolve_price_and_total(it.get("rate"), it.get("amount"), qty)
                         resolved_items.append({
                             "name": item_name,
                             "asset_id": _int_or_none(store.get_external_id("equipment", item_name)),
@@ -722,14 +754,26 @@ def sync_tally_to_rentasst(
                             current_status = current.get("status") if isinstance(current, dict) else None
 
                             # RentAsst's InvoiceService::canEditInvoice() permanently locks
-                            # header edits (including status) on any invoice that already has a
-                            # payment recorded — confirmed live: once an invoice is
-                            # paid/partiallyPaid, PUT /invoices/{id} 422s with "Invoice cannot
-                            # be edited..." on every single sync cycle forever. That's an
-                            # expected, permanent RentAsst business rule, not a transient
-                            # failure, so once status already matches there is nothing to send
-                            # (idempotent no-op) and the attempt is skipped rather than retried.
-                            if current_status != invoice_status:
+                            # header edits (including status) on any invoice that isn't
+                            # draft/confirmed-with-no-payments — confirmed live: once an
+                            # invoice reaches paid/partiallyPaid, PUT /invoices/{id} 422s with
+                            # "Invoice cannot be edited..." forever. Gating on "current_status
+                            # != invoice_status" alone isn't enough: invoice_status is
+                            # recomputed fresh each cycle from whichever receipt vouchers
+                            # happen to be in THIS run's fetch batch, so if the settling
+                            # receipt falls outside this run's date range it recomputes as
+                            # "confirmed" even though the invoice is actually "paid" — that
+                            # mismatch re-triggers the same doomed update, and 422, every
+                            # single cycle. The reliable signal is RentAsst's own edit-lock
+                            # rule, not our guess at the target status — gate on a "known
+                            # locked" denylist rather than an "editable" allowlist so an
+                            # unknown/failed status fetch still allows the update attempt
+                            # (previous behavior) instead of silently blocking it.
+                            LOCKED_INVOICE_STATUSES = (
+                                "partiallyPaid", "paid", "overdue", "cancelled",
+                                "refunded", "partiallyRefunded", "excessPaid", "excessRefunded",
+                            )
+                            if current_status not in LOCKED_INVOICE_STATUSES and current_status != invoice_status:
                                 try:
                                     ra_client.update_invoice(existing_ra_id, {
                                         "status": invoice_status,
