@@ -473,8 +473,14 @@ class RentAsstClient:
         return self._request_with_fallback(["payment", "payments"])
 
     def fetch_businesses(self) -> List[Dict[str, Any]]:
-        """Fetches list of available RentAsst business companies for multi-tenant company selection."""
-        return self._request_with_fallback(["user/businesses", "business", "tenants", "businesses"])
+        """
+        Fetches list of available RentAsst business companies for multi-tenant company
+        selection. 'get_user_business_list' (UserController@getUserActiveBusinesses) is
+        the real route confirmed in RentAsst's own routes/api.php — none of
+        'user/businesses'/'business'/'tenants'/'businesses' exist, so every call 404'd
+        through the whole fallback list and surfaced as a 400 on /api/companies/rentasst.
+        """
+        return self._request_with_fallback(["get_user_business_list", "user/businesses", "business", "tenants", "businesses"])
 
     def _post_with_fallback(self, endpoints: List[str], payload: Dict[str, Any]) -> Any:
         last_error = None
@@ -560,12 +566,82 @@ class RentAsstClient:
         return None
 
     def push_rentout(self, rentout_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Push a Tally Sales Register / Voucher as a Rentout / Rental Order to RentAsst Cloud API."""
-        return self._post_with_fallback(["create-rent-details", "rent", "rents", "rental-orders", "invoice", "invoices"], rentout_data)
+        """
+        Push a Tally Sales Order voucher as a Rentout / Rental Order to RentAsst Cloud API.
+
+        NOTE: 'create-rent-details' (RentController@createRentDetails) is the only real,
+        validated create endpoint for this entity — confirmed against RentAsst's own
+        routes/api.php and RentDetailsRequest source. Previous versions of this fallback
+        list also tried 'rent'/'rents'/'rental-orders'/'invoice'/'invoices': 'rent' POST
+        maps to a store() method RentController doesn't define, and 'invoice'/'invoices'
+        are a completely different resource. _post_with_fallback only advances past a 404/
+        405 ("this path doesn't exist"), not past a 422 ("this path exists but rejected the
+        payload") — so any genuine validation error at create-rent-details was silently
+        masked by cascading into the invoice-create endpoint instead, which naturally also
+        422'd on a rentout-shaped payload and produced a misleading error pointing at
+        /invoices. Keeping a single, correct endpoint here makes create-rent-details'
+        actual validation error the one that surfaces.
+        """
+        return self._post_with_fallback(["create-rent-details"], rentout_data)
+
+    def push_rentout_items(self, rent_id: str, items: List[Dict[str, Any]]) -> Any:
+        """
+        Creates rent items (asset, quantity, price) on an existing RentAsst rentout via
+        the bulk rent-items endpoint. create-rent-details's own 'items' field is silently
+        ignored — RentItem is a separate model/table (rent_items), not a column on Rent
+        (confirmed against RentAsst's own RentService::createNewRent(), which calls
+        Rent::create($requestData) directly) — so line items must be pushed here instead,
+        after the rentout itself exists.
+
+        RentItem::arrayRules() validates the POST body as a plain top-level JSON array of
+        item objects (not wrapped in an {"items": [...]} envelope), each requiring at
+        least 'rented_quantity'. This must only be called once per rentout creation —
+        there's no upsert-by-asset here, so calling it again would create duplicate rows.
+        """
+        url = f"{self.base_url}/store/rent_items/{rent_id}"
+        payload = []
+        for it in items:
+            row = dict(it)
+            if str(rent_id).isdigit():
+                row["rent_id"] = int(rent_id)
+            payload.append(row)
+        r = self.session.post(url, json=payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("data", data) if isinstance(data, dict) else data
 
     def push_invoice(self, invoice_data: Dict[str, Any]) -> Dict[str, Any]:
         """Push an invoice record from Tally to RentAsst Cloud API."""
         return self._post_with_fallback(["invoice", "invoices", "sales"], invoice_data)
+
+    def update_invoice(self, invoice_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Update header fields (status, amounts, dates) on an existing RentAsst invoice.
+        NOTE: RentAsst's invoice update endpoint silently ignores an 'items' key (not a
+        fillable column on the Invoice model) — line items must go through
+        push_invoice_items() instead, never through this call.
+        """
+        url = f"{self.base_url}/invoices/{invoice_id}"
+        r = self.session.put(url, json=payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("data", data) if isinstance(data, dict) else data
+
+    def push_invoice_items(self, invoice_id: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Creates line items on an existing RentAsst invoice via the bulk-create endpoint.
+        Invoice line items are a separate resource from the invoice itself in RentAsst
+        (InvoiceItem, not a column on Invoice) — sending them as part of the invoice
+        create/update payload is silently dropped, confirmed against RentAsst's own
+        InvoiceService/InvoiceItemController source. This must only be called once per
+        invoice creation — the endpoint appends rows rather than replacing them, so
+        calling it again on an already-itemized invoice would create duplicates.
+        """
+        url = f"{self.base_url}/invoices/{invoice_id}/items-bulk-create"
+        r = self.session.post(url, json={"items": items}, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("data", data) if isinstance(data, dict) else data
 
     def close(self):
         self.session.close()

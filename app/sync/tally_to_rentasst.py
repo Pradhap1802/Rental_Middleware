@@ -34,6 +34,23 @@ def format_iso_date(tally_date: Optional[str]) -> str:
         return datetime.now().strftime("%Y-%m-%d")
 
 
+def _parse_leading_number(raw: Any) -> float:
+    """Extracts the leading numeric value from a Tally-formatted string like '1 Piece' or
+    '97.00/Piece', where the actual number is followed by a unit suffix Tally includes."""
+    if raw is None:
+        return 0.0
+    text = str(raw).strip().split("/")[0].strip()
+    match = re.match(r"[-+]?\d+(\.\d+)?", text)
+    return float(match.group(0)) if match else 0.0
+
+
+def _int_or_none(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return int(text) if text.isdigit() else None
+
+
 def resolve_customer_id(party_name: str, ra_client: Any, store: MappingStore) -> int:
     """Finds or resolves Customer ID from RentAsst DB or auto-creates it if new in Tally."""
     if not party_name or party_name.lower() in ("cash", "bank", "sales"):
@@ -416,8 +433,13 @@ def sync_tally_to_rentasst(
                 max_alter_id = alter_id
 
             v_type = (v.get("voucher_type") or "").lower().strip()
+            is_invoice_type = v_type in ("sales", "sales invoice", "invoice")
 
-            if is_tally_voucher_duplicate(v, store, ra_client):
+            # Invoices get their own create-vs-update-vs-skip handling further down (an
+            # already-synced invoice must still be refreshed with the latest status/product
+            # lines, not skipped forever) — everything else keeps the plain skip-on-duplicate
+            # behavior, since rental orders/payments are never revised after creation.
+            if not is_invoice_type and is_tally_voucher_duplicate(v, store, ra_client):
                 stats["skipped"] += 1
                 continue
 
@@ -428,20 +450,49 @@ def sync_tally_to_rentasst(
                 if v_type in ("sales order", "sales orders", "order", "orders", "rental order", "rental orders"):
                     cust_id = resolve_customer_id(party_name, ra_client, store)
                     amount = float(v.get("amount") or 0.0)
+                    # RentAsst's create-rent-details endpoint (RentDetailsRequest) requires
+                    # rent_from/rent_to as full "Y-m-d H:i:s" timestamps — a date-only string
+                    # fails Laravel's date_format validation with a 422, confirmed against
+                    # RentAsst's own RentDetailsRequest::rules() source.
+                    iso_datetime = f"{iso_date} 00:00:00"
 
                     rentout_payload = {
                         "number": str(v.get("voucher_number") or f"ORD-{tally_guid[:8]}"),
                         "customer_id": cust_id,
-                        "rent_from": iso_date,
-                        "rent_to": iso_date,
-                        "order_booking_date": iso_date,
+                        "rent_from": iso_datetime,
+                        "rent_to": iso_datetime,
+                        "order_booking_date": iso_datetime,
                         "grand_total": amount,
                         "total_amount": amount,
-                        "status": "confirmed",
+                        # RentAsst's 'status' column is a numeric code (RentStatuses::UPCOMING
+                        # = 1), validated as nullable|numeric|between:0,10 — a string like
+                        # "confirmed" fails that validation with a 422.
+                        "status": 1,
                         "notes": f"Imported from Tally Sales Order #{v.get('voucher_number')}",
                         "tally_guid": tally_guid,
-                        "items": v.get("items") or [],
                     }
+
+                    # RentAsst's create-rent-details endpoint silently drops an 'items'
+                    # field on the rentout payload itself (RentItem is a separate
+                    # rent_items table, not a column on Rent) — each Tally inventory line
+                    # must be resolved to a RentAsst asset_id via the equipment
+                    # reverse-mapping populated in step 2 above, then pushed through
+                    # push_rentout_items() once the rentout exists.
+                    resolved_items = []
+                    for it in (v.get("items") or []):
+                        item_name = str(it.get("name") or "").strip()
+                        if not item_name:
+                            continue
+                        qty = int(_parse_leading_number(it.get("quantity"))) or 1
+                        price = _parse_leading_number(it.get("rate"))
+                        total_price = _parse_leading_number(it.get("amount")) or round(price * qty, 2)
+                        resolved_items.append({
+                            "asset_id": _int_or_none(store.get_external_id("equipment", item_name)),
+                            "asset_name": item_name,
+                            "rented_quantity": qty,
+                            "price": price,
+                            "total_price": total_price,
+                        })
 
                     # 1. Field Ownership Policy Filter (Reverse Direction: Tally -> RentAsst)
                     filtered_payload = filter_payload_by_ownership("rental_order", "reverse", rentout_payload)
@@ -463,14 +514,43 @@ def sync_tally_to_rentasst(
                         status="synced",
                     )
                     store.add_history("rental_order", ra_id, "synced", external_id=tally_guid, details="Tally Sales Order Reverse Sync")
+
+                    # 4. Push asset/quantity/price lines once, right after creation
+                    if resolved_items:
+                        try:
+                            ra_client.push_rentout_items(ra_id, resolved_items)
+                        except Exception as e:
+                            log_event("ReverseSync", f"Failed to push rent items for RentAsst rentout {ra_id} (Tally GUID {tally_guid}): {e}")
+
                     stats["created"] += 1
 
                 elif v_type in ("sales", "sales invoice", "invoice"):
                     cust_id = resolve_customer_id(party_name, ra_client, store)
                     amount = float(v.get("amount") or 0.0)
+                    voucher_number = str(v.get("voucher_number") or "").strip()
+
+                    # RentAsst's paid_amount is computed live from linked RentPayment rows,
+                    # not a field we can set directly — but its persisted 'status' column
+                    # isn't, so derive it from any receipt in this same batch that settled
+                    # against this invoice's bill (bill_ref == this voucher's number).
+                    paid_so_far = 0.0
+                    for other in vouchers:
+                        other_type = (other.get("voucher_type") or "").lower().strip()
+                        if other_type not in ("receipt", "payment", "receipts", "payments"):
+                            continue
+                        other_bill_ref = (other.get("bill_ref") or "").strip()
+                        if voucher_number and other_bill_ref.lower() == voucher_number.lower():
+                            paid_so_far += float(other.get("amount") or 0.0)
+
+                    if paid_so_far <= 0:
+                        invoice_status = "confirmed"
+                    elif paid_so_far + 0.01 < amount:
+                        invoice_status = "partiallyPaid"
+                    else:
+                        invoice_status = "paid"
 
                     invoice_payload = {
-                        "number": str(v.get("voucher_number") or f"INV-{tally_guid[:8]}"),
+                        "number": voucher_number or f"INV-{tally_guid[:8]}",
                         "customer_id": cust_id,
                         "invoice_date": iso_date,
                         "due_date": iso_date,
@@ -479,10 +559,33 @@ def sync_tally_to_rentasst(
                         "subtotal": amount,
                         "grand_total": amount,
                         "total_amount": amount,
-                        "status": "confirmed",
+                        "status": invoice_status,
                         "notes": f"Imported from Tally Sales Register Voucher #{v.get('voucher_number')}",
                         "tally_guid": tally_guid,
                     }
+
+                    # Resolve each Tally inventory line to a RentAsst asset_id via the
+                    # equipment reverse-mapping populated in step 2 above, so product lines
+                    # carry a real link rather than just a free-text name. RentAsst's invoice
+                    # create/update endpoints silently drop an 'items' field on the invoice
+                    # payload itself (InvoiceItem is a separate resource) — these must be
+                    # pushed through push_invoice_items() after the invoice exists.
+                    resolved_items = []
+                    for it in (v.get("items") or []):
+                        item_name = str(it.get("name") or "").strip()
+                        if not item_name:
+                            continue
+                        qty = int(_parse_leading_number(it.get("quantity"))) or 1
+                        price = _parse_leading_number(it.get("rate"))
+                        total_price = _parse_leading_number(it.get("amount")) or round(price * qty, 2)
+                        resolved_items.append({
+                            "name": item_name,
+                            "asset_id": _int_or_none(store.get_external_id("equipment", item_name)),
+                            "quantity": qty,
+                            "price": price,
+                            "total_price": total_price,
+                            "product_type": "product",
+                        })
 
                     # 1. Field Ownership Policy Filter (Reverse Direction: Tally -> RentAsst)
                     filtered_payload = filter_payload_by_ownership("invoice", "reverse", invoice_payload)
@@ -495,10 +598,37 @@ def sync_tally_to_rentasst(
                         stats["failed"] += 1
                         continue
 
-                    # 3. Post to RentAsst Cloud REST API
+                    # 3. Check whether THIS reverse sync already created this invoice before
+                    # (captured before is_tally_voucher_duplicate, which can itself write a
+                    # fresh mapping on a cloud-dedup match — that's a different, unrelated
+                    # invoice we didn't create, so it stays a plain skip, not an update target).
+                    existing_ra_id = store.get_external_id("invoice", tally_guid)
+
+                    if is_tally_voucher_duplicate(v, store, ra_client):
+                        if existing_ra_id:
+                            # Already synced previously — refresh status/amount only. Never
+                            # re-push items here: items-bulk-create appends rows rather than
+                            # replacing them, so repeating it would duplicate line items.
+                            try:
+                                ra_client.update_invoice(existing_ra_id, {
+                                    "status": invoice_status,
+                                    "subtotal": amount,
+                                    "grand_total": amount,
+                                    "total_amount": amount,
+                                })
+                                store.add_history("invoice", existing_ra_id, "synced", external_id=tally_guid, details=f"Tally Sales Register Reverse Sync update (status: {invoice_status})")
+                                stats["updated"] += 1
+                            except Exception as e:
+                                stats["failed"] += 1
+                                log_event("ReverseSync", f"Failed to update RentAsst invoice {existing_ra_id} (Tally GUID {tally_guid}): {e}")
+                        else:
+                            stats["skipped"] += 1
+                        continue
+
+                    # 4. Post to RentAsst Cloud REST API
                     res = ra_client.push_invoice(filtered_payload)
 
-                    # 4. Save SQLite mapping ONLY after confirmed HTTP success
+                    # 5. Save SQLite mapping ONLY after confirmed HTTP success
                     ra_id = str(res.get("id") or res.get("rentasst_id") or f"RA-INV-{alter_id}")
                     rev_key = generate_integration_key("default", "invoice", tally_guid, "reverse")
 
@@ -512,6 +642,14 @@ def sync_tally_to_rentasst(
                         status="synced",
                     )
                     store.add_history("invoice", ra_id, "synced", external_id=tally_guid, details="Tally Sales Register Reverse Sync")
+
+                    # 6. Push product lines once, right after creation
+                    if resolved_items:
+                        try:
+                            ra_client.push_invoice_items(ra_id, resolved_items)
+                        except Exception as e:
+                            log_event("ReverseSync", f"Failed to push line items for RentAsst invoice {ra_id} (Tally GUID {tally_guid}): {e}")
+
                     stats["created"] += 1
 
                 elif v_type in ("receipt", "payment", "receipts", "payments"):
