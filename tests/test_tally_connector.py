@@ -9,6 +9,7 @@ from app.connectors.tally.client import TallyClient
 from app.connectors.tally.ledger import build_customer_ledger_xml
 from app.connectors.tally.sales_voucher import build_sales_invoice_voucher_xml
 from app.connectors.tally.receipt_voucher import build_receipt_voucher_xml
+from app.connectors.tally.stock_item import build_physical_stock_voucher_xml
 
 
 class TestTallyConnectorAndValidation(unittest.TestCase):
@@ -184,6 +185,41 @@ class TestTallyConnectorAndValidation(unittest.TestCase):
         sent_xml = mock_session.post.call_args.kwargs["data"].decode("utf-8")
         self.assertNotIn("<INJECTED/>", sent_xml)
         self.assertIn("&amp;", sent_xml)
+
+    def test_physical_stock_voucher_xml_builder(self):
+        xml = build_physical_stock_voucher_xml(item_name="Dell Laptop 3440", quantity=11, unit="Piece")
+        self.assertIn('VCHTYPE="Physical Stock"', xml)
+        self.assertIn("<STOCKITEMNAME>Dell Laptop 3440</STOCKITEMNAME>", xml)
+        self.assertIn("<ACTUALQTY>11 Piece</ACTUALQTY>", xml)
+        self.assertIn("<BILLEDQTY>11 Piece</BILLEDQTY>", xml)
+
+    def test_reconcile_stock_quantity_pushes_physical_stock_voucher(self):
+        """
+        Confirmed live: re-sending RentAsst's available_quantity as OPENINGBALANCE on the
+        STOCKITEM master never corrects drift once Sales vouchers have consumed against
+        it (OPENINGBALANCE is a fixed baseline, not a live quantity) — a Physical Stock
+        voucher is Tally's actual mechanism for reconciling current stock.
+        """
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        client = TallyClient(cfg, session=MagicMock())
+        client.send_xml = MagicMock(return_value="TALLY-ID-1")
+
+        client.reconcile_stock_quantity("Standee Banner", 11, unit="Nos")
+
+        client.send_xml.assert_called_once()
+        physical_stock_xml = client.send_xml.call_args.args[0]
+        self.assertIn('VCHTYPE="Physical Stock"', physical_stock_xml)
+        self.assertIn("<STOCKITEMNAME>Standee Banner</STOCKITEMNAME>", physical_stock_xml)
+        self.assertIn("<ACTUALQTY>11 Nos</ACTUALQTY>", physical_stock_xml)
+
+    def test_reconcile_stock_quantity_skips_when_quantity_unknown(self):
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        client = TallyClient(cfg, session=MagicMock())
+        client.send_xml = MagicMock(return_value="TALLY-ID-1")
+
+        client.reconcile_stock_quantity("Standee Banner", None, unit="Nos")
+
+        client.send_xml.assert_not_called()
 
     def test_invoice_math_validation_allows_rupee_round_off(self):
         """

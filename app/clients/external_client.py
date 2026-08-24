@@ -77,6 +77,13 @@ class ExternalClient:
             res = r.json()
             return str(res.get("id") or data.get("id"))
 
+    def reconcile_equipment_stock(self, name: str, quantity: Any, unit: str = "Nos") -> None:
+        """No-op for non-Tally external systems — stock drift reconciliation is a
+        Tally-specific concept (OPENINGBALANCE vs. live quantity), not applicable to a
+        generic REST target."""
+        if self.cfg.external_system_type == "tally":
+            self.tally.reconcile_stock_quantity(name, quantity, unit=unit)
+
     def sync_rental_order(self, data: Dict[str, Any]) -> str:
         if self.cfg.external_system_type == "tally":
             return self.tally.sync_rental_order(data)

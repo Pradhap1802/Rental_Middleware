@@ -9,9 +9,10 @@ from .xml_builder import sanitize_tally_xml, build_export_collection_envelope, e
 from .parser import validate_tally_accounting_success
 from .company import build_fetch_companies_xml, parse_fetch_companies_response
 from .ledger import build_customer_ledger_xml
-from .stock_item import build_stock_item_xml
+from .stock_item import build_stock_item_xml, build_physical_stock_voucher_xml
 from .sales_voucher import build_sales_order_voucher_xml, build_sales_invoice_voucher_xml
 from .receipt_voucher import build_receipt_voucher_xml
+from ...logging.logger import log_event
 
 # Tally Prime's XML/HTTP server cannot safely handle overlapping requests — concurrent
 # imports/exports corrupt its current-company context (observed live as "Tally Business
@@ -188,6 +189,34 @@ class TallyClient:
             company_name=company_name,
         )
         return self.send_xml(xml)
+
+    def reconcile_stock_quantity(self, item_name: str, quantity: Any, unit: str = "Nos") -> None:
+        """
+        Reconciles a stock item's actual Tally quantity via a Physical Stock voucher —
+        NOT by re-sending OPENINGBALANCE on the STOCKITEM master. OPENINGBALANCE is a
+        fixed baseline as of the books' start date; every Sales voucher pushed since
+        keeps consuming against that one baseline, so repeatedly re-sending RentAsst's
+        current available_quantity as OPENINGBALANCE never corrects drift (confirmed
+        live: one stock item drifted to a CLOSINGBALANCE of -4 despite OPENINGBALANCE
+        being resent as its real RentAsst quantity every cycle, because units had
+        already been consumed by prior Sales vouchers against that fixed baseline).
+
+        Called unconditionally for every equipment item on every sync cycle — regardless
+        of whether that item's own RentAsst data changed — because Tally-side drift comes
+        from Sales vouchers consuming stock there, not from RentAsst-side edits, so a
+        content-hash "nothing changed, skip" check (as run_sync_pipeline applies to the
+        STOCKITEM master push) would never catch it.
+        """
+        if quantity is None:
+            return
+        try:
+            company_name = getattr(self.cfg, "tally_company_name", None)
+            xml = build_physical_stock_voucher_xml(
+                item_name=item_name, quantity=quantity, unit=unit, company_name=company_name,
+            )
+            self.send_xml(xml, expect_voucher=True)
+        except Exception as e:
+            log_event("ForwardSync", f"Failed to reconcile Tally stock quantity for '{item_name}': {e}")
 
     def sync_rental_order(self, data: Dict[str, Any]) -> str:
         remote_id = f"RENTAL-ORD-{data.get('id')}"

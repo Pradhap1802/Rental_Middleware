@@ -1,5 +1,5 @@
 from typing import Dict, Any, Optional
-from .xml_builder import escape_xml, build_import_envelope
+from .xml_builder import escape_xml, build_import_envelope, format_tally_date
 
 
 def build_stock_item_xml(
@@ -134,3 +134,39 @@ def build_stock_item_xml(
           </STOCKITEM>"""
 
     return build_import_envelope(item_xml, report_name="All Masters", company_name=company_name)
+
+
+def build_physical_stock_voucher_xml(
+    item_name: str,
+    quantity: float,
+    unit: str = "Nos",
+    company_name: Optional[str] = None,
+) -> str:
+    """
+    Builds a Tally "Physical Stock" voucher — the correct mechanism for reconciling a
+    stock item's actual quantity, unlike re-sending OPENINGBALANCE on the STOCKITEM
+    master itself. OPENINGBALANCE is a fixed baseline as of the books' start date, not a
+    live "current stock" field: every Sales voucher pushed afterward keeps consuming
+    against that same fixed baseline, so simply re-sending RentAsst's current
+    available_quantity as OPENINGBALANCE every equipment-sync cycle does NOT correct
+    drift — confirmed live, "Dell Laptop 3440" ended up with a CLOSINGBALANCE of -4 in
+    Tally despite OPENINGBALANCE being resent as 11 (its real RentAsst quantity) on every
+    cycle, because ~15 units had already been consumed by prior Sales vouchers against
+    that one fixed baseline. A Physical Stock voucher instead records a dated inventory
+    count that Tally treats as the new "actual truth" for that date, correctly resetting
+    CLOSINGBALANCE going forward regardless of the voucher history that preceded it.
+    """
+    date_str = format_tally_date(None)
+    msg = f"""          <VOUCHER VCHTYPE="Physical Stock" ACTION="Create">
+            <DATE>{date_str}</DATE>
+            <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
+            <VOUCHERTYPENAME>Physical Stock</VOUCHERTYPENAME>
+            <NARRATION>RentAsst stock reconciliation for {escape_xml(item_name)}</NARRATION>
+            <ALLINVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>{escape_xml(item_name)}</STOCKITEMNAME>
+              <ACTUALQTY>{quantity} {escape_xml(unit)}</ACTUALQTY>
+              <BILLEDQTY>{quantity} {escape_xml(unit)}</BILLEDQTY>
+            </ALLINVENTORYENTRIES.LIST>
+          </VOUCHER>"""
+
+    return build_import_envelope(msg, report_name="Vouchers", company_name=company_name)
