@@ -469,6 +469,16 @@ class RentAsstClient:
     def fetch_invoices(self) -> List[Dict[str, Any]]:
         return self._request_with_fallback(["invoices", "invoice"])
 
+    def get_invoice(self, invoice_id: str) -> Dict[str, Any]:
+        """Fetches a single invoice's full detail, including its 'items' array — used to
+        detect an already-synced invoice that's still missing its line items."""
+        return self._request_with_fallback([f"invoices/{invoice_id}", f"invoice/{invoice_id}"])
+
+    def get_rentout(self, rent_id: str) -> Dict[str, Any]:
+        """Fetches a single rentout's full detail, including 'rent_items_count' — used to
+        detect an already-synced rentout that's still missing its asset/quantity/price lines."""
+        return self._request_with_fallback([f"get-rent-details/{rent_id}"])
+
     def fetch_payments(self) -> List[Dict[str, Any]]:
         return self._request_with_fallback(["payment", "payments"])
 

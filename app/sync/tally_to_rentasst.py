@@ -434,12 +434,14 @@ def sync_tally_to_rentasst(
 
             v_type = (v.get("voucher_type") or "").lower().strip()
             is_invoice_type = v_type in ("sales", "sales invoice", "invoice")
+            is_rentout_type = v_type in ("sales order", "sales orders", "order", "orders", "rental order", "rental orders")
 
-            # Invoices get their own create-vs-update-vs-skip handling further down (an
-            # already-synced invoice must still be refreshed with the latest status/product
-            # lines, not skipped forever) — everything else keeps the plain skip-on-duplicate
-            # behavior, since rental orders/payments are never revised after creation.
-            if not is_invoice_type and is_tally_voucher_duplicate(v, store, ra_client):
+            # Invoices and rentouts get their own create-vs-update-vs-skip handling further
+            # down (an already-synced record must still be checked for missing line items
+            # and backfilled — see the "backfill" comments below — not skipped forever) —
+            # payments keep the plain skip-on-duplicate behavior, since a receipt is never
+            # revised after creation.
+            if not is_invoice_type and not is_rentout_type and is_tally_voucher_duplicate(v, store, ra_client):
                 stats["skipped"] += 1
                 continue
 
@@ -497,10 +499,41 @@ def sync_tally_to_rentasst(
                     # 1. Field Ownership Policy Filter (Reverse Direction: Tally -> RentAsst)
                     filtered_payload = filter_payload_by_ownership("rental_order", "reverse", rentout_payload)
 
-                    # 2. Post to RentAsst Cloud REST API
+                    # 2. Check whether THIS reverse sync already created this rentout before
+                    # (captured before is_tally_voucher_duplicate, which can itself write a
+                    # fresh mapping on a cloud-dedup match — that's a different, unrelated
+                    # rentout we didn't create, so it stays a plain skip, not a backfill
+                    # target — same reasoning as the invoice branch below).
+                    existing_ra_id = store.get_external_id("rental_order", tally_guid)
+
+                    if is_tally_voucher_duplicate(v, store, ra_client):
+                        # Backfill: a rentout we created before that still has zero rent items
+                        # (either because it predates push_rentout_items() existing, or a
+                        # prior push failed) gets its lines added now. Checking the live item
+                        # count first — rather than just "did we ever try before" — makes this
+                        # safe to run on every sync: once items exist, this never re-pushes
+                        # and never duplicates them.
+                        if existing_ra_id and resolved_items:
+                            try:
+                                current = ra_client.get_rentout(existing_ra_id)
+                                current_count = (current.get("rent_items_count") or 0) if isinstance(current, dict) else 0
+                                if not current_count:
+                                    ra_client.push_rentout_items(existing_ra_id, resolved_items)
+                                    store.add_history("rental_order", existing_ra_id, "synced", external_id=tally_guid, details="Tally Sales Order Reverse Sync — backfilled missing rent items")
+                                    stats["updated"] += 1
+                                else:
+                                    stats["skipped"] += 1
+                            except Exception as e:
+                                log_event("ReverseSync", f"Failed to backfill rent items for RentAsst rentout {existing_ra_id} (Tally GUID {tally_guid}): {e}")
+                                stats["skipped"] += 1
+                        else:
+                            stats["skipped"] += 1
+                        continue
+
+                    # 3. Post to RentAsst Cloud REST API
                     res = ra_client.push_rentout(filtered_payload)
 
-                    # 3. Save SQLite mapping ONLY after confirmed HTTP success
+                    # 4. Save SQLite mapping ONLY after confirmed HTTP success
                     ra_id = str(res.get("id") or res.get("rentasst_id") or f"RA-ORD-{alter_id}")
                     rev_key = generate_integration_key("default", "rental_order", tally_guid, "reverse")
 
@@ -515,7 +548,7 @@ def sync_tally_to_rentasst(
                     )
                     store.add_history("rental_order", ra_id, "synced", external_id=tally_guid, details="Tally Sales Order Reverse Sync")
 
-                    # 4. Push asset/quantity/price lines once, right after creation
+                    # 5. Push asset/quantity/price lines once, right after creation
                     if resolved_items:
                         try:
                             ra_client.push_rentout_items(ra_id, resolved_items)
@@ -607,8 +640,9 @@ def sync_tally_to_rentasst(
                     if is_tally_voucher_duplicate(v, store, ra_client):
                         if existing_ra_id:
                             # Already synced previously — refresh status/amount only. Never
-                            # re-push items here: items-bulk-create appends rows rather than
-                            # replacing them, so repeating it would duplicate line items.
+                            # blindly re-push items here: items-bulk-create appends rows
+                            # rather than replacing them, so repeating it on an invoice that
+                            # already has its lines would duplicate them.
                             try:
                                 ra_client.update_invoice(existing_ra_id, {
                                     "status": invoice_status,
@@ -621,6 +655,20 @@ def sync_tally_to_rentasst(
                             except Exception as e:
                                 stats["failed"] += 1
                                 log_event("ReverseSync", f"Failed to update RentAsst invoice {existing_ra_id} (Tally GUID {tally_guid}): {e}")
+
+                            # Backfill: an invoice created before push_invoice_items() existed
+                            # (or whose item push failed) still has zero items — check the
+                            # live item count first, not just "did we try before", so this is
+                            # safe to run every sync: once items exist, this never re-pushes.
+                            if resolved_items:
+                                try:
+                                    current = ra_client.get_invoice(existing_ra_id)
+                                    current_items = current.get("items") if isinstance(current, dict) else None
+                                    if not current_items:
+                                        ra_client.push_invoice_items(existing_ra_id, resolved_items)
+                                        store.add_history("invoice", existing_ra_id, "synced", external_id=tally_guid, details="Tally Sales Register Reverse Sync — backfilled missing line items")
+                                except Exception as e:
+                                    log_event("ReverseSync", f"Failed to backfill line items for RentAsst invoice {existing_ra_id} (Tally GUID {tally_guid}): {e}")
                         else:
                             stats["skipped"] += 1
                         continue

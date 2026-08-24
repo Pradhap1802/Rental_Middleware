@@ -335,6 +335,213 @@ class TestReverseSyncHardening(unittest.TestCase):
         self.assertEqual(pushed_items[0]["price"], 97.0)
         self.assertEqual(pushed_items[0]["total_price"], 97.0)
 
+    def test_reverse_sync_backfills_missing_invoice_items_on_existing_invoice(self):
+        """
+        An invoice synced before push_invoice_items() existed (or whose item push
+        failed) is stuck at zero items forever under the plain "update status only"
+        path — reverse sync must notice the live RentAsst record still has no items and
+        backfill them, without re-pushing on invoices that already have items.
+        """
+        self.store.save_mapping(
+            entity_type="equipment",
+            source_id="Moto G45",
+            target_id="17",
+            source_system="tally",
+            target_system="rentasst",
+        )
+        tally_guid = "GUID-BACKFILL-INV"
+        rev_key = generate_integration_key("default", "invoice", tally_guid, "reverse")
+        self.store.save_mapping(
+            entity_type="invoice",
+            source_id=tally_guid,
+            target_id="CLOUD-INV-BACKFILL",
+            source_system="tally",
+            target_system="rentasst",
+            integration_key=rev_key,
+            status="synced",
+        )
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.get_invoice.return_value = {"id": "CLOUD-INV-BACKFILL", "items": []}
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        voucher = {
+            "tally_guid": tally_guid,
+            "alter_id": 40,
+            "voucher_type": "Sales",
+            "voucher_number": "INV-BACKFILL",
+            "party_name": "Acme Corp",
+            "date": "2026-08-20",
+            "amount": 97.0,
+            "items": [{"name": "Moto G45", "quantity": "1 Piece", "rate": "97.00/Piece", "amount": "97.00"}],
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_vouchers.return_value = [voucher]
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            sync_tally_to_rentasst(
+                ra_client=mock_ra_client,
+                ext_client=mock_ext_client,
+                store=self.store,
+                force_full_sync=True,
+            )
+
+        mock_ra_client.push_invoice.assert_not_called()
+        mock_ra_client.get_invoice.assert_called_once_with("CLOUD-INV-BACKFILL")
+        mock_ra_client.push_invoice_items.assert_called_once()
+        pushed_items = mock_ra_client.push_invoice_items.call_args[0][1]
+        self.assertEqual(pushed_items[0]["asset_id"], 17)
+
+    def test_reverse_sync_does_not_duplicate_invoice_items_when_already_present(self):
+        """The mirror case: an existing invoice that already has items must not get a
+        second, duplicate set pushed just because reverse sync ran again."""
+        tally_guid = "GUID-HAS-ITEMS-INV"
+        rev_key = generate_integration_key("default", "invoice", tally_guid, "reverse")
+        self.store.save_mapping(
+            entity_type="invoice",
+            source_id=tally_guid,
+            target_id="CLOUD-INV-HAS-ITEMS",
+            source_system="tally",
+            target_system="rentasst",
+            integration_key=rev_key,
+            status="synced",
+        )
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.get_invoice.return_value = {"id": "CLOUD-INV-HAS-ITEMS", "items": [{"id": 1, "name": "Moto G45"}]}
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        voucher = {
+            "tally_guid": tally_guid,
+            "alter_id": 41,
+            "voucher_type": "Sales",
+            "voucher_number": "INV-HAS-ITEMS",
+            "party_name": "Acme Corp",
+            "date": "2026-08-20",
+            "amount": 97.0,
+            "items": [{"name": "Moto G45", "quantity": "1 Piece", "rate": "97.00/Piece", "amount": "97.00"}],
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_vouchers.return_value = [voucher]
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            sync_tally_to_rentasst(
+                ra_client=mock_ra_client,
+                ext_client=mock_ext_client,
+                store=self.store,
+                force_full_sync=True,
+            )
+
+        mock_ra_client.push_invoice_items.assert_not_called()
+
+    def test_reverse_sync_backfills_missing_rentout_items_on_existing_rentout(self):
+        """Same backfill behavior for rentouts: an existing rentout stuck at zero rent
+        items gets them added via push_rentout_items() instead of staying empty forever."""
+        self.store.save_mapping(
+            entity_type="equipment",
+            source_id="Moto G45",
+            target_id="17",
+            source_system="tally",
+            target_system="rentasst",
+        )
+        tally_guid = "GUID-BACKFILL-ORD"
+        rev_key = generate_integration_key("default", "rental_order", tally_guid, "reverse")
+        self.store.save_mapping(
+            entity_type="rental_order",
+            source_id=tally_guid,
+            target_id="CLOUD-ORD-BACKFILL",
+            source_system="tally",
+            target_system="rentasst",
+            integration_key=rev_key,
+            status="synced",
+        )
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.get_rentout.return_value = {"id": "CLOUD-ORD-BACKFILL", "rent_items_count": 0}
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        voucher = {
+            "tally_guid": tally_guid,
+            "alter_id": 42,
+            "voucher_type": "Sales Order",
+            "voucher_number": "ORD-BACKFILL",
+            "party_name": "Acme Corp",
+            "date": "2026-08-20",
+            "amount": 97.0,
+            "items": [{"name": "Moto G45", "quantity": "1 Piece", "rate": "97.00/Piece", "amount": "97.00"}],
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_vouchers.return_value = [voucher]
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            stats = sync_tally_to_rentasst(
+                ra_client=mock_ra_client,
+                ext_client=mock_ext_client,
+                store=self.store,
+                force_full_sync=True,
+            )
+
+        mock_ra_client.push_rentout.assert_not_called()
+        mock_ra_client.get_rentout.assert_called_once_with("CLOUD-ORD-BACKFILL")
+        mock_ra_client.push_rentout_items.assert_called_once()
+        pushed_items = mock_ra_client.push_rentout_items.call_args[0][1]
+        self.assertEqual(pushed_items[0]["asset_id"], 17)
+        self.assertGreaterEqual(stats["updated"], 1)
+
+    def test_reverse_sync_does_not_duplicate_rentout_items_when_already_present(self):
+        """The mirror case for rentouts: an existing rentout that already has items
+        must not get a second, duplicate set pushed."""
+        tally_guid = "GUID-HAS-ITEMS-ORD"
+        rev_key = generate_integration_key("default", "rental_order", tally_guid, "reverse")
+        self.store.save_mapping(
+            entity_type="rental_order",
+            source_id=tally_guid,
+            target_id="CLOUD-ORD-HAS-ITEMS",
+            source_system="tally",
+            target_system="rentasst",
+            integration_key=rev_key,
+            status="synced",
+        )
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.get_rentout.return_value = {"id": "CLOUD-ORD-HAS-ITEMS", "rent_items_count": 2}
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        voucher = {
+            "tally_guid": tally_guid,
+            "alter_id": 43,
+            "voucher_type": "Sales Order",
+            "voucher_number": "ORD-HAS-ITEMS",
+            "party_name": "Acme Corp",
+            "date": "2026-08-20",
+            "amount": 97.0,
+            "items": [{"name": "Moto G45", "quantity": "1 Piece", "rate": "97.00/Piece", "amount": "97.00"}],
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_vouchers.return_value = [voucher]
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            sync_tally_to_rentasst(
+                ra_client=mock_ra_client,
+                ext_client=mock_ext_client,
+                store=self.store,
+                force_full_sync=True,
+            )
+
+        mock_ra_client.push_rentout_items.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
