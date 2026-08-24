@@ -709,36 +709,51 @@ def sync_tally_to_rentasst(
 
                     if is_tally_voucher_duplicate(v, store, ra_client):
                         if existing_ra_id:
-                            # Already synced previously — refresh status/amount only. Never
-                            # blindly re-push items here: items-bulk-create appends rows
-                            # rather than replacing them, so repeating it on an invoice that
-                            # already has its lines would duplicate them.
+                            # Fetch current state once, up front, and use it to decide both
+                            # whether a status update is even needed and whether items still
+                            # need backfilling — avoids two separate GET calls and lets us skip
+                            # the update call entirely once status already matches.
+                            current = None
                             try:
-                                ra_client.update_invoice(existing_ra_id, {
-                                    "status": invoice_status,
-                                    "subtotal": amount,
-                                    "grand_total": amount,
-                                    "total_amount": amount,
-                                })
-                                store.add_history("invoice", existing_ra_id, "synced", external_id=tally_guid, details=f"Tally Sales Register Reverse Sync update (status: {invoice_status})")
-                                stats["updated"] += 1
+                                current = ra_client.get_invoice(existing_ra_id)
                             except Exception as e:
-                                stats["failed"] += 1
-                                log_event("ReverseSync", f"Failed to update RentAsst invoice {existing_ra_id} (Tally GUID {tally_guid}): {e}")
+                                log_event("ReverseSync", f"Failed to fetch RentAsst invoice {existing_ra_id} (Tally GUID {tally_guid}) for reverse sync: {e}")
+
+                            current_status = current.get("status") if isinstance(current, dict) else None
+
+                            # RentAsst's InvoiceService::canEditInvoice() permanently locks
+                            # header edits (including status) on any invoice that already has a
+                            # payment recorded — confirmed live: once an invoice is
+                            # paid/partiallyPaid, PUT /invoices/{id} 422s with "Invoice cannot
+                            # be edited..." on every single sync cycle forever. That's an
+                            # expected, permanent RentAsst business rule, not a transient
+                            # failure, so once status already matches there is nothing to send
+                            # (idempotent no-op) and the attempt is skipped rather than retried.
+                            if current_status != invoice_status:
+                                try:
+                                    ra_client.update_invoice(existing_ra_id, {
+                                        "status": invoice_status,
+                                        "subtotal": amount,
+                                        "grand_total": amount,
+                                        "total_amount": amount,
+                                    })
+                                    store.add_history("invoice", existing_ra_id, "synced", external_id=tally_guid, details=f"Tally Sales Register Reverse Sync update (status: {invoice_status})")
+                                    stats["updated"] += 1
+                                except Exception as e:
+                                    log_event("ReverseSync", f"RentAsst invoice {existing_ra_id} (Tally GUID {tally_guid}) status left at '{current_status}' — could not update to '{invoice_status}': {e}")
 
                             # Backfill: an invoice created before push_invoice_items() existed
                             # (or whose item push failed) still has zero items — check the
                             # live item count first, not just "did we try before", so this is
                             # safe to run every sync: once items exist, this never re-pushes.
                             if resolved_items:
-                                try:
-                                    current = ra_client.get_invoice(existing_ra_id)
-                                    current_items = current.get("items") if isinstance(current, dict) else None
-                                    if not current_items:
+                                current_items = current.get("items") if isinstance(current, dict) else None
+                                if not current_items:
+                                    try:
                                         ra_client.push_invoice_items(existing_ra_id, resolved_items)
                                         store.add_history("invoice", existing_ra_id, "synced", external_id=tally_guid, details="Tally Sales Register Reverse Sync — backfilled missing line items")
-                                except Exception as e:
-                                    log_event("ReverseSync", f"Failed to backfill line items for RentAsst invoice {existing_ra_id} (Tally GUID {tally_guid}): {e}")
+                                    except Exception as e:
+                                        log_event("ReverseSync", f"Failed to backfill line items for RentAsst invoice {existing_ra_id} (Tally GUID {tally_guid}): {e}")
                         else:
                             stats["skipped"] += 1
                         continue
