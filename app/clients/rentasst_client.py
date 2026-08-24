@@ -479,6 +479,24 @@ class RentAsstClient:
         detect an already-synced rentout that's still missing its asset/quantity/price lines."""
         return self._request_with_fallback([f"get-rent-details/{rent_id}"])
 
+    def get_rent_items(self, rent_id: str) -> List[Dict[str, Any]]:
+        """
+        Fetches the actual rent_items rows (asset_name, rented_quantity, price,
+        total_price) for a rentout — unlike fetch_rental_orders()'s list view, which only
+        returns a bare 'rent_items_count' integer with no item detail at all. Confirmed
+        live: without this, forward-syncing a Rent Out to Tally always produced a
+        header-only Sales Order voucher with zero inventory lines, regardless of how many
+        real rent items the order actually had (fetch_invoices() doesn't have this gap —
+        its list view already embeds a full 'items' array).
+        """
+        url = f"{self.base_url}/get-rent-items/{rent_id}"
+        r = self.session.get(url, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
+        if r.status_code == 404:
+            return []
+        r.raise_for_status()
+        data = r.json()
+        return data if isinstance(data, list) else data.get("data", [])
+
     def fetch_payments(self) -> List[Dict[str, Any]]:
         return self._request_with_fallback(["payment", "payments"])
 

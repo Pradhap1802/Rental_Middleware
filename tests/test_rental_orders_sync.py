@@ -65,6 +65,64 @@ class TestRentalOrdersForwardSync(unittest.TestCase):
         mock_ext_client.sync_rental_order.assert_called_once()
         self.assertEqual(stats["created"], 1)
 
+    def test_rent_items_are_attached_before_forward_sync(self):
+        """
+        fetch_rental_orders()'s list view only returns a bare 'rent_items_count' integer,
+        no item detail — build_sales_order_voucher_xml's item lookup always found nothing
+        without this, so every forward-synced Sales Order voucher landed in Tally
+        header-only regardless of how many real rent items the order had. Confirmed live
+        against rentout R100016 (id 20). get_rent_items() must be called for any order
+        with a non-zero rent_items_count, and its result mapped into the item shape
+        build_sales_order_voucher_xml actually reads (name/quantity/price/total_price/unit).
+        """
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_rental_orders.return_value = [
+            {"id": 20, "number": "R100016", "status": 1, "amount": 118.0, "customer_name": "Acme", "rent_items_count": 1},
+        ]
+        mock_ra_client.get_rent_items.return_value = [
+            {
+                "id": 28, "asset_id": 8, "asset_name": "Standee Banner",
+                "rented_quantity": 1, "price": 100, "total_price": 100,
+                "asset": {"asset_unit": {"name": "Nos"}},
+            }
+        ]
+        mock_ext_client = MagicMock()
+        mock_ext_client.check_exists_in_tally.return_value = False
+        mock_ext_client.sync_rental_order.return_value = "RENTAL-ORD-20"
+
+        sync_rental_orders(
+            rentasst_client=mock_ra_client,
+            external_client=mock_ext_client,
+            store=self.store,
+        )
+
+        mock_ra_client.get_rent_items.assert_called_once_with(20)
+        pushed_order = mock_ext_client.sync_rental_order.call_args[0][0]
+        self.assertEqual(len(pushed_order["items"]), 1)
+        self.assertEqual(pushed_order["items"][0]["name"], "Standee Banner")
+        self.assertEqual(pushed_order["items"][0]["quantity"], 1)
+        self.assertEqual(pushed_order["items"][0]["price"], 100)
+        self.assertEqual(pushed_order["items"][0]["total_price"], 100)
+        self.assertEqual(pushed_order["items"][0]["unit"], "Nos")
+
+    def test_rent_items_not_fetched_when_order_has_none(self):
+        """No wasted GET when rent_items_count is 0/absent."""
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_rental_orders.return_value = [
+            {"id": 21, "number": "R100017", "status": 1, "amount": 50.0, "customer_name": "Acme", "rent_items_count": 0},
+        ]
+        mock_ext_client = MagicMock()
+        mock_ext_client.check_exists_in_tally.return_value = False
+        mock_ext_client.sync_rental_order.return_value = "RENTAL-ORD-21"
+
+        sync_rental_orders(
+            rentasst_client=mock_ra_client,
+            external_client=mock_ext_client,
+            store=self.store,
+        )
+
+        mock_ra_client.get_rent_items.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
