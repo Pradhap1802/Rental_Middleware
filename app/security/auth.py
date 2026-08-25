@@ -1,3 +1,4 @@
+import hmac
 from fastapi import Header, HTTPException, Request
 
 
@@ -10,7 +11,7 @@ async def require_api_key(request: Request, x_middleware_key: str = Header(defau
     any OTHER caller must supply the X-Middleware-Key header explicitly.
     """
     expected = getattr(request.app.state, "api_key", None)
-    if not expected or x_middleware_key != expected:
+    if not expected or not x_middleware_key or not hmac.compare_digest(x_middleware_key, expected):
         raise HTTPException(
             status_code=401,
             detail="Missing or invalid X-Middleware-Key header. Open the dashboard in a browser, or read the key from .data/api.key.",
