@@ -1,7 +1,8 @@
 import threading
 import time
+import xml.etree.ElementTree as ET
 import requests
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from requests.adapters import HTTPAdapter
 
 from ...models.domain import AppConfig
@@ -27,6 +28,30 @@ from ...logging.logger import log_event
 _TALLY_HTTP_LOCK = threading.Lock()
 _TALLY_MIN_REQUEST_INTERVAL_SECONDS = 0.4
 _last_tally_request_at = 0.0
+
+
+def _xml_has_exact_field_match(xml_text: str, tags: Tuple[str, ...], identifier: str) -> bool:
+    """
+    Exact, case-insensitive match against the text of specific fields — NOT a substring
+    search over the whole response. check_exists() used to do `identifier.lower() in
+    clean.lower()` over the entire raw export, which false-positives on any short or
+    common identifier that happens to appear anywhere else in the response (a
+    description, another item's name, an HSN note, etc.) — confirmed live: a "Piece"
+    unit check returned True (there was no such UNIT master at all) purely because the
+    word appeared elsewhere in the STOCKITEM export, so the STOCKITEM XML never included
+    the UNIT prerequisite and Tally rejected the whole item with "Unit 'Piece' does not
+    exist!". Falls back to the old substring behavior only if the response doesn't even
+    parse as XML, so a check never turns into a hard failure over a malformed response.
+    """
+    needle = identifier.strip().lower()
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return needle in xml_text.lower()
+    for elem in root.iter():
+        if elem.tag in tags and elem.text and elem.text.strip().lower() == needle:
+            return True
+    return False
 
 
 def _tally_post(session: requests.Session, base_url: str, data: bytes, timeout: float) -> requests.Response:
@@ -109,9 +134,11 @@ class TallyClient:
         ent = (entity_type or "").lower().strip()
         tally_type = "LEDGER"
         fetch_fields = "NAME"
+        match_tags: Tuple[str, ...] = ("NAME",)
         if ent in ("equipment", "product", "products"):
             tally_type = "STOCKITEM"
             fetch_fields = "NAME, MAILINGNAME"
+            match_tags = ("NAME", "MAILINGNAME")
         elif ent == "unit":
             tally_type = "UNIT"
             fetch_fields = "NAME"
@@ -129,6 +156,7 @@ class TallyClient:
             # field Tally preserves verbatim) is what carries our matchable marker instead.
             tally_type = "Voucher"
             fetch_fields = "VOUCHERNUMBER, MASTERID, NARRATION"
+            match_tags = ("NARRATION",)
 
         company_name = getattr(self.cfg, "tally_company_name", None)
         xml = build_export_collection_envelope("CheckExistence", tally_type, fetch_fields, company_name=company_name)
@@ -138,7 +166,7 @@ class TallyClient:
             r = _tally_post(self.session, self.base_url, xml.encode("utf-8"), timeout=10)
             if r.status_code == 200:
                 clean = sanitize_tally_xml(r.content)
-                return identifier.lower() in clean.lower()
+                return _xml_has_exact_field_match(clean, match_tags, identifier)
         except Exception:
             pass
         return False

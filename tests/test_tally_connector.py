@@ -119,6 +119,35 @@ class TestTallyConnectorAndValidation(unittest.TestCase):
 
         self.assertIn("Stock Item 'Generator-500' is out of stock", str(ctx.exception))
 
+    def test_check_exists_does_not_false_positive_on_substring(self):
+        """
+        check_exists() used to do a plain substring search over the whole raw export
+        (`identifier.lower() in clean.lower()`) — confirmed live: a "Piece" unit check
+        returned True even though no such UNIT master existed, purely because the word
+        "Piece" appeared elsewhere in the response (e.g. inside another field's text).
+        sync_equipment() then skipped creating the UNIT prerequisite and Tally rejected
+        the whole STOCKITEM with "Unit 'Piece' does not exist!". The check must only
+        match an exact <NAME> field value, not any substring of the response.
+        """
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        mock_session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        # "Piece" appears in a stock item's description — not as an actual UNIT NAME.
+        mock_resp.content = b"""<ENVELOPE>
+  <BODY><DATA><COLLECTION>
+    <UNIT><NAME>Nos</NAME></UNIT>
+    <UNIT><NAME>Box</NAME></UNIT>
+    <STOCKITEM><DESCRIPTION>Sold per Piece</DESCRIPTION></STOCKITEM>
+  </COLLECTION></DATA></BODY>
+</ENVELOPE>"""
+        mock_session.post.return_value = mock_resp
+        client = TallyClient(cfg, session=mock_session)
+
+        self.assertFalse(client.check_exists("unit", "Piece"))
+        self.assertTrue(client.check_exists("unit", "Nos"))
+        self.assertTrue(client.check_exists("unit", "box"))  # case-insensitive exact match
+
     def test_customer_ledger_xml_builder(self):
         cust_data = {
             "id": 10,
