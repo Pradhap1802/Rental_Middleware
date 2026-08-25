@@ -43,10 +43,21 @@ class QueueWorker:
             if self.sync_executor:
                 stats = self.sync_executor(entity_type)
 
-            partial = False
-            if isinstance(stats, dict) and stats.get("failed", 0) > 0 and (stats.get("created", 0) > 0 or stats.get("updated", 0) > 0 or stats.get("skipped", 0) > 0):
-                partial = True
+            failed_count = stats.get("failed", 0) if isinstance(stats, dict) else 0
+            succeeded_any = isinstance(stats, dict) and (stats.get("created", 0) > 0 or stats.get("updated", 0) > 0 or stats.get("skipped", 0) > 0)
 
+            if failed_count > 0 and not succeeded_any:
+                # Every item in the batch failed, even though the executor didn't raise
+                # (it caught each item's error internally). Route through the same
+                # retry/DLQ path as an exception instead of recording this as SUCCESS —
+                # otherwise a fully-down RentAsst/Tally target is invisible at the queue
+                # and dashboard level even though individual dead-letters exist.
+                duration_ms = (time.time() - start_time) * 1000
+                err_msg = f"All {failed_count} item(s) failed during '{entity_type}' sync."
+                self._fail_job(job_id, entity_type, err_msg, attempts, max_attempts, duration_ms)
+                return
+
+            partial = failed_count > 0 and succeeded_any
             self.queue_store.mark_success(job_id, partial=partial)
             duration_ms = (time.time() - start_time) * 1000
             status_text = "PARTIAL_SUCCESS" if partial else "SUCCESS"
@@ -63,29 +74,34 @@ class QueueWorker:
             self.queue_store.mark_waiting_for_dependency(job_id, reason, delay_seconds=60)
         except Exception as e:
             duration_ms = (time.time() - start_time) * 1000
-            err_msg = str(e)
-            retryable = is_retryable_exception(e)
-            next_attempt = attempts + 1
-            delay_seconds = get_backoff_delay_seconds(next_attempt)
-
-            if retryable and delay_seconds is not None and next_attempt < max_attempts:
-                log_event(
-                    "Queue",
-                    f"Job #{job_id} ('{entity_type}') failed with transient error: {err_msg}. Retrying in {delay_seconds}s.",
-                    duration_ms=duration_ms,
-                    metadata={"error": err_msg, "next_attempt": next_attempt},
-                )
-                self.queue_store.mark_retrying(job_id, err_msg, delay_seconds)
-            else:
-                log_event(
-                    "Queue",
-                    f"Job #{job_id} ('{entity_type}') max retries/fatal error: {err_msg}. Moved to DLQ.",
-                    duration_ms=duration_ms,
-                    metadata={"error": err_msg, "attempts": next_attempt},
-                )
-                self.queue_store.mark_dlq(job_id, err_msg)
+            self._fail_job(job_id, entity_type, str(e), attempts, max_attempts, duration_ms, exc=e)
         finally:
             self.current_job_info = "Idle"
+
+    def _fail_job(self, job_id: Any, entity_type: str, err_msg: str, attempts: int, max_attempts: int, duration_ms: float, exc: Optional[Exception] = None) -> None:
+        """Routes a failed job to RETRYING (with backoff) or DLQ, same as an unhandled
+        exception from the sync executor — used both for real exceptions and for an
+        executor that caught every item's error internally and reported 100% failure."""
+        retryable = is_retryable_exception(exc) if exc is not None else True
+        next_attempt = attempts + 1
+        delay_seconds = get_backoff_delay_seconds(next_attempt)
+
+        if retryable and delay_seconds is not None and next_attempt < max_attempts:
+            log_event(
+                "Queue",
+                f"Job #{job_id} ('{entity_type}') failed with transient error: {err_msg}. Retrying in {delay_seconds}s.",
+                duration_ms=duration_ms,
+                metadata={"error": err_msg, "next_attempt": next_attempt},
+            )
+            self.queue_store.mark_retrying(job_id, err_msg, delay_seconds)
+        else:
+            log_event(
+                "Queue",
+                f"Job #{job_id} ('{entity_type}') max retries/fatal error: {err_msg}. Moved to DLQ.",
+                duration_ms=duration_ms,
+                metadata={"error": err_msg, "attempts": next_attempt},
+            )
+            self.queue_store.mark_dlq(job_id, err_msg)
 
     def _worker_loop(self):
         log_event("Queue", "Background Queue Worker thread started.")

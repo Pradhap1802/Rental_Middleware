@@ -120,6 +120,30 @@ class TestQueueJobLifecycle(unittest.TestCase):
         self.assertIsNotNone(j["started_at"])
         self.assertIsNotNone(j["completed_at"])
 
+    def test_total_failure_is_not_recorded_as_success(self):
+        """
+        If every item in the batch failed (executor caught each error internally and
+        never raised), the job must NOT be recorded as SUCCESS just because no exception
+        propagated — otherwise a fully-down RentAsst/Tally target is invisible at the
+        queue/dashboard level. It should go through the same retryable path as a raised
+        exception.
+        """
+        mock_executor = MagicMock()
+        mock_executor.return_value = {"processed": 3, "created": 0, "updated": 0, "failed": 3, "skipped": 0}
+
+        worker = QueueWorker(self.store, sync_executor=mock_executor)
+
+        job_id = self.store.enqueue(entity_type="invoice", entity_id="INV-ALL-FAILED")
+        claimed_job = self.store.claim_next_job()
+
+        worker._process_job(claimed_job)
+
+        j = [j for j in self.store.list_recent_jobs() if j["job_id"] == job_id][0]
+        self.assertIn(j["status"], ("RETRYING", "DLQ"))
+        self.assertNotEqual(j["status"], "SUCCESS")
+        self.assertNotEqual(j["status"], "PARTIAL_SUCCESS")
+        self.assertIn("3 item(s) failed", j["last_error"])
+
 
 if __name__ == "__main__":
     unittest.main()
