@@ -2,9 +2,8 @@ import os
 import shutil
 import tempfile
 import unittest
-from unittest.mock import MagicMock
 
-from app.validation.validator import validate_entity_payload, PayloadValidator
+from app.validation.validator import PayloadValidator
 from app.sync.dependencies import DependencyResolver, MissingDependencyException
 from app.mapping.store import MappingStore
 from app.queue.queue_store import QueueStore

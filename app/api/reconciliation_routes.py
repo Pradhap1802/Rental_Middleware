@@ -4,6 +4,7 @@ from typing import Optional, Dict, Any
 
 from ..mapping.store import MappingStore
 from ..reconciliation.engine import ReconciliationEngine
+from ..connectors.tally_fetcher import TallyFetcher
 
 reconciliation_router = APIRouter(prefix="/api/reconciliation", tags=["reconciliation"])
 
@@ -20,12 +21,13 @@ def get_engine(request: Request) -> ReconciliationEngine:
 def trigger_reconciliation(request: Request):
     """Triggers a read-only reconciliation pass comparing RentAsst and Tally records."""
     engine = get_engine(request)
-    
+
     # Safely fetch active clients if present
     ra_client = getattr(request.app.state, "ra_client", None)
     ext_client = getattr(request.app.state, "ext_client", None)
 
-    ra_cust, t_cust, ra_inv, t_inv, ra_pay, t_pay = [], [], [], [], [], []
+    ra_cust, ra_inv, ra_pay, ra_equip, ra_rental = [], [], [], [], []
+    t_cust, t_inv, t_pay, t_equip, t_rental = [], [], [], [], []
 
     if ra_client and hasattr(ra_client, "fetch_customers"):
         try:
@@ -40,10 +42,30 @@ def trigger_reconciliation(request: Request):
             ra_pay = ra_client.fetch_payments() or []
         except Exception:
             pass
-
-    if ext_client and hasattr(ext_client, "tally"):
         try:
-            t_cust = ext_client.tally.fetch_companies() or []
+            ra_equip = ra_client.fetch_equipment() or []
+        except Exception:
+            pass
+        try:
+            ra_rental = ra_client.fetch_rental_orders() or []
+        except Exception:
+            pass
+
+    # NOTE: previously this fetched ext_client.tally.fetch_companies() here — a list of
+    # Tally COMPANY names, not customer ledgers — so every RentAsst customer was reported
+    # MISSING_IN_TALLY regardless of actual sync state. Tally-side invoices/payments/rental
+    # orders were never fetched at all (always empty), so those comparisons were vacuous
+    # too. TallyFetcher.fetch_ledgers()/fetch_vouchers() are the real, existing sources for
+    # this data (already used by the reverse-sync pipeline).
+    if ext_client and getattr(ext_client, "cfg", None) and ext_client.cfg.external_system_type == "tally":
+        try:
+            fetcher = TallyFetcher(ext_client.cfg)
+            t_cust = fetcher.fetch_ledgers() or []
+            t_equip = fetcher.fetch_stock_items() or []
+            all_vouchers = fetcher.fetch_vouchers() or []
+            t_inv = [v for v in all_vouchers if v.get("voucher_type") in ("Sales", "Credit Note")]
+            t_pay = [v for v in all_vouchers if v.get("voucher_type") == "Receipt"]
+            t_rental = [v for v in all_vouchers if v.get("voucher_type") == "Sales Order"]
         except Exception:
             pass
 
@@ -54,6 +76,10 @@ def trigger_reconciliation(request: Request):
         tally_invoices=t_inv,
         ra_payments=ra_pay,
         tally_payments=t_pay,
+        ra_equipment=ra_equip,
+        tally_equipment=t_equip,
+        ra_rental_orders=ra_rental,
+        tally_rental_orders=t_rental,
     )
     return result
 
@@ -85,7 +111,7 @@ def get_reconciliation_summary(request: Request):
 @reconciliation_router.get("/discrepancies", response_model=Dict[str, Any])
 def list_discrepancies(
     request: Request,
-    entity_type: Optional[str] = Query(None, description="Filter by entity_type (customer, invoice, payment, equipment)"),
+    entity_type: Optional[str] = Query(None, description="Filter by entity_type (customer, invoice, payment, equipment, rental_order)"),
     mismatch_type: Optional[str] = Query(None, description="Filter by mismatch_type (MISSING_IN_TALLY, MISSING_IN_RENTASST, AMOUNT_MISMATCH, DATE_MISMATCH)"),
     run_id: Optional[int] = Query(None, description="Filter by specific reconciliation run ID"),
 ):

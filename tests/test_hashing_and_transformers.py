@@ -1,7 +1,7 @@
 import unittest
 
 from app.sync.base import compute_payload_hash, extract_identifier
-from app.sync.ownership import filter_payload_by_ownership, FIELD_OWNERSHIP_POLICY
+from app.sync.ownership import filter_payload_by_ownership
 
 
 class TestHashingAndTransformers(unittest.TestCase):

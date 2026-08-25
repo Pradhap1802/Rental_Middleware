@@ -166,19 +166,6 @@ class PayloadValidator:
         if amount <= 0:
             return False, f"Payment amount must be greater than zero (amount: {amount})"
 
-        ref = (
-            data.get("invoice_id") or data.get("customer_id") or data.get("paid_by")
-            or data.get("customer_name") or data.get("party_name") or data.get("ledger_name")
-            or data.get("invoice_number") or data.get("rental_order_id") or data.get("order_id")
-            or (data.get("customer") or {}).get("name") or (data.get("customer") or {}).get("id")
-            or (data.get("invoice") or {}).get("number") or (data.get("invoice") or {}).get("id")
-            or data.get("payment_method") or data.get("mode") or data.get("reference")
-            or data.get("notes") or data.get("description")
-        )
-        if not ref:
-            # Fallback to payment ID if explicit reference link is not provided in payload
-            ref = str(pid)
-
         return True, None
 
 

@@ -95,7 +95,6 @@ class TestConcurrencyAndLocks(unittest.TestCase):
         mock_ext_client.check_exists_in_tally.return_value = False
 
         creation_call_count = 0
-        sync_barrier = False
 
         def mock_sync_func(item):
             nonlocal creation_call_count

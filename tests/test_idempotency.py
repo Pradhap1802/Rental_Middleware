@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 from concurrent.futures import ThreadPoolExecutor
 
 from app.mapping.store import MappingStore
-from app.sync.idempotency import generate_integration_key, check_target_system_record_exists
+from app.sync.idempotency import generate_integration_key
 from app.sync.base import run_sync_pipeline
 
 

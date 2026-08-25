@@ -7,11 +7,23 @@ from contextlib import contextmanager
 
 class DatabaseManager:
     """Thread-safe SQLite Database Manager with WAL mode and memory tuning."""
+
+    # MappingStore, LockManager, and QueueStore each construct their own DatabaseManager
+    # against the same state.db path — without this, the full CREATE TABLE/ALTER TABLE
+    # migration block (60+ statements, each swallowing "duplicate column" errors) would
+    # re-run on every one of those instantiations instead of once per process.
+    _initialized_paths: set = set()
+    _init_lock = threading.Lock()
+
     def __init__(self, db_path: str):
         self.db_path = db_path
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._local = threading.local()
-        self._init_db()
+        real_path = os.path.abspath(db_path)
+        with DatabaseManager._init_lock:
+            if real_path not in DatabaseManager._initialized_paths:
+                self._init_db()
+                DatabaseManager._initialized_paths.add(real_path)
 
     def _create_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)

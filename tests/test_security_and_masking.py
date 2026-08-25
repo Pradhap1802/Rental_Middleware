@@ -82,7 +82,7 @@ class TestSecurityAndMasking(unittest.TestCase):
             rentasst_api_key="orig****777",
             sync_interval_minutes=15,
         )
-        saved = self.svc.save_config(update_cfg)
+        self.svc.save_config(update_cfg)
 
         reloaded = self.store.load_safe()
         self.assertEqual(reloaded.rentasst_api_key, "original_secret_token_777")
