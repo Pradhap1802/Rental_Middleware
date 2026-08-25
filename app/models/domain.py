@@ -13,7 +13,13 @@ class AppConfig(BaseModel):
     external_api_key: Optional[str] = Field(default="")
     external_system_type: str = Field(default="tally") # 'tally', 'rest_erp', 'accounting'
     tally_company_name: Optional[str] = Field(default="") # Target Tally Company Name for multi-company setup
-    
+    # Tally "Educational Mode" (the free/unlicensed mode) only accepts vouchers dated the
+    # 1st, 2nd, or last day of a month — rejecting any other date. Default False: real
+    # transaction dates always go through. Only set True against an Educational-mode Tally
+    # install (e.g. a demo/test company), where it forces the day-of-month so imports don't
+    # get rejected outright.
+    tally_edu_mode: bool = Field(default=False)
+
     # General Settings
     sync_interval_minutes: int = Field(default=10)
     auto_sync_enabled: bool = Field(default=False)

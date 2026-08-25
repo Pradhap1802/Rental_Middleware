@@ -34,7 +34,7 @@ def normalize_state_name(state_raw: str) -> str:
     return clean.title() if clean.islower() else clean
 
 
-def format_tally_date(raw_date: Optional[str], edu_mode: bool = True) -> str:
+def format_tally_date(raw_date: Optional[str], edu_mode: bool = False) -> str:
     """Converts dates to Tally YYYYMMDD string format."""
     if not raw_date:
         return datetime.now().strftime("%Y%m01") if edu_mode else datetime.now().strftime("%Y%m%d")

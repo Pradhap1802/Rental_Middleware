@@ -1,10 +1,9 @@
 import unittest
 from unittest.mock import MagicMock
-import requests
 
 from app.models.domain import AppConfig
 from app.connectors.tally.xml_builder import sanitize_tally_xml, escape_xml, format_tally_date
-from app.connectors.tally.parser import validate_tally_accounting_success, extract_tally_errors
+from app.connectors.tally.parser import validate_tally_accounting_success
 from app.connectors.tally.client import TallyClient
 from app.connectors.tally.ledger import build_customer_ledger_xml
 from app.connectors.tally.sales_voucher import build_sales_invoice_voucher_xml
@@ -24,7 +23,19 @@ class TestTallyConnectorAndValidation(unittest.TestCase):
         self.assertEqual(escaped, "Rent &amp; Sales Co &lt;Pvt Ltd&gt;")
 
         dt = format_tally_date("2026-08-15")
-        self.assertEqual(dt, "20260801")  # EDU mode forces 01st
+        self.assertEqual(dt, "20260815")  # real transaction date by default
+
+        dt_edu = format_tally_date("2026-08-15", edu_mode=True)
+        self.assertEqual(dt_edu, "20260801")  # explicit EDU mode still forces 01st
+
+    def test_app_config_defaults_edu_mode_off(self):
+        """
+        tally_edu_mode must default to False: real transaction dates should always reach
+        Tally unless an operator explicitly opts into Educational-mode's 1st/2nd/last-day
+        date restriction for a demo/test company.
+        """
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        self.assertFalse(cfg.tally_edu_mode)
 
     def test_successful_tally_accounting_response(self):
         success_xml = """<ENVELOPE>
@@ -256,7 +267,6 @@ class TestTallyConnectorAndValidation(unittest.TestCase):
         self.assertIn("<AMOUNT>-0.46</AMOUNT>", xml)
 
         import re
-        amounts = [float(m) for m in re.findall(r"<AMOUNT>(-?\d+\.\d+)</AMOUNT>", xml)]
         # STOCKITEMNAME inventory allocation AMOUNT is nested inside the income ledger entry
         # and must not be double-counted — only ALLLEDGERENTRIES.LIST-level amounts balance.
         ledger_amounts = [float(m) for m in re.findall(

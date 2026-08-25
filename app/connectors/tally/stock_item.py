@@ -141,6 +141,7 @@ def build_physical_stock_voucher_xml(
     quantity: float,
     unit: str = "Nos",
     company_name: Optional[str] = None,
+    edu_mode: bool = False,
 ) -> str:
     """
     Builds a Tally "Physical Stock" voucher — the correct mechanism for reconciling a
@@ -156,7 +157,7 @@ def build_physical_stock_voucher_xml(
     count that Tally treats as the new "actual truth" for that date, correctly resetting
     CLOSINGBALANCE going forward regardless of the voucher history that preceded it.
     """
-    date_str = format_tally_date(None)
+    date_str = format_tally_date(None, edu_mode=edu_mode)
     msg = f"""          <VOUCHER VCHTYPE="Physical Stock" ACTION="Create">
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>

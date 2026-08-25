@@ -2,7 +2,7 @@ from typing import Dict, Any, Optional
 from .xml_builder import escape_xml, format_tally_date, build_import_envelope
 
 
-def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", company_name: Optional[str] = None) -> str:
+def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", company_name: Optional[str] = None, edu_mode: bool = False) -> str:
     """
     Builds Tally VOUCHER XML for Rent Outs, using Tally's "Sales Order" voucher type so
     the order shows up in Tally's own Sales Order Book/Order Outstanding reports as soon
@@ -27,7 +27,7 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
         data.get("amount") or data.get("total_amount") or data.get("grand_total")
         or data.get("rent_amount") or data.get("subtotal") or 0
     )
-    date_str = format_tally_date(data.get("rent_date") or data.get("order_date") or data.get("date") or data.get("created_at"))
+    date_str = format_tally_date(data.get("rent_date") or data.get("order_date") or data.get("date") or data.get("created_at"), edu_mode=edu_mode)
 
     prereq_ledgers = f"""          <LEDGER NAME="{escape_xml(cust_name)}" ACTION="Create">
             <NAME>{escape_xml(cust_name)}</NAME>
@@ -94,7 +94,7 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
     return build_import_envelope(msg, report_name="Vouchers", company_name=company_name)
 
 
-def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create", company_state: str = "", company_name: Optional[str] = None) -> str:
+def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create", company_state: str = "", company_name: Optional[str] = None, edu_mode: bool = False) -> str:
     """
     Builds Tally VOUCHER XML for Sales Invoices and Credit Notes.
 
@@ -125,7 +125,7 @@ def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create"
     is_igst = bool(cust_state and comp_state and cust_state != comp_state)
 
     vtype = "Credit Note" if data.get("document_type") == "credit_note" else "Sales"
-    date_str = format_tally_date(data.get("invoice_date") or data.get("date") or data.get("created_at"))
+    date_str = format_tally_date(data.get("invoice_date") or data.get("date") or data.get("created_at"), edu_mode=edu_mode)
 
     prereq_ledgers = f"""          <LEDGER NAME="{escape_xml(cust_name)}" ACTION="Create">
             <NAME>{escape_xml(cust_name)}</NAME>

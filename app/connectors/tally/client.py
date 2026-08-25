@@ -211,8 +211,9 @@ class TallyClient:
             return
         try:
             company_name = getattr(self.cfg, "tally_company_name", None)
+            edu_mode = getattr(self.cfg, "tally_edu_mode", False)
             xml = build_physical_stock_voucher_xml(
-                item_name=item_name, quantity=quantity, unit=unit, company_name=company_name,
+                item_name=item_name, quantity=quantity, unit=unit, company_name=company_name, edu_mode=edu_mode,
             )
             self.send_xml(xml, expect_voucher=True)
         except Exception as e:
@@ -222,7 +223,8 @@ class TallyClient:
         remote_id = f"RENTAL-ORD-{data.get('id')}"
         action = "Alter" if self.check_exists("rental_orders", remote_id) else "Create"
         company_name = getattr(self.cfg, "tally_company_name", None)
-        xml = build_sales_order_voucher_xml(data, action=action, company_name=company_name)
+        edu_mode = getattr(self.cfg, "tally_edu_mode", False)
+        xml = build_sales_order_voucher_xml(data, action=action, company_name=company_name, edu_mode=edu_mode)
         self.send_xml(xml, expect_voucher=True)
         return remote_id
 
@@ -231,7 +233,8 @@ class TallyClient:
         action = "Alter" if self.check_exists("invoices", remote_id) else "Create"
         company_name = getattr(self.cfg, "tally_company_name", None)
         company_state = getattr(self.cfg, "company_state", "") or ""
-        xml = build_sales_invoice_voucher_xml(data, action=action, company_state=company_state, company_name=company_name)
+        edu_mode = getattr(self.cfg, "tally_edu_mode", False)
+        xml = build_sales_invoice_voucher_xml(data, action=action, company_state=company_state, company_name=company_name, edu_mode=edu_mode)
         self.send_xml(xml, expect_voucher=True)
         return remote_id
 
@@ -239,6 +242,7 @@ class TallyClient:
         remote_id = f"RENTAL-PAY-{data.get('id')}"
         action = "Alter" if self.check_exists("payments", remote_id) else "Create"
         company_name = getattr(self.cfg, "tally_company_name", None)
-        xml = build_receipt_voucher_xml(data, action=action, company_name=company_name)
+        edu_mode = getattr(self.cfg, "tally_edu_mode", False)
+        xml = build_receipt_voucher_xml(data, action=action, company_name=company_name, edu_mode=edu_mode)
         self.send_xml(xml, expect_voucher=True)
         return remote_id
