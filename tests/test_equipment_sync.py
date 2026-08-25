@@ -64,6 +64,37 @@ class TestEquipmentStockReconciliation(unittest.TestCase):
 
         mock_ext_client.reconcile_equipment_stock.assert_not_called()
 
+    def test_reconciliation_is_not_repeated_for_the_same_day_and_quantity(self):
+        """
+        build_physical_stock_voucher_xml always sends ACTION="Create" with no REMOTEID,
+        so without a dedup gate Tally accumulates a brand-new "Physical Stock" voucher
+        for every item on every scheduler cycle — confirmed live, a 1-minute cycle
+        produced 135+ duplicate vouchers all recording the same unchanged quantity ("the
+        physical stock voucher is updated in Tally repeatedly"). A second sync on the
+        same day with an unchanged quantity must not push again; a genuine quantity
+        change must still go through.
+        """
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_equipment.return_value = [
+            {"id": 8, "name": "Standee Banner", "available_quantity": 11},
+        ]
+        mock_ext_client = MagicMock()
+        mock_ext_client.check_exists_in_tally.return_value = True
+
+        sync_equipment(rentasst_client=mock_ra_client, external_client=mock_ext_client, store=self.store)
+        sync_equipment(rentasst_client=mock_ra_client, external_client=mock_ext_client, store=self.store)
+
+        mock_ext_client.reconcile_equipment_stock.assert_called_once_with("Standee Banner", 11, unit="Nos")
+
+        # A genuine quantity change (Tally-side drift correction) must still go through.
+        mock_ra_client.fetch_equipment.return_value = [
+            {"id": 8, "name": "Standee Banner", "available_quantity": 7},
+        ]
+        sync_equipment(rentasst_client=mock_ra_client, external_client=mock_ext_client, store=self.store)
+
+        self.assertEqual(mock_ext_client.reconcile_equipment_stock.call_count, 2)
+        mock_ext_client.reconcile_equipment_stock.assert_called_with("Standee Banner", 7, unit="Nos")
+
     def test_reconciliation_uses_asset_unit_name(self):
         mock_ra_client = MagicMock()
         mock_ra_client.fetch_equipment.return_value = [

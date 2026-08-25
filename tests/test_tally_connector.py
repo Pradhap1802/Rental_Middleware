@@ -200,6 +200,41 @@ class TestTallyConnectorAndValidation(unittest.TestCase):
         self.assertNotIn('<VOUCHER VTYPE="Injected"', xml)
         self.assertIn("&lt;/VOUCHERNUMBER&gt;", xml)
 
+    def test_sales_invoice_voucher_files_a_new_ref_bill(self):
+        """
+        Without a "New Ref" bill allocation, Tally books the party entry "On Account" —
+        confirmed live against a real synced invoice, whose exported XML showed
+        <BILLTYPE>On Account</BILLTYPE> with an empty bill <NAME/>. That leaves Tally's
+        own bill-wise outstanding/payment-summary report unable to show which invoices
+        are paid vs outstanding, and gives build_receipt_voucher_xml's "Agst Ref" nothing
+        to reference. The bill name must be the same stable RENTAL-INV-{id} marker used
+        for REMOTEID/NARRATION.
+        """
+        inv_data = {
+            "id": 34,
+            "number": "31",
+            "customer_name": "Felix",
+            "subtotal": 2000,
+            "grand_total": 2360,
+        }
+        xml = build_sales_invoice_voucher_xml(inv_data)
+        self.assertIn("<NAME>RENTAL-INV-34</NAME>", xml)
+        self.assertIn("<BILLTYPE>New Ref</BILLTYPE>", xml)
+        self.assertNotIn("On Account", xml)
+
+    def test_receipt_voucher_files_an_agst_ref_bill_when_invoice_linked(self):
+        """The Agst Ref bill name must match the exact bill the invoice filed as New Ref."""
+        pay_data = {"id": 37, "amount": 2360, "invoice_id": 34, "paid_by": "Felix"}
+        xml = build_receipt_voucher_xml(pay_data)
+        self.assertIn("<NAME>RENTAL-INV-34</NAME>", xml)
+        self.assertIn("<BILLTYPE>Agst Ref</BILLTYPE>", xml)
+
+    def test_receipt_voucher_has_no_bill_allocation_without_invoice_id(self):
+        """An advance/on-account payment with no linked invoice keeps the old plain entry."""
+        pay_data = {"id": 5, "amount": 500, "paid_by": "Felix"}
+        xml = build_receipt_voucher_xml(pay_data)
+        self.assertNotIn("BILLALLOCATIONS.LIST", xml)
+
     def test_send_xml_escapes_company_name_in_static_variables(self):
         """
         send_xml()'s fallback STATICVARIABLES injection must escape the company name like

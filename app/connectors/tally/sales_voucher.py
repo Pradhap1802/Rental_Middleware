@@ -188,11 +188,25 @@ def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create"
             <PARENT>Indirect Expenses</PARENT>
           </LEDGER>\n"""
 
+    # A "New Ref" bill allocation is what makes this invoice a distinct, trackable bill
+    # in Tally's own bill-wise outstanding/payment-summary reports — without it, Tally
+    # silently books the entry "On Account" (confirmed live: every invoice this
+    # middleware pushed showed BILLTYPE=On Account with no bill name at all). REMOTEID's
+    # RENTAL-INV-{id} marker doubles as the bill name since it's already stable and
+    # unique; build_receipt_voucher_xml references this exact same string as its "Agst
+    # Ref" bill name so a Receipt can settle against this specific invoice instead of
+    # just reducing the party's flat running balance.
+    bill_name = f"RENTAL-INV-{data.get('id')}"
     party_entry = f"""            <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>{escape_xml(cust_name)}</LEDGERNAME>
               <ISPARTYLEDGER>YES</ISPARTYLEDGER>
               <ISDEEMEDPOSITIVE>YES</ISDEEMEDPOSITIVE>
               <AMOUNT>-{grand_total:.2f}</AMOUNT>
+              <BILLALLOCATIONS.LIST>
+                <NAME>{escape_xml(bill_name)}</NAME>
+                <BILLTYPE>New Ref</BILLTYPE>
+                <AMOUNT>-{grand_total:.2f}</AMOUNT>
+              </BILLALLOCATIONS.LIST>
             </ALLLEDGERENTRIES.LIST>"""
 
     order_allocation = f"""

@@ -15,6 +15,24 @@ def build_receipt_voucher_xml(data: Dict[str, Any], action: str = "Create", comp
     cash_bank_ledger = "Bank Account" if any(w in pay_label for w in ["bank", "online", "card", "upi", "cheque", "transfer", "neft", "rtgs"]) else "Cash"
     parent_group = "Bank Accounts" if cash_bank_ledger == "Bank Account" else "Cash-in-Hand"
 
+    # "Agst Ref" against the exact same bill name build_sales_invoice_voucher_xml files
+    # this invoice's "New Ref" under (RENTAL-INV-{id}) is what lets this receipt settle
+    # a specific bill in Tally's own outstanding/payment-summary reports, instead of
+    # just reducing the customer's flat running balance "On Account" — confirmed live,
+    # every receipt this middleware pushed showed no bill reference at all, so Tally
+    # could never report which invoice a payment actually settled. Falls back to the
+    # old plain customer entry (no bill allocation) when the payment isn't linked to a
+    # specific invoice — e.g. an advance/on-account payment with no invoice_id yet.
+    invoice_id = data.get("invoice_id")
+    bill_allocation = ""
+    if invoice_id:
+        bill_allocation = f"""
+              <BILLALLOCATIONS.LIST>
+                <NAME>RENTAL-INV-{invoice_id}</NAME>
+                <BILLTYPE>Agst Ref</BILLTYPE>
+                <AMOUNT>{amount:.2f}</AMOUNT>
+              </BILLALLOCATIONS.LIST>"""
+
     msg = f"""          <LEDGER NAME="{escape_xml(cust_name)}" ACTION="Create">
             <NAME>{escape_xml(cust_name)}</NAME>
             <PARENT>Sundry Debtors</PARENT>
@@ -39,7 +57,7 @@ def build_receipt_voucher_xml(data: Dict[str, Any], action: str = "Create", comp
             <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>{escape_xml(cust_name)}</LEDGERNAME>
               <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
-              <AMOUNT>{amount:.2f}</AMOUNT>
+              <AMOUNT>{amount:.2f}</AMOUNT>{bill_allocation}
             </ALLLEDGERENTRIES.LIST>
           </VOUCHER>"""
 
