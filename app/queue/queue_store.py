@@ -126,12 +126,12 @@ class QueueStore:
         with self.db.get_connection() as c:
             c.execute(
                 """
-                UPDATE sync_queue 
+                UPDATE sync_queue
                 SET status='WAITING_FOR_DEPENDENCY', last_error=?, error_message=?, updated_at=?,
-                    next_retry_at=?, next_attempt_at=?
+                    scheduled_at=?, next_retry_at=?, next_attempt_at=?
                 WHERE id=?
                 """,
-                (err_truncated, err_truncated, now_iso, scheduled_iso, scheduled_iso, job_id),
+                (err_truncated, err_truncated, now_iso, scheduled_iso, scheduled_iso, scheduled_iso, job_id),
             )
 
     def mark_success(self, job_id: int, partial: bool = False) -> None:
@@ -162,12 +162,12 @@ class QueueStore:
         with self.db.get_connection() as c:
             c.execute(
                 """
-                UPDATE sync_queue 
-                SET status='RETRYING', attempt_count=attempt_count+1, attempts=attempts+1, 
-                    last_error=?, error_message=?, updated_at=?, next_retry_at=?, next_attempt_at=?
+                UPDATE sync_queue
+                SET status='RETRYING', attempt_count=attempt_count+1, attempts=attempts+1,
+                    last_error=?, error_message=?, updated_at=?, scheduled_at=?, next_retry_at=?, next_attempt_at=?
                 WHERE id=?
                 """,
-                (err_truncated, err_truncated, now_iso, scheduled_iso, scheduled_iso, job_id),
+                (err_truncated, err_truncated, now_iso, scheduled_iso, scheduled_iso, scheduled_iso, job_id),
             )
 
     def mark_retry(self, job_id: int, error_msg: str, delay_seconds: int) -> None:

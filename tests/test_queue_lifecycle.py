@@ -84,6 +84,31 @@ class TestQueueJobLifecycle(unittest.TestCase):
         self.assertEqual(j["last_error"], "Timeout connecting to Tally")
         self.assertIsNotNone(j["next_retry_at"])
 
+    def test_retrying_job_is_not_immediately_reclaimable(self):
+        """
+        mark_retrying()/mark_waiting_for_dependency() only updated next_retry_at/
+        next_attempt_at to the future delay, never the job's original 'scheduled_at' —
+        but claim_next_job()'s eligibility check is `scheduled_at <= now OR
+        next_retry_at <= now OR next_attempt_at <= now`. Since scheduled_at is set once
+        at creation and is always in the past by the time a retry happens, that OR
+        condition was always true regardless of the intended backoff — confirmed live: a
+        job with a 60-second WAITING_FOR_DEPENDENCY delay was reclaimed and re-run every
+        ~7 seconds instead. All three "due" columns must agree so the delay actually
+        holds until it elapses.
+        """
+        job_id = self.store.enqueue(entity_type="payment", entity_id="PAY-10")
+        self.store.claim_next_job()
+        self.store.mark_retrying(job_id, error_msg="Timeout connecting to Tally", delay_seconds=60)
+
+        self.assertIsNone(self.store.claim_next_job())
+
+    def test_waiting_for_dependency_job_is_not_immediately_reclaimable(self):
+        job_id = self.store.enqueue(entity_type="rental_orders", entity_id="21")
+        self.store.claim_next_job()
+        self.store.mark_waiting_for_dependency(job_id, reason="Missing Equipment dependency mapping", delay_seconds=60)
+
+        self.assertIsNone(self.store.claim_next_job())
+
     def test_dlq_transition_and_dead_letter_logging(self):
         job_id = self.store.enqueue(entity_type="invoice", entity_id="INV-999")
         self.store.claim_next_job()

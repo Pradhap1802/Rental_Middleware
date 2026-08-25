@@ -197,8 +197,19 @@ def run_sync_pipeline(
                         source_company_id=source_company_id,
                     )
                     if not has_deps:
+                        # Raising here used to propagate all the way out of run_sync_pipeline,
+                        # aborting the ENTIRE batch on the first item with a missing dependency —
+                        # confirmed live: one rental order referencing an equipment item that
+                        # hadn't synced yet (a routine, self-resolving race — equipment syncs
+                        # concurrently with rental_orders every cycle) meant every OTHER rental
+                        # order in that same fetch was silently skipped too, cycle after cycle,
+                        # not just the one with the real gap. This item's own dependency will
+                        # simply be re-checked on the next full sync cycle since it's never
+                        # marked synced, so skip just this item and keep processing the rest of
+                        # the batch instead of blocking on it.
                         log_event("Dependencies", f"Dependency check failed for {entity_type} #{item_id}: {missing_reason}")
-                        raise MissingDependencyException(missing_reason, missing_entity=missing_ent, missing_id=missing_id)
+                        stats["skipped"] += 1
+                        continue
 
                     # 3. Integration Key & Content Hash Deduplication Check
                     existing_key_mapping = store.find_by_integration_key(integration_key)

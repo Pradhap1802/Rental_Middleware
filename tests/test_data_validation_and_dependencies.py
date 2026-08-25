@@ -171,6 +171,41 @@ class TestDataValidationAndDependencies(unittest.TestCase):
         self.assertEqual(missing_ent, "equipment")
         self.assertEqual(missing_id, "16")
 
+    def test_missing_dependency_skips_only_that_item_not_the_whole_batch(self):
+        """
+        run_sync_pipeline used to re-raise MissingDependencyException straight out of the
+        batch loop, aborting the ENTIRE sync for every remaining item the moment ONE item
+        hit a missing dependency — confirmed live: one rental order referencing an
+        equipment item that hadn't synced yet (equipment and rental_orders sync run
+        concurrently every cycle, so this is a routine, self-resolving race) caused every
+        OTHER rental order in that same fetch to be silently skipped too, cycle after
+        cycle. A missing dependency for one item must only skip that item.
+        """
+        self.store.save_mapping("customer", "1", "Acme", status="synced")
+        # No equipment mapping for asset_id 99 -> order #1 is blocked.
+        # Order #2 has no items at all, so nothing should block it.
+        orders = [
+            {"id": 1, "customer_id": "1", "amount": 100.0, "items": [{"name": "Ghost Item", "asset_id": 99}]},
+            {"id": 2, "customer_id": "1", "amount": 200.0},
+        ]
+        synced_ids = []
+
+        def fake_sync(item):
+            synced_ids.append(item["id"])
+            return f"RENTAL-ORD-{item['id']}"
+
+        stats = run_sync_pipeline(
+            entity_type="rental_order",
+            fetch_func=lambda: orders,
+            sync_func=fake_sync,
+            store=self.store,
+        )
+
+        self.assertEqual(synced_ids, [2])
+        self.assertEqual(stats["created"], 1)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(stats["failed"], 0)
+
     def test_worker_transitions_missing_dependency_to_waiting_state(self):
         """
         When a worker executes a job whose dependency is missing,
