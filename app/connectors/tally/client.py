@@ -83,6 +83,29 @@ class TallyClient:
             self.session.mount("http://", adapter)
             self.session.mount("https://", adapter)
 
+        # A fresh TallyClient/ExternalClient is created for every sync_equipment() batch
+        # call (SyncService.execute_sync), so this cache lives exactly as long as one
+        # equipment-sync cycle — every item in that cycle sharing the same unit/stock
+        # group/stock category (e.g. 9 different assets all using unit "Nos") otherwise
+        # re-checked existence AND re-sent a fresh <UNIT ACTION="Create"> for it on every
+        # single one of those 9 STOCKITEM imports. Confirmed live: Tally's XML server hit
+        # a native "Memory Access Violation" crash after exactly this kind of back-to-back
+        # burst of STOCKITEM imports repeatedly recreating the same prerequisite masters —
+        # already flagged as a known risk in _tally_post's own module docstring. Caching
+        # "confirmed existing" per (entity_type, name) for this client's lifetime removes
+        # that redundant traffic entirely instead of just pacing it.
+        self._exists_cache: Dict[Tuple[str, str], bool] = {}
+
+    def _exists_cache_key(self, entity_type: str, identifier: str) -> Tuple[str, str]:
+        return ((entity_type or "").lower().strip(), (identifier or "").strip().lower())
+
+    def _mark_exists(self, entity_type: str, identifier: str) -> None:
+        """Records a master as now confirmed to exist — called after a STOCKITEM import
+        that included a fresh <UNIT>/<STOCKGROUP>/<STOCKCATEGORY> Create succeeds, so the
+        next equipment item sharing that same master in this batch skips recreating it."""
+        if identifier:
+            self._exists_cache[self._exists_cache_key(entity_type, identifier)] = True
+
     def ping(self) -> bool:
         try:
             with _TALLY_HTTP_LOCK:
@@ -131,6 +154,10 @@ class TallyClient:
         if not identifier:
             return True
 
+        cache_key = self._exists_cache_key(entity_type, identifier)
+        if cache_key in self._exists_cache:
+            return self._exists_cache[cache_key]
+
         ent = (entity_type or "").lower().strip()
         tally_type = "LEDGER"
         fetch_fields = "NAME"
@@ -166,8 +193,12 @@ class TallyClient:
             r = _tally_post(self.session, self.base_url, xml.encode("utf-8"), timeout=10)
             if r.status_code == 200:
                 clean = sanitize_tally_xml(r.content)
-                return _xml_has_exact_field_match(clean, match_tags, identifier)
+                result = _xml_has_exact_field_match(clean, match_tags, identifier)
+                self._exists_cache[cache_key] = result
+                return result
         except Exception:
+            # Not cached — a transient timeout/connection error shouldn't stick as a
+            # false "doesn't exist" for the rest of this batch.
             pass
         return False
 
@@ -216,7 +247,21 @@ class TallyClient:
             category_exists=category_exists,
             company_name=company_name,
         )
-        return self.send_xml(xml)
+        result = self.send_xml(xml)
+
+        # Only cache prerequisites we just successfully created — send_xml() already
+        # raised above if Tally rejected the import, so reaching here means any Create
+        # blocks this XML included genuinely landed. The next equipment item in this
+        # same sync cycle sharing the same unit/group/category then skips re-checking
+        # and re-sending a Create for it entirely.
+        if not unit_exists:
+            self._mark_exists("unit", unit_name)
+        if group and not group_exists:
+            self._mark_exists("stockgroup", group)
+        if category and not category_exists:
+            self._mark_exists("stockcategory", category)
+
+        return result
 
     def reconcile_stock_quantity(self, item_name: str, quantity: Any, unit: str = "Nos") -> None:
         """

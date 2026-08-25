@@ -148,6 +148,64 @@ class TestTallyConnectorAndValidation(unittest.TestCase):
         self.assertTrue(client.check_exists("unit", "Nos"))
         self.assertTrue(client.check_exists("unit", "box"))  # case-insensitive exact match
 
+    def test_check_exists_is_cached_for_the_life_of_the_client(self):
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        mock_session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b"<ENVELOPE><BODY><DATA><COLLECTION><UNIT><NAME>Nos</NAME></UNIT></COLLECTION></DATA></BODY></ENVELOPE>"
+        mock_session.post.return_value = mock_resp
+        client = TallyClient(cfg, session=mock_session)
+
+        self.assertTrue(client.check_exists("unit", "Nos"))
+        self.assertEqual(mock_session.post.call_count, 1)
+
+        # Same identifier, different case — must hit the cache, not Tally again.
+        self.assertTrue(client.check_exists("unit", "nos"))
+        self.assertEqual(mock_session.post.call_count, 1)
+
+    def test_stock_item_prerequisites_are_not_recreated_within_the_same_batch(self):
+        """
+        A fresh TallyClient is created for every equipment-sync cycle, but within that
+        one cycle every asset sharing the same unit ("Nos") independently re-checked
+        existence and re-sent a fresh <UNIT ACTION="Create"> on every single STOCKITEM
+        import — confirmed live: Tally's XML server crashed with a native "Memory Access
+        Violation" after exactly this kind of back-to-back burst of STOCKITEM imports
+        repeatedly recreating the same prerequisite masters. Once the unit is created for
+        the first asset in a batch, a second asset sharing it must skip both the
+        existence re-check and the Create block entirely.
+        """
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        mock_session = MagicMock()
+
+        check_exists_resp = MagicMock()
+        check_exists_resp.status_code = 200
+        check_exists_resp.content = b"<ENVELOPE><BODY><DATA><COLLECTION></COLLECTION></DATA></BODY></ENVELOPE>"
+
+        import_resp = MagicMock()
+        import_resp.status_code = 200
+        import_resp.content = b"<ENVELOPE><HEADER><VERSION>1</VERSION></HEADER><BODY><IMPORTRESULT><CREATED>1</CREATED></IMPORTRESULT></BODY></ENVELOPE>"
+
+        sent_bodies = []
+
+        def fake_post(url, data=None, headers=None, timeout=None):
+            body = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+            sent_bodies.append(body)
+            return check_exists_resp if "<TALLYREQUEST>EXPORT</TALLYREQUEST>" in body else import_resp
+
+        mock_session.post.side_effect = fake_post
+        client = TallyClient(cfg, session=mock_session)
+
+        client.sync_equipment({"id": 1, "name": "Dell Mouse", "asset_unit": {"name": "Nos"}})
+        client.sync_equipment({"id": 2, "name": "Dell Keyboard", "asset_unit": {"name": "Nos"}})
+
+        unit_check_calls = [b for b in sent_bodies if "<TALLYREQUEST>EXPORT</TALLYREQUEST>" in b and "<ID>CheckExistence</ID>" in b and "<TYPE>UNIT</TYPE>" in b]
+        import_calls = [b for b in sent_bodies if "<TALLYREQUEST>Import Data</TALLYREQUEST>" in b]
+
+        self.assertEqual(len(unit_check_calls), 1, "unit existence must only be checked once for the whole batch")
+        self.assertIn('<UNIT NAME="Nos" ACTION="Create">', import_calls[0])
+        self.assertNotIn('<UNIT NAME="Nos" ACTION="Create">', import_calls[1])
+
     def test_customer_ledger_xml_builder(self):
         cust_data = {
             "id": 10,
