@@ -1,8 +1,23 @@
 import time
 import json
 import re
+import hashlib
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
+
+
+def _synthetic_mobile_number(name: str) -> str:
+    """
+    Deterministic placeholder mobile number for a Tally party with no real one, used
+    when auto-creating that party as a RentAsst customer (which requires a mobile field).
+    Must be stable across process restarts for the same name — Python's built-in hash()
+    is NOT (it's salted per-process via PYTHONHASHSEED by default), so a retry after a
+    crash between push_customer() succeeding and the mapping being saved locally could
+    previously generate a different placeholder number for the same party, risking a
+    duplicate RentAsst customer record.
+    """
+    digest = hashlib.md5(name.encode("utf-8")).hexdigest()
+    return f"900{int(digest, 16) % 10000000:07d}"
 
 # REMOTEID prefixes the forward (RentAsst -> Tally) sync stamps onto every voucher it
 # creates (see build_sales_order_voucher_xml / build_sales_invoice_voucher_xml /
@@ -135,7 +150,7 @@ def resolve_customer_id(party_name: str, ra_client: Any, store: MappingStore) ->
                     return cid
 
         # If customer does not exist in RentAsst, auto-create customer in RentAsst
-        clean_mobile = f"900{abs(hash(party_name)) % 10000000:07d}"
+        clean_mobile = _synthetic_mobile_number(party_name)
         new_cust = ra_client.push_customer({
             "name": party_name,
             "company_name": party_name,
@@ -378,7 +393,7 @@ def sync_tally_to_rentasst(
 
             try:
                 clean_phone = re.sub(r"\D", "", str(l.get("phone") or l.get("mobile") or ""))
-                mobile_number = clean_phone if len(clean_phone) >= 10 else f"900{abs(hash(cust_name)) % 10000000:07d}"
+                mobile_number = clean_phone if len(clean_phone) >= 10 else _synthetic_mobile_number(cust_name)
 
                 res = ra_client.push_customer({
                     "name": cust_name,

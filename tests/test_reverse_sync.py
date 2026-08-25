@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import MagicMock
 
 from app.mapping.store import MappingStore
-from app.sync.tally_to_rentasst import sync_tally_to_rentasst, is_tally_voucher_duplicate
+from app.sync.tally_to_rentasst import sync_tally_to_rentasst, is_tally_voucher_duplicate, _synthetic_mobile_number
 from app.sync.idempotency import generate_integration_key
 
 
@@ -20,6 +20,22 @@ class TestReverseSyncHardening(unittest.TestCase):
             self.store.db.close()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_synthetic_mobile_number_is_stable_across_calls(self):
+        """
+        Must be deterministic (not Python's per-process-salted hash()) — a retry after a
+        crash between push_customer() succeeding and the mapping being saved locally must
+        regenerate the exact same placeholder number for the same party name, or the
+        customer could get duplicated in RentAsst.
+        """
+        first = _synthetic_mobile_number("Acme Rentals Pvt Ltd")
+        second = _synthetic_mobile_number("Acme Rentals Pvt Ltd")
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith("900"))
+        self.assertEqual(len(first), 10)
+
+        different = _synthetic_mobile_number("Different Party Name")
+        self.assertNotEqual(first, different)
 
     def test_reverse_deduplication_by_integration_key(self):
         tally_guid = "TALLY-VOUCHER-GUID-999"
