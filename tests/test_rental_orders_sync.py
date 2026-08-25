@@ -90,6 +90,8 @@ class TestRentalOrdersForwardSync(unittest.TestCase):
         mock_ext_client.check_exists_in_tally.return_value = False
         mock_ext_client.sync_rental_order.return_value = "RENTAL-ORD-20"
 
+        self.store.save_mapping("equipment", "8", "TALLY-ID-8", status="synced")
+
         sync_rental_orders(
             rentasst_client=mock_ra_client,
             external_client=mock_ext_client,
@@ -129,6 +131,8 @@ class TestRentalOrdersForwardSync(unittest.TestCase):
         mock_ext_client = MagicMock()
         mock_ext_client.check_exists_in_tally.return_value = False
         mock_ext_client.sync_rental_order.return_value = "RENTAL-ORD-22"
+
+        self.store.save_mapping("equipment", "16", "TALLY-ID-16", status="synced")
 
         sync_rental_orders(
             rentasst_client=mock_ra_client,

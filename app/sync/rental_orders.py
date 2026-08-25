@@ -45,6 +45,7 @@ def _attach_rent_items(rentasst_client: RentAsstClient, orders: List[Dict[str, A
                 # exist"). get_rent_items() already embeds the real asset via its own
                 # nested 'asset' relation, so prefer that before giving up.
                 "name": it.get("asset_name") or (it.get("asset") or {}).get("name"),
+                "asset_id": it.get("asset_id"),
                 "quantity": it.get("rented_quantity"),
                 "price": it.get("price"),
                 "total_price": it.get("total_price"),

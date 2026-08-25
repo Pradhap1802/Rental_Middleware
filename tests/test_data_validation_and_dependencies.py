@@ -118,6 +118,59 @@ class TestDataValidationAndDependencies(unittest.TestCase):
         )
         self.assertTrue(has_deps_now)
 
+    def test_missing_equipment_dependency_for_rental_order(self):
+        """
+        Confirmed live: the scheduler enqueues equipment and rental_orders sync jobs
+        concurrently (SyncScheduler._sync_job), so a rental order can be forward-synced
+        before its rent item's own equipment has finished syncing to Tally, producing a
+        permanent "Stock Item does not exist!" dead-letter for what is really just a
+        timing race. The dependency check must catch this before sync_func runs.
+        """
+        self.store.save_mapping("customer", "14", "Felix", status="synced")
+        order_data = {
+            "id": 22,
+            "customer_id": 14,
+            "items": [{"name": "Dell Mouse", "asset_id": 16, "quantity": 20}],
+        }
+
+        has_deps, reason, missing_ent, missing_id = DependencyResolver.check_dependencies(
+            entity_type="rental_order",
+            data=order_data,
+            store=self.store,
+            source_company_id="default",
+        )
+        self.assertFalse(has_deps)
+        self.assertEqual(missing_ent, "equipment")
+        self.assertEqual(missing_id, "16")
+
+        self.store.save_mapping("equipment", "16", "TALLY-ID-16", status="synced")
+
+        has_deps_now, _, _, _ = DependencyResolver.check_dependencies(
+            entity_type="rental_order",
+            data=order_data,
+            store=self.store,
+            source_company_id="default",
+        )
+        self.assertTrue(has_deps_now)
+
+    def test_missing_equipment_dependency_for_invoice(self):
+        self.store.save_mapping("customer", "14", "Felix", status="synced")
+        invoice_data = {
+            "id": 34,
+            "customer_id": 14,
+            "items": [{"name": "Dell Mouse", "asset_id": 16, "quantity": 20}],
+        }
+
+        has_deps, reason, missing_ent, missing_id = DependencyResolver.check_dependencies(
+            entity_type="invoice",
+            data=invoice_data,
+            store=self.store,
+            source_company_id="default",
+        )
+        self.assertFalse(has_deps)
+        self.assertEqual(missing_ent, "equipment")
+        self.assertEqual(missing_id, "16")
+
     def test_worker_transitions_missing_dependency_to_waiting_state(self):
         """
         When a worker executes a job whose dependency is missing,
