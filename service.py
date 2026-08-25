@@ -49,7 +49,12 @@ if WIN32_AVAILABLE:
                 (self._svc_name_, ""),
             )
             # Localhost only — see the same note in run.py.
-            config = uvicorn.Config(app, host="127.0.0.1", port=8088, log_level="info")
+            # log_config=None: Windows Services run with no attached console, so
+            # sys.stdout is None. Uvicorn's default logging setup calls
+            # sys.stdout.isatty() while configuring its colorized formatter, which
+            # raises and aborts startup entirely (SCM reports a service-specific
+            # error and the process exits before ever binding the port).
+            config = uvicorn.Config(app, host="127.0.0.1", port=8088, log_level="info", log_config=None)
             self.server = uvicorn.Server(config)
 
             thread = threading.Thread(target=self.server.run, daemon=True)
