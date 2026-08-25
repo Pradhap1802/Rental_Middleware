@@ -105,6 +105,40 @@ class TestRentalOrdersForwardSync(unittest.TestCase):
         self.assertEqual(pushed_order["items"][0]["total_price"], 100)
         self.assertEqual(pushed_order["items"][0]["unit"], "Nos")
 
+    def test_rent_item_falls_back_to_nested_asset_name_when_asset_name_is_null(self):
+        """
+        RentAsst doesn't enforce asset_name non-null on a rent item (confirmed live: a
+        rent item created via the API without explicitly setting it comes back with
+        asset_name=None). Without a fallback, build_sales_order_voucher_xml's item name
+        lookup defaults to the literal string "Equipment", which Tally then rejects
+        outright ("Stock Item 'Equipment' does not exist!"). get_rent_items() already
+        embeds the real asset via its own nested 'asset' relation — use that instead of
+        giving up.
+        """
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_rental_orders.return_value = [
+            {"id": 22, "number": "R100018", "status": 1, "amount": 2360.0, "customer_name": "Felix", "rent_items_count": 1},
+        ]
+        mock_ra_client.get_rent_items.return_value = [
+            {
+                "id": 34, "asset_id": 16, "asset_name": None,
+                "rented_quantity": 20, "price": 100, "total_price": 2000,
+                "asset": {"id": 16, "name": "Dell Mouse", "asset_unit": None},
+            }
+        ]
+        mock_ext_client = MagicMock()
+        mock_ext_client.check_exists_in_tally.return_value = False
+        mock_ext_client.sync_rental_order.return_value = "RENTAL-ORD-22"
+
+        sync_rental_orders(
+            rentasst_client=mock_ra_client,
+            external_client=mock_ext_client,
+            store=self.store,
+        )
+
+        pushed_order = mock_ext_client.sync_rental_order.call_args[0][0]
+        self.assertEqual(pushed_order["items"][0]["name"], "Dell Mouse")
+
     def test_rent_items_not_fetched_when_order_has_none(self):
         """No wasted GET when rent_items_count is 0/absent."""
         mock_ra_client = MagicMock()
