@@ -116,7 +116,37 @@ def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create"
     if not subtotal:
         subtotal = grand_total
 
-    tax_amount = round(grand_total - subtotal, 2)
+    # Prefer RentAsst's own CGST/SGST/IGST breakdown — top-level, or summed across line
+    # items — over reverse-deriving a single number from grand_total - subtotal. The
+    # subtraction can't tell CGST/SGST/IGST apart (it only ever produces an even 50/50
+    # split or all-IGST guess), so it's used only when RentAsst genuinely provides no tax
+    # breakdown at all. Any residual mismatch between the real tax figures and
+    # grand_total/subtotal still balances out via the Round Off entry below, same as today.
+    explicit_cgst = float(data.get("cgst_amount") or data.get("cgst") or 0)
+    explicit_sgst = float(data.get("sgst_amount") or data.get("sgst") or 0)
+    explicit_igst = float(data.get("igst_amount") or data.get("igst") or 0)
+    explicit_tax = float(data.get("tax_amount") or data.get("tax") or data.get("gst_amount") or 0)
+
+    if not (explicit_cgst or explicit_sgst or explicit_igst or explicit_tax):
+        items_for_tax = data.get("items") or []
+        if isinstance(items_for_tax, list):
+            for it in items_for_tax:
+                if isinstance(it, dict):
+                    explicit_cgst += float(it.get("cgst_amount") or it.get("cgst") or 0)
+                    explicit_sgst += float(it.get("sgst_amount") or it.get("sgst") or 0)
+                    explicit_igst += float(it.get("igst_amount") or it.get("igst") or 0)
+                    explicit_tax += float(it.get("tax_amount") or it.get("tax") or it.get("gst_amount") or 0)
+            explicit_cgst, explicit_sgst, explicit_igst, explicit_tax = (
+                round(explicit_cgst, 2), round(explicit_sgst, 2), round(explicit_igst, 2), round(explicit_tax, 2)
+            )
+
+    has_explicit_split = bool(explicit_cgst or explicit_sgst or explicit_igst)
+    if has_explicit_split:
+        tax_amount = round(explicit_cgst + explicit_sgst + explicit_igst, 2)
+    elif explicit_tax > 0:
+        tax_amount = explicit_tax
+    else:
+        tax_amount = round(grand_total - subtotal, 2)
     if tax_amount < 0:
         tax_amount = 0.0
 
@@ -206,7 +236,34 @@ def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create"
             </ALLLEDGERENTRIES.LIST>"""
 
     tax_entries = ""
-    if tax_amount > 0:
+    if has_explicit_split:
+        # RentAsst told us the real per-head amounts directly — use them as-is rather
+        # than re-deriving a CGST/SGST/IGST split ourselves.
+        if explicit_cgst > 0:
+            tax_entries += f"""
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>CGST</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+              <AMOUNT>{explicit_cgst:.2f}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>"""
+        if explicit_sgst > 0:
+            tax_entries += f"""
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>SGST</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+              <AMOUNT>{explicit_sgst:.2f}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>"""
+        if explicit_igst > 0:
+            tax_entries += f"""
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>IGST</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+              <AMOUNT>{explicit_igst:.2f}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>"""
+    elif tax_amount > 0:
+        # No real breakdown available from RentAsst — fall back to India's standard GST
+        # rule (an even CGST/SGST split for intra-state, all-IGST for inter-state) applied
+        # to the one tax total we do have.
         if is_igst:
             tax_entries += f"""
             <ALLLEDGERENTRIES.LIST>

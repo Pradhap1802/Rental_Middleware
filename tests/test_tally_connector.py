@@ -133,6 +133,30 @@ class TestTallyConnectorAndValidation(unittest.TestCase):
         self.assertIn("<PARTYGSTIN>27AAACA1234A1Z5</PARTYGSTIN>", xml)
         self.assertIn("<STATENAME>Maharashtra</STATENAME>", xml)
 
+    def test_sales_invoice_voucher_uses_rentasst_tax_breakdown_when_provided(self):
+        """
+        When RentAsst supplies real cgst_amount/sgst_amount (not just grand_total and
+        subtotal), the voucher must use those authoritative figures directly instead of
+        re-deriving a plain 50/50 split from grand_total - subtotal — an 18% GST rate
+        applied unevenly (or a discount that changes the effective rate) would otherwise
+        get silently flattened into an even split that doesn't match reality.
+        """
+        inv_data = {
+            "id": 777,
+            "number": "INV-2026-777",
+            "customer_name": "Test Client",
+            "subtotal": 1000,
+            "grand_total": 1180,
+            "cgst_amount": 100,
+            "sgst_amount": 80,
+            "items": [{"name": "Generator 500kVA", "quantity": 1, "price": 1000, "unit": "Nos"}],
+        }
+        xml = build_sales_invoice_voucher_xml(inv_data)
+        self.assertIn("<LEDGERNAME>CGST</LEDGERNAME>", xml)
+        self.assertIn("<AMOUNT>100.00</AMOUNT>", xml)
+        self.assertIn("<LEDGERNAME>SGST</LEDGERNAME>", xml)
+        self.assertIn("<AMOUNT>80.00</AMOUNT>", xml)
+
     def test_sales_invoice_voucher_xml_builder(self):
         inv_data = {
             "id": 501,
