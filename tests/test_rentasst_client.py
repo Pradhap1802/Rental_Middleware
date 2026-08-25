@@ -111,5 +111,55 @@ class TestPushRentoutItems(unittest.TestCase):
         self.assertEqual(posted_body[0]["rent_id"], 42)
 
 
+class TestFetchPaymentsEnrichment(unittest.TestCase):
+    """
+    fetch_payments()'s list endpoint has no 'payment_date' field at all (only
+    'created_at') and no 'paid_by'/customer name — confirmed live against a real
+    invoice-linked payment. build_receipt_voucher_xml then falls back to today's date
+    and a generic "Cash Customer" ledger instead of the real customer.
+    """
+
+    def setUp(self):
+        self.cfg = AppConfig(rentasst_url="http://localhost:8000/api", rentasst_api_key="test-key")
+        self.client = RentAsstClient(self.cfg)
+
+    def test_enriches_payment_date_and_customer_name_via_invoice(self):
+        list_response = MagicMock()
+        list_response.status_code = 200
+        list_response.raise_for_status.return_value = None
+        list_response.json.return_value = [
+            {"id": 37, "invoice_id": 34, "rent_id": None, "amount": 2360, "paid_by": None}
+        ]
+
+        detail_response = MagicMock()
+        detail_response.status_code = 200
+        detail_response.raise_for_status.return_value = None
+        detail_response.json.return_value = {
+            "id": 37, "invoice_id": 34, "rent_id": None, "amount": 2360,
+            "paid_by": None, "payment_date": "25.08.2026 10:57", "rent": None,
+        }
+
+        invoice_response = MagicMock()
+        invoice_response.status_code = 200
+        invoice_response.raise_for_status.return_value = None
+        invoice_response.json.return_value = {"id": 34, "customer": {"id": 14, "name": "Felix"}}
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/payment") or url.endswith("/payments"):
+                return list_response
+            if url.endswith("/payment/37"):
+                return detail_response
+            if "invoice" in url and url.endswith("/34"):
+                return invoice_response
+            raise AssertionError(f"unexpected URL: {url}")
+
+        self.client.session.get = MagicMock(side_effect=fake_get)
+
+        result = self.client.fetch_payments()
+
+        self.assertEqual(result[0]["payment_date"], "25.08.2026 10:57")
+        self.assertEqual(result[0]["paid_by"], "Felix")
+
+
 if __name__ == "__main__":
     unittest.main()

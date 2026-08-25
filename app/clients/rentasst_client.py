@@ -498,7 +498,39 @@ class RentAsstClient:
         return data if isinstance(data, list) else data.get("data", [])
 
     def fetch_payments(self) -> List[Dict[str, Any]]:
-        return self._request_with_fallback(["payment", "payments"])
+        payments = self._request_with_fallback(["payment", "payments"])
+        if isinstance(payments, list):
+            enriched = []
+            for pay in payments:
+                # Confirmed live: the list endpoint has no 'payment_date' field at all (only
+                # 'created_at', which is close but not the same thing) and no 'paid_by'/
+                # customer name — the Receipt voucher this builds then falls back to a
+                # generic "Cash Customer" ledger instead of the real customer. The detail
+                # endpoint (GET /payment/{id}) has payment_date but 'paid_by' is still null
+                # there for an invoice-linked payment (only 'rent'-linked payments get a
+                # denormalized customer name) — resolve it via the linked invoice instead.
+                if isinstance(pay, dict) and pay.get("id") and (not pay.get("payment_date") or not pay.get("paid_by")):
+                    try:
+                        detail = self._request_with_fallback([f"payment/{pay['id']}"])
+                        if isinstance(detail, dict) and "id" in detail:
+                            for k, v in detail.items():
+                                if v is not None or k not in pay:
+                                    pay[k] = v
+                    except Exception:
+                        pass
+
+                if isinstance(pay, dict) and not pay.get("paid_by") and not (pay.get("rent") or {}).get("customer_name") and pay.get("invoice_id"):
+                    try:
+                        invoice = self.get_invoice(str(pay["invoice_id"]))
+                        invoice = invoice.get("data", invoice) if isinstance(invoice, dict) else invoice
+                        cust_name = (invoice or {}).get("customer", {}).get("name") if isinstance(invoice, dict) else None
+                        if cust_name:
+                            pay["paid_by"] = cust_name
+                    except Exception:
+                        pass
+                enriched.append(pay)
+            return enriched
+        return payments
 
     def fetch_businesses(self) -> List[Dict[str, Any]]:
         """
