@@ -2,6 +2,27 @@ from typing import Dict, Any, Optional
 from .xml_builder import escape_xml, build_import_envelope, format_tally_date
 
 
+def build_unit_xml(name: str, symbol: str = "", action: str = "Create", company_name: Optional[str] = None) -> str:
+    """
+    Builds a standalone Tally UNIT master XML — used to pre-create every unit RentAsst
+    uses as its own isolated request BEFORE any STOCKITEM sync begins, instead of
+    bundling a fresh <UNIT ACTION="Create"> inline into whichever STOCKITEM import
+    happens to need it first. Confirmed live: back-to-back STOCKITEM imports each
+    carrying their own master-creation payload is the same pattern that preceded a
+    native Tally "Memory Access Violation" crash — separating master creation from
+    transactional/item creation into its own pass keeps each individual request small
+    and simple, and lets it be paced independently of the (larger, more complex)
+    STOCKITEM imports that follow.
+    """
+    clean_name = (name or "").strip()
+    symbol_tag = f"\n            <SYMBOL>{escape_xml(symbol)}</SYMBOL>" if symbol else ""
+    msg = f"""          <UNIT NAME="{escape_xml(clean_name)}" ACTION="{action}">
+            <NAME>{escape_xml(clean_name)}</NAME>{symbol_tag}
+            <ISSIMPLEUNIT>YES</ISSIMPLEUNIT>
+          </UNIT>"""
+    return build_import_envelope(msg, report_name="All Masters", company_name=company_name)
+
+
 def build_stock_item_xml(
     data: Dict[str, Any],
     action: str = "Create",

@@ -403,6 +403,17 @@ class RentAsstClient:
             return enriched
         return customers
 
+    def fetch_units(self) -> List[Dict[str, Any]]:
+        """
+        Fetches RentAsst's own Unit master list (name/symbol/id) — the same
+        'units-dropdown'/'units' endpoint resolve_unit_id() already uses to resolve a
+        unit by name. Used to pre-create every unit as its own isolated Tally master
+        BEFORE any stock item references one, instead of creating units piecemeal,
+        bundled inline into whichever STOCKITEM import happens to need one first.
+        """
+        units = self._request_with_fallback(["units-dropdown", "units"])
+        return units if isinstance(units, list) else []
+
     def fetch_equipment(self) -> List[Dict[str, Any]]:
         assets = self._request_with_fallback(["asset", "equipment"])
         if isinstance(assets, list):

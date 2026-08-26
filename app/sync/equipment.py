@@ -18,6 +18,44 @@ def _unit_name(item: Dict[str, Any]) -> str:
     return str(name).split("(")[0].strip() if name else "Nos"
 
 
+def _presync_units(rentasst_client: RentAsstClient, external_client: ExternalClient) -> None:
+    """
+    Pre-creates every unit RentAsst has as its own isolated Tally UNIT master BEFORE any
+    stock item sync runs, instead of creating units piecemeal — bundled inline into
+    whichever STOCKITEM import happens to need one first, interleaved with the item's
+    own GST/pricing/group data. Confirmed live: a burst of back-to-back STOCKITEM
+    imports (several of which also carried a brand-new master-creation payload) preceded
+    a native Tally "Memory Access Violation" crash. Only meaningful for a Tally target;
+    a no-op for a REST external system. Failures here are logged and swallowed per unit
+    — a RentAsst unit RentAsst itself never uses on an asset shouldn't block the sync,
+    and sync_equipment()'s own per-item check_exists remains the safety net for any unit
+    this pass didn't know about (e.g. a free-text unit name not in RentAsst's own Unit
+    master list).
+    """
+    if getattr(external_client.cfg, "external_system_type", "tally") != "tally":
+        return
+    try:
+        units = rentasst_client.fetch_units()
+    except Exception as e:
+        logger.warning(f"Skipping unit pre-sync — failed to fetch RentAsst units: {e}")
+        return
+
+    created = 0
+    for u in units:
+        name = str(u.get("name") or "").strip()
+        symbol = str(u.get("symbol") or "").strip()
+        if not name:
+            continue
+        try:
+            if external_client.tally.sync_unit(name, symbol=symbol):
+                created += 1
+        except Exception as e:
+            logger.warning(f"Failed to pre-create Tally unit '{name}': {e}")
+
+    if created:
+        logger.info(f"Unit pre-sync: created {created} new Tally unit master(s) before stock item sync.")
+
+
 def _reconcile_all_stock(rentasst_client: RentAsstClient, external_client: ExternalClient, store: MappingStore) -> None:
     """
     Reconciles every equipment item's Tally quantity every single cycle, independent of
@@ -76,6 +114,7 @@ def sync_equipment(
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
 ) -> Dict[str, Any]:
+    _presync_units(rentasst_client, external_client)
     stats = run_sync_pipeline(
         entity_type="equipment",
         fetch_func=lambda: filter_by_date_range(rentasst_client.fetch_equipment(), from_date, to_date),

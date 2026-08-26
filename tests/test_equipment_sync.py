@@ -95,6 +95,64 @@ class TestEquipmentStockReconciliation(unittest.TestCase):
         self.assertEqual(mock_ext_client.reconcile_equipment_stock.call_count, 2)
         mock_ext_client.reconcile_equipment_stock.assert_called_with("Standee Banner", 7, unit="Nos")
 
+    def test_units_are_precreated_in_tally_before_any_stock_item_is_synced(self):
+        """
+        Units used to be created piecemeal, bundled inline into whichever STOCKITEM
+        import happened to need one first — confirmed live, a burst of back-to-back
+        STOCKITEM imports (several also carrying a fresh master-creation payload)
+        preceded a native Tally "Memory Access Violation" crash. Every RentAsst unit
+        must now be pre-created as its own isolated Tally master before the first
+        equipment item is pushed at all.
+        """
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_units.return_value = [
+            {"id": 1, "name": "Nos", "symbol": "Nos"},
+            {"id": 2, "name": "Kg", "symbol": "Kg"},
+        ]
+        mock_ra_client.fetch_equipment.return_value = [
+            {"id": 8, "name": "Standee Banner", "available_quantity": 11},
+        ]
+
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg.external_system_type = "tally"
+        mock_ext_client.check_exists_in_tally.return_value = False
+        call_order = []
+        mock_ext_client.tally.sync_unit.side_effect = lambda name, symbol="": call_order.append(("unit", name)) or True
+        mock_ext_client.sync_equipment.side_effect = lambda data: call_order.append(("equipment", data.get("id"))) or "TALLY-ID-1"
+
+        sync_equipment(rentasst_client=mock_ra_client, external_client=mock_ext_client, store=self.store)
+
+        self.assertEqual(mock_ext_client.tally.sync_unit.call_count, 2)
+        mock_ext_client.tally.sync_unit.assert_any_call("Nos", symbol="Nos")
+        mock_ext_client.tally.sync_unit.assert_any_call("Kg", symbol="Kg")
+        self.assertEqual(call_order, [("unit", "Nos"), ("unit", "Kg"), ("equipment", 8)])
+
+    def test_unit_presync_is_skipped_for_non_tally_targets(self):
+        mock_ra_client = MagicMock()
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg.external_system_type = "rest"
+
+        sync_equipment(rentasst_client=mock_ra_client, external_client=mock_ext_client, store=self.store)
+
+        mock_ra_client.fetch_units.assert_not_called()
+        mock_ext_client.tally.sync_unit.assert_not_called()
+
+    def test_unit_presync_failure_does_not_block_equipment_sync(self):
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_units.side_effect = Exception("RentAsst unreachable")
+        mock_ra_client.fetch_equipment.return_value = [
+            {"id": 8, "name": "Standee Banner", "available_quantity": 11},
+        ]
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg.external_system_type = "tally"
+        mock_ext_client.check_exists_in_tally.return_value = False
+        mock_ext_client.sync_equipment.return_value = "TALLY-ID-8"
+
+        stats = sync_equipment(rentasst_client=mock_ra_client, external_client=mock_ext_client, store=self.store)
+
+        self.assertEqual(stats["created"], 1)
+        mock_ext_client.sync_equipment.assert_called_once()
+
     def test_reconciliation_uses_asset_unit_name(self):
         mock_ra_client = MagicMock()
         mock_ra_client.fetch_equipment.return_value = [

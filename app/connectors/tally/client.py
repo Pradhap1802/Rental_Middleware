@@ -10,7 +10,7 @@ from .xml_builder import sanitize_tally_xml, build_export_collection_envelope, e
 from .parser import validate_tally_accounting_success
 from .company import build_fetch_companies_xml, parse_fetch_companies_response
 from .ledger import build_customer_ledger_xml
-from .stock_item import build_stock_item_xml, build_physical_stock_voucher_xml
+from .stock_item import build_stock_item_xml, build_physical_stock_voucher_xml, build_unit_xml
 from .sales_voucher import build_sales_order_voucher_xml, build_sales_invoice_voucher_xml
 from .receipt_voucher import build_receipt_voucher_xml
 from ...logging.logger import log_event
@@ -259,6 +259,26 @@ class TallyClient:
             # false "doesn't exist" for the rest of this batch.
             pass
         return False
+
+    def sync_unit(self, name: str, symbol: str = "") -> bool:
+        """
+        Pre-creates a single Tally UNIT master in its own isolated request, decoupled
+        from any STOCKITEM import. Returns True if a Create was actually sent, False if
+        the unit was already known to exist (cached or freshly confirmed) — callers use
+        this to log/count how many units genuinely needed creating. A no-op for a blank
+        name (RentAsst assets without an explicit unit fall back to "Nos" at the
+        STOCKITEM layer, not here).
+        """
+        clean_name = (name or "").strip()
+        if not clean_name:
+            return False
+        if self.check_exists("unit", clean_name):
+            return False
+        company_name = getattr(self.cfg, "tally_company_name", None)
+        xml = build_unit_xml(clean_name, symbol=symbol, action="Create", company_name=company_name)
+        self.send_xml(xml, expect_voucher=False)
+        self._mark_exists("unit", clean_name)
+        return True
 
     def sync_customer(self, data: Dict[str, Any]) -> str:
         name = (data.get("name") or data.get("business_name") or f"Customer-{data.get('id')}").strip()
