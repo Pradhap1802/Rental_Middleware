@@ -114,7 +114,7 @@ class TallyFetcher:
             <TDLMESSAGE>
                <COLLECTION NAME="LedgersCollection" ISMODIFY="No">
                   <TYPE>Ledger</TYPE>
-                  <FETCH>MASTERID, ALTERID, GUID, NAME, PARENT, MAILINGNAME, LEDGERPHONE, LEDGERMOBILE, EMAIL, PARTYGSTIN, LEDGERCONTACT, ADDRESS.LIST, PINCODE, COUNTRYNAME, LEDSTATENAME</FETCH>
+                  <FETCH>MASTERID, ALTERID, GUID, NAME, PARENT, MAILINGNAME, LEDGERPHONE, LEDGERMOBILE, EMAIL, PARTYGSTIN, LEDGERCONTACT, ADDRESS.LIST, PINCODE, COUNTRYNAME, LEDSTATENAME, LEDGSTREGDETAILS.LIST</FETCH>
                </COLLECTION>
             </TDLMESSAGE>
          </TDL>
@@ -143,7 +143,17 @@ class TallyFetcher:
                 phone = (l_node.findtext("LEDGERPHONE") or "").strip()
                 mobile = (l_node.findtext("LEDGERMOBILE") or "").strip()
                 email = (l_node.findtext("EMAIL") or "").strip()
+                # PARTYGSTIN is Tally's flat legacy GSTIN field — confirmed live it stays
+                # EMPTY for a ledger whose GST was entered through Tally Prime's detailed
+                # "Set/Alter GST Details" flow (multi-registration), which instead writes
+                # into LEDGSTREGDETAILS.LIST/GSTIN. A ledger can carry multiple
+                # LEDGSTREGDETAILS.LIST entries over time (one per APPLICABLEFROM change),
+                # so the LAST one is Tally's own current/most-recent registration.
                 gstin = (l_node.findtext("PARTYGSTIN") or "").strip()
+                if not gstin:
+                    gst_reg_entries = l_node.findall("LEDGSTREGDETAILS.LIST")
+                    if gst_reg_entries:
+                        gstin = (gst_reg_entries[-1].findtext("GSTIN") or "").strip()
                 address_lines = [
                     (a.text or "").strip()
                     for a in l_node.findall("ADDRESS.LIST/ADDRESS")

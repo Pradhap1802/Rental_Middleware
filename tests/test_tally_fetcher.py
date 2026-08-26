@@ -100,5 +100,86 @@ class TestTallyFetcherInventoryParsing(unittest.TestCase):
         self.assertEqual(items[0]["amount"], "50.00")
 
 
+class TestTallyFetcherLedgerGstParsing(unittest.TestCase):
+    """
+    fetch_ledgers() previously only read PARTYGSTIN — Tally's flat legacy GSTIN field.
+    Confirmed live: a ledger whose GST was entered through Tally Prime's detailed
+    "Set/Alter GST Details" flow (multi-registration) leaves PARTYGSTIN completely
+    empty and writes the real value into LEDGSTREGDETAILS.LIST/GSTIN instead — reverse
+    sync silently pushed a blank GST number to RentAsst for every such customer.
+    """
+
+    def test_falls_back_to_ledgstregdetails_gstin_when_partygstin_is_empty(self):
+        xml = """<ENVELOPE>
+  <LEDGER NAME="Test-1">
+    <NAME>Test-1</NAME>
+    <PARENT>Sundry Debtors</PARENT>
+    <PARTYGSTIN></PARTYGSTIN>
+    <LEDGSTREGDETAILS.LIST>
+      <APPLICABLEFROM>20260401</APPLICABLEFROM>
+      <GSTREGISTRATIONTYPE>Regular</GSTREGISTRATIONTYPE>
+      <PLACEOFSUPPLY>Tamil Nadu</PLACEOFSUPPLY>
+      <GSTIN>33FJPPP77998K</GSTIN>
+    </LEDGSTREGDETAILS.LIST>
+  </LEDGER>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            ledgers = fetcher.fetch_ledgers(last_alter_id=0)
+
+        self.assertEqual(len(ledgers), 1)
+        self.assertEqual(ledgers[0]["gstin"], "33FJPPP77998K")
+
+    def test_partygstin_is_preferred_when_present(self):
+        xml = """<ENVELOPE>
+  <LEDGER NAME="Test">
+    <NAME>Test</NAME>
+    <PARENT>Sundry Debtors</PARENT>
+    <PARTYGSTIN>33FDJPP7799K</PARTYGSTIN>
+    <LEDGSTREGDETAILS.LIST>
+      <GSTIN>SHOULD-NOT-BE-USED</GSTIN>
+    </LEDGSTREGDETAILS.LIST>
+  </LEDGER>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            ledgers = fetcher.fetch_ledgers(last_alter_id=0)
+
+        self.assertEqual(ledgers[0]["gstin"], "33FDJPP7799K")
+
+    def test_last_ledgstregdetails_entry_wins_when_gst_changed_over_time(self):
+        """A ledger can carry multiple LEDGSTREGDETAILS.LIST entries (one per
+        APPLICABLEFROM change) — the LAST one is Tally's current registration."""
+        xml = """<ENVELOPE>
+  <LEDGER NAME="Test-1">
+    <NAME>Test-1</NAME>
+    <PARENT>Sundry Debtors</PARENT>
+    <PARTYGSTIN></PARTYGSTIN>
+    <LEDGSTREGDETAILS.LIST>
+      <APPLICABLEFROM>20240401</APPLICABLEFROM>
+      <GSTIN>OLD-GSTIN</GSTIN>
+    </LEDGSTREGDETAILS.LIST>
+    <LEDGSTREGDETAILS.LIST>
+      <APPLICABLEFROM>20260401</APPLICABLEFROM>
+      <GSTIN>NEW-GSTIN</GSTIN>
+    </LEDGSTREGDETAILS.LIST>
+  </LEDGER>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            ledgers = fetcher.fetch_ledgers(last_alter_id=0)
+
+        self.assertEqual(ledgers[0]["gstin"], "NEW-GSTIN")
+
+
 if __name__ == "__main__":
     unittest.main()
