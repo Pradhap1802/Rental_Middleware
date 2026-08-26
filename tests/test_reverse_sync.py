@@ -1122,42 +1122,72 @@ class TestEquipmentReverseSync(unittest.TestCase):
         self.assertEqual(payload["day_based_rent_price"], "150.00")
         self.assertEqual(stats["created"], 1)
 
-    def test_never_pushes_updates_onto_a_forward_owned_asset_with_matching_name(self):
+    def test_updates_gst_hsn_and_rent_price_on_a_forward_owned_asset_without_touching_quantity(self):
         """
-        The critical safety boundary: an asset found only via a live name match (no
-        reverse-sync mapping) must never get update_equipment called on it, regardless of
-        how different its Tally-side HSN/GST/quantity looks. Also must NOT persist any
-        mapping row for this case — confirmed live this was a second, worse bug: a
-        mapping saved here as source_system="tally" is the exact shape
-        run_sync_pipeline's forward-sync guard (app/sync/base.py) reads as "this record
-        originated in Tally, never forward-sync it again", which silently blackholed ALL
-        future forward-sync GST/price/quantity updates for a real RentAsst-native asset
-        ('Dell Laptop') the moment reverse sync ever looked at it once.
+        A RentAsst-native asset (found only via a live name match, never through a
+        mapping this loop created) must still receive Tally-side GST/HSN/rent-price/
+        description edits — confirmed live this is exactly the "existing record changed,
+        must sync, not skip" case for an asset RentAsst itself created ('Dell Laptop').
+        But it must NEVER be re-created (push_equipment), and must NEVER have its
+        quantity/skip_inventory/category/unit forced from Tally data — those are
+        preserved from the asset's own current RentAsst state (fetched via
+        get_equipment), because forcing skip_inventory on an asset with real rental
+        history 500s with RentAsst's own "Asset has inventory history..." business rule
+        (confirmed live), and quantity for a RentAsst-native asset is owned by the
+        existing RentAsst -> Tally reconciliation, not this direction.
+
+        Also must NOT persist any row under entity_type="equipment" — confirmed live
+        this was a second, worse bug: a mapping saved there as source_system="tally" is
+        the exact shape run_sync_pipeline's forward-sync guard (app/sync/base.py) reads
+        as "this record originated in Tally, never forward-sync it again", which
+        silently blackholed ALL future forward-sync updates for a RentAsst-native asset
+        the moment reverse sync ever looked at it once. The per-item dedup hash instead
+        lives under a separate synthetic entity_type.
         """
         mock_ra_client = MagicMock()
         mock_ra_client.fetch_equipment.return_value = [{"id": 1, "name": "Dell Laptop"}]
+        mock_ra_client.get_equipment.return_value = {
+            "skip_inventory": False, "available_quantity": 10,
+            "branch": [{"branch_id": 1, "quantity": 10}],
+            "unit_id": 11, "category_id": 1, "category_ids": [1],
+            "enabled_for_rent": True, "calculation_methods": "[1]",
+        }
 
         stock_item = {
             "name": "Dell Laptop", "parent": "Laptop", "unit": "pc",
-            "hsn_code": "256341", "gst_rate": 18.0, "quantity": 10.0, "alter_id": 233,
+            "hsn_code": "256341", "gst_rate": 12.0, "quantity": 10.0,
+            "rent_price": 175.0, "alter_id": 233,
         }
 
         stats = self._run_sync(mock_ra_client, stock_item)
 
         mock_ra_client.push_equipment.assert_not_called()
-        mock_ra_client.update_equipment.assert_not_called()
-        self.assertEqual(stats["skipped"], 1)
-        self.assertIsNone(self.store.find_mapping("equipment", "Dell Laptop"))
+        mock_ra_client.update_equipment.assert_called_once()
+        call_args = mock_ra_client.update_equipment.call_args
+        self.assertEqual(call_args[0][0], "1")
+        payload = call_args[0][1]
+        self.assertEqual(payload["gst_rate"], 12.0)
+        self.assertEqual(payload["hsn_code"], "256341")
+        self.assertEqual(payload["rent_price"], "175.00")
+        self.assertEqual(payload["day_based_rent_price"], "175.00")
+        # Preserved from the asset's own current state, never forced/recomputed.
+        self.assertEqual(payload["skip_inventory"], False)
+        self.assertEqual(payload["available_quantity"], 10)
+        self.assertEqual(payload["branch"], [{"branch_id": 1, "quantity": 10}])
+        self.assertEqual(stats["updated"], 1)
 
-        # Second run must ALSO never touch it — re-scanning by name every cycle (since
-        # nothing is cached) must keep resolving to "forward-owned, skip".
+        self.assertIsNone(self.store.find_mapping("equipment", "Dell Laptop"))
+        watch = self.store.find_mapping("equipment_reverse_watch", "Dell Laptop")
+        self.assertIsNotNone(watch)
+        self.assertEqual(watch["target_id"], "1")
+
+        # Second run with nothing changed must skip, not re-update every cycle.
         mock_ra_client.reset_mock()
         mock_ra_client.fetch_equipment.return_value = [{"id": 1, "name": "Dell Laptop"}]
         stats2 = self._run_sync(mock_ra_client, stock_item)
         mock_ra_client.update_equipment.assert_not_called()
         mock_ra_client.push_equipment.assert_not_called()
         self.assertEqual(stats2["skipped"], 1)
-        self.assertIsNone(self.store.find_mapping("equipment", "Dell Laptop"))
 
     def test_updates_a_reverse_owned_asset_when_hsn_gst_quantity_or_rent_price_changes(self):
         self.store.save_mapping(

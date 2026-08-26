@@ -162,6 +162,14 @@ def _customer_contact_hash(mobile: str, email: str, gst_number: str, address: Op
 FORWARD_REMOTE_ID_PATTERN = re.compile(r"^RENTAL-(ORD|INV|PAY)-(\d+)$")
 FORWARD_ENTITY_BY_PREFIX = {"ORD": "rental_order", "INV": "invoice", "PAY": "payment"}
 
+# Synthetic entity_type used purely as a dedup ledger (via the mapping store's existing
+# find_mapping/save_mapping helpers) for GST/HSN/rent-price/description drift on a
+# RentAsst-native equipment item — never a real synced entity, and deliberately NEVER
+# entity_type="equipment", which run_sync_pipeline's forward-sync guard (app/sync/base.py)
+# reads to mean "this record originated in Tally." Mirrors the "stock_reconciliation"
+# synthetic entity_type equipment.py already uses for the same reason.
+EQUIPMENT_REVERSE_WATCH_ENTITY = "equipment_reverse_watch"
+
 # RentAsst's Rent.settings column is cast to a PHP object, and several of its own
 # services (confirmed live: RentItemsService::updateRentDeposit()) read
 # $rent->settings->refund_type / ->global_deposit with no null-safe fallback — a rentout
@@ -652,6 +660,12 @@ def sync_tally_to_rentasst(
             # that already exists there from before this mapping tracking existed).
             existing_mapping = store.find_mapping("equipment", item_name)
             ra_id = (existing_mapping or {}).get("target_id") or (existing_mapping or {}).get("external_id")
+            # True when ra_id was resolved only by a live name-match against RentAsst's
+            # own asset list, never via a mapping this reverse sync created itself — i.e.
+            # a RentAsst-native (forward-sync-owned) asset that happens to share this
+            # Tally item's name, as opposed to one this loop's own create/update path
+            # actually produced.
+            forward_owned = False
 
             if not ra_id:
                 try:
@@ -664,33 +678,11 @@ def sync_tally_to_rentasst(
                 except Exception:
                     pass
                 if ra_id:
-                    # Found only via a live name-match against RentAsst's own asset list,
-                    # not via a mapping this reverse sync ever created itself — this is a
-                    # RentAsst-native (forward-sync-owned) asset that happens to share this
-                    # Tally item's name. Confirmed live: pushing Tally-derived HSN/GST/
-                    # quantity/skip_inventory onto a forward-owned asset with real rental
-                    # history fails with RentAsst's own business rule ("Asset has inventory
-                    # history. Archive stock first before disabling inventory tracking.").
-                    #
-                    # Deliberately NOT persisting a mapping here (unlike every other
-                    # "found, remember it" branch in this file) — confirmed live this is
-                    # not just a missed optimization: a mapping row here, keyed
-                    # source_system="tally" targeting this RentAsst id, is EXACTLY the
-                    # shape run_sync_pipeline's forward-sync guard (app/sync/base.py) reads
-                    # to mean "this record originated in Tally, never push it forward again"
-                    # — writing one for a RentAsst-native asset silently blackholed ALL
-                    # future forward-sync updates (GST rate, rental price, anything) for
-                    # it, because the guard can't distinguish "Tally created this" from
-                    # "reverse sync is just remembering not to touch this." Re-scanning
-                    # RentAsst's equipment list by name every cycle for this one item is
-                    # the safe (if slightly less efficient) alternative — no cross-
-                    # direction ownership signal gets corrupted.
-                    stats["skipped"] += 1
-                    continue
+                    forward_owned = True
 
             # A mapped RentAsst id can go stale (record deleted / DB reset on the
             # RentAsst side) — same reused-id collision confirmed live for customers. Runs
-            # regardless of ownership: if a forward-owned asset was deleted from RentAsst,
+            # regardless of ownership: if either kind of asset was deleted from RentAsst,
             # Tally's copy should still be free to create a fresh one.
             if ra_id and not ra_client.check_exists_in_rentasst("equipment", ra_id):
                 log_event(
@@ -698,21 +690,11 @@ def sync_tally_to_rentasst(
                     f"RentAsst asset {ra_id} (mapped to Tally item '{item_name}') no longer "
                     "exists — dropping stale mapping and re-creating.",
                 )
-                store.delete("equipment", item_name)
+                if not forward_owned:
+                    store.delete("equipment", item_name)
                 existing_mapping = None
                 ra_id = None
-
-            # last_synced_hash is set ONLY by this loop's own create/update writes (never
-            # by the RentAsst-native skip branch above) — its presence is the ownership
-            # marker distinguishing "reverse sync created/owns this asset" from "this
-            # happens to be a RentAsst-native asset with a matching name".
-            is_reverse_owned = bool(existing_mapping) and existing_mapping.get("last_synced_hash") is not None
-
-            if ra_id and not is_reverse_owned:
-                # A RentAsst-native asset cached by an earlier cycle's name-match branch
-                # above — never push Tally-side changes onto it.
-                stats["skipped"] += 1
-                continue
+                forward_owned = False
 
             category_id = ra_client.resolve_category_id(parent_category) if parent_category else None
             unit_id = ra_client.resolve_unit_id(unit_name) if unit_name else None
@@ -725,6 +707,74 @@ def sync_tally_to_rentasst(
             # 'Dell Laptop', whose own branch record uses branch_id 1 — matches Tally's own
             # single-godown company setup too).
             branch_payload = [{"branch_id": 1, "quantity": qty_int}]
+
+            if ra_id and forward_owned:
+                # A RentAsst-native asset — GST/HSN/rent-price/description edits made in
+                # Tally must still reach it (confirmed live this is exactly the "existing
+                # record changed, must sync, not skip" case for an asset RentAsst itself
+                # created), but this loop must never touch quantity/skip_inventory/
+                # category/unit for it: quantity here is governed by the existing
+                # RentAsst -> Tally stock reconciliation, not this direction, and forcing
+                # skip_inventory (the old behavior) 500s with "Asset has inventory
+                # history. Archive stock first before disabling inventory tracking." the
+                # moment the asset has any real rental history — confirmed live.
+                #
+                # The per-item hash is tracked under a SEPARATE synthetic entity_type
+                # (never "equipment") — confirmed live that writing a source_system="tally"
+                # row under entity_type="equipment" here is exactly the shape
+                # run_sync_pipeline's forward-sync guard (app/sync/base.py) reads as "this
+                # record originated in Tally, never forward-sync it again", which silently
+                # blackholed ALL future forward-sync updates for this same asset.
+                watch_mapping = store.find_mapping(EQUIPMENT_REVERSE_WATCH_ENTITY, item_name)
+                stored_hash = (watch_mapping or {}).get("last_synced_hash")
+                if stored_hash == current_hash:
+                    stats["skipped"] += 1
+                    continue
+                stats["processed"] += 1
+                try:
+                    current_detail = ra_client.get_equipment(ra_id) or {}
+                    preserved_branch = [
+                        {"branch_id": b.get("branch_id"), "quantity": b.get("quantity")}
+                        for b in (current_detail.get("branch") or [])
+                        if b.get("branch_id") is not None
+                    ] or [{"branch_id": 1, "quantity": current_detail.get("available_quantity") or 0}]
+                    update_payload = {
+                        "name": item_name,
+                        "calculation_method": current_detail.get("calculation_methods") or "[1]",
+                        "hsn_code": hsn_code,
+                        "gst_rate": gst_rate if gst_rate > 0 else None,
+                        "description": description,
+                        "rent_price": f"{rent_price:.2f}",
+                        "day_based_rent_price": f"{rent_price:.2f}",
+                        "skip_inventory": current_detail.get("skip_inventory", False),
+                        "available_quantity": current_detail.get("available_quantity") or 0,
+                        "branch": preserved_branch,
+                        "enabled_for_rent": current_detail.get("enabled_for_rent", True),
+                        "unit_id": current_detail.get("unit_id"),
+                        "category_id": current_detail.get("category_id"),
+                        "category_ids": (
+                            json.dumps(current_detail.get("category_ids"))
+                            if current_detail.get("category_ids") else None
+                        ),
+                    }
+                    ra_client.update_equipment(ra_id, update_payload)
+                    store.save_mapping(
+                        entity_type=EQUIPMENT_REVERSE_WATCH_ENTITY,
+                        source_id=item_name,
+                        target_id=ra_id,
+                        source_system="tally",
+                        target_system="rentasst",
+                        last_synced_hash=current_hash,
+                    )
+                    store.add_history(
+                        "equipment", ra_id, "synced", external_id=item_name,
+                        details="Tally Stock Item Reverse Sync (updated GST/HSN/rent price on a RentAsst-native asset)",
+                    )
+                    stats["updated"] += 1
+                except Exception as e:
+                    stats["failed"] += 1
+                    log_event("ReverseSync", f"Failed to update Tally stock item '{item_name}' in RentAsst: {e}")
+                continue
 
             if ra_id:
                 stored_hash = (existing_mapping or {}).get("last_synced_hash") or (existing_mapping or {}).get("last_hash")

@@ -666,6 +666,19 @@ class RentAsstClient:
         """Push an equipment/asset record from Tally to RentAsst Cloud API."""
         return self._post_with_fallback(["asset", "equipment", "assets"], equipment_data)
 
+    def get_equipment(self, asset_id: str) -> Dict[str, Any]:
+        """
+        Fetches a single RentAsst asset's full detail — used before updating a
+        RentAsst-native asset from Tally-side data (GST/HSN/rent price/description) to
+        preserve fields reverse sync must never blindly recompute or force, most
+        importantly skip_inventory. Confirmed live: PUT /asset/{id} with
+        skip_inventory=True on an asset that's currently skip_inventory=False and has real
+        rental history 500s with "Asset has inventory history. Archive stock first before
+        disabling inventory tracking." — the asset's own CURRENT skip_inventory value must
+        be read back and sent unchanged, never forced either way.
+        """
+        return self._request_with_fallback([f"asset/{asset_id}"])
+
     def update_equipment(self, asset_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Update an existing asset/equipment in RentAsst with Tally attributes."""
         url = f"{self.base_url}/asset/{asset_id}"
