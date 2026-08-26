@@ -1197,6 +1197,7 @@ class TestEquipmentReverseSync(unittest.TestCase):
         )
         mock_ra_client = MagicMock()
         mock_ra_client.check_exists_in_rentasst.return_value = True
+        mock_ra_client.get_equipment.return_value = {"skip_inventory": True}
 
         stock_item = {
             "name": "Diag Reverse Asset", "parent": "", "unit": "pc",
@@ -1218,7 +1219,43 @@ class TestEquipmentReverseSync(unittest.TestCase):
         self.assertEqual(payload["branch"], [{"branch_id": 1, "quantity": 7}])
         self.assertEqual(payload["rent_price"], "200.00")
         self.assertEqual(payload["day_based_rent_price"], "200.00")
+        self.assertEqual(payload["skip_inventory"], True)
         self.assertGreaterEqual(stats["updated"], 1)
+
+    def test_never_forces_skip_inventory_even_via_a_stale_equipment_mapping_row(self):
+        """
+        Confirmed live: a stale entity_type="equipment" mapping row for a RentAsst-native
+        asset with real rental history ('Dell Laptop') — left over from an earlier,
+        already-fixed version of this code — routes it through THIS ("genuinely reverse-
+        owned") branch instead of the forward-owned one, because ra_id resolves via
+        find_mapping instead of the cloud name-match. The old hardcoded
+        skip_inventory=True then 500s with "Asset has inventory history. Archive stock
+        first before disabling inventory tracking." the moment such a row exists, for any
+        reason. This branch must read the asset's own CURRENT skip_inventory back and
+        send it unchanged, never force it, regardless of how ra_id was resolved.
+        """
+        self.store.save_mapping(
+            entity_type="equipment", source_id="Dell Laptop", target_id="1",
+            source_system="tally", target_system="rentasst",
+            last_synced_hash="stale-hash",
+        )
+        mock_ra_client = MagicMock()
+        mock_ra_client.check_exists_in_rentasst.return_value = True
+        mock_ra_client.get_equipment.return_value = {"skip_inventory": False}
+        mock_ra_client.resolve_category_id.return_value = 1
+        mock_ra_client.resolve_unit_id.return_value = 11
+
+        stock_item = {
+            "name": "Dell Laptop", "parent": "Laptop", "unit": "pc",
+            "hsn_code": "256341", "gst_rate": 18.0, "quantity": 10.0,
+            "rent_price": 199.0, "alter_id": 250,
+        }
+
+        self._run_sync(mock_ra_client, stock_item)
+
+        mock_ra_client.update_equipment.assert_called_once()
+        payload = mock_ra_client.update_equipment.call_args[0][1]
+        self.assertEqual(payload["skip_inventory"], False)
 
     def test_skips_reverse_owned_asset_when_nothing_changed(self):
         unchanged_hash = _equipment_change_hash("998877", 0.0, 7.0, "", "pc")

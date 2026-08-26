@@ -783,6 +783,22 @@ def sync_tally_to_rentasst(
                     continue
                 stats["processed"] += 1
                 try:
+                    # Never hardcode skip_inventory here — confirmed live this is not
+                    # just a "genuinely reverse-owned" asset in principle, a stale/
+                    # mislabeled entity_type="equipment" mapping row (e.g. from an older
+                    # version of this code, or any other cause) can route a RentAsst-
+                    # native asset with real rental history through this exact branch,
+                    # and forcing True on one that's currently False 500s with "Asset has
+                    # inventory history. Archive stock first before disabling inventory
+                    # tracking." Reading the asset's own current value back is always
+                    # safe: a genuinely Tally-created asset already has it True from its
+                    # own push_equipment call below, so this is a no-op for that case.
+                    current_skip_inventory = True
+                    try:
+                        current_detail = ra_client.get_equipment(ra_id) or {}
+                        current_skip_inventory = current_detail.get("skip_inventory", True)
+                    except Exception:
+                        pass
                     update_payload = {
                         "name": item_name,
                         "calculation_method": "[1]",
@@ -791,7 +807,7 @@ def sync_tally_to_rentasst(
                         "unit_id": unit_id,
                         "category_id": category_id,
                         "category_ids": json.dumps([category_id]) if category_id else None,
-                        "skip_inventory": True,
+                        "skip_inventory": current_skip_inventory,
                         "enabled_for_rent": True,
                         "description": description,
                         "available_quantity": qty_int,
