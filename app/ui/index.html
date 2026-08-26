@@ -321,7 +321,7 @@
       <h2>Manual Entity Synchronization</h2>
       <div class="sync-range-row">
         <div class="form-group">
-          <label for="sync_from_date">From Date (optional — defaults to each entity's last synced date)</label>
+          <label for="sync_from_date">From Date (optional — leave blank to sync the full backlog)</label>
           <input type="date" id="sync_from_date">
         </div>
         <div class="form-group">
@@ -519,7 +519,7 @@
     }
 
     // Maps each manual-sync button to its entity_sync_status key and stores the raw
-    // last-synced timestamp so triggerSync() can default "From Date" to it.
+    // last-synced timestamp shown in the "Last synced" label under each button.
     const lastSyncedMap = {};
     const entityStatusKey = {
       customers: 'customers', equipment: 'equipment', rental_orders: 'rental_orders',
@@ -702,14 +702,22 @@
     async function triggerSync(entity) {
       const label = entityLabels[entity] || entity;
 
-      // Default "From Date" to this entity's own last-synced date if the user hasn't
-      // typed one in — lets a click "just continue" the previous sync's coverage.
+      // From Date is left blank unless the user explicitly types one — it must NOT
+      // default to this entity's last-synced date. mark_synced() stamps last_sync to
+      // "now" on every scheduler cycle regardless of whether anything actually
+      // changed, so with the scheduler running continuously that default was
+      // effectively always "today" — silently filtering out any never-yet-synced
+      // record whose RentAsst created_at/updated_at predates today (confirmed live: a
+      // manual sync with no visible date input still resolved from_date=today and
+      // reported "processed: 0-1" for entities with a real multi-record backlog).
+      // Records already synced and unchanged are correctly skipped by the pipeline's
+      // own mapping/hash idempotency check regardless of this field, so there's no
+      // need for a client-side date default to avoid reprocessing everything.
       const fromInput = document.getElementById('sync_from_date').value;
       const toInput = document.getElementById('sync_to_date').value;
-      const fromDate = fromInput || (lastSyncedMap[entity] ? lastSyncedMap[entity].split(' ')[0].split('T')[0] : '');
 
       const params = new URLSearchParams();
-      if (fromDate) params.set('from_date', fromDate);
+      if (fromInput) params.set('from_date', fromInput);
       if (toInput) params.set('to_date', toInput);
       const qs = params.toString() ? `?${params.toString()}` : '';
 
