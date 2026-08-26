@@ -150,8 +150,34 @@ def run_sync_pipeline(
                     entity_type, item_id, target_system="rentasst", target_company_id=target_company_id
                 )
                 if reverse_mapping and reverse_mapping.get("source_system") == "tally":
-                    stats["skipped"] += 1
-                    continue
+                    # This guard exists to stop a record Tally originally created (reverse
+                    # sync) from being pushed right back into Tally as a duplicate — it's
+                    # keyed purely on RentAsst's numeric id matching. Confirmed live: after
+                    # RentAsst's own DB was reset, numeric ids got reused for genuinely new,
+                    # RentAsst-native records (e.g. equipment id 1 used to be a
+                    # reverse-synced Tally item, then became a brand-new "Dell Laptop"
+                    # created directly in RentAsst) — the stale mapping still matched on id
+                    # alone and permanently blocked the new record from ever forward-syncing.
+                    # Verify the mapping's own Tally-side source record still exists before
+                    # trusting it; if it doesn't, this is a stale/reused-id collision, not a
+                    # real reverse-synced record, so drop it and fall through to sync normally.
+                    reverse_source_name = reverse_mapping.get("source_id") or reverse_mapping.get("rentasst_id")
+                    source_still_in_tally = True
+                    if external_client and hasattr(external_client, "check_exists_in_tally") and reverse_source_name:
+                        try:
+                            source_still_in_tally = external_client.check_exists_in_tally(entity_type, reverse_source_name)
+                        except Exception:
+                            source_still_in_tally = True  # fail open — never risk a duplicate push on a transient error
+                    if source_still_in_tally:
+                        stats["skipped"] += 1
+                        continue
+                    log_event(
+                        "Idempotency",
+                        f"Reverse-sync mapping for {entity_type} id '{item_id}' points at Tally record "
+                        f"'{reverse_source_name}', which no longer exists there — this id was reused for a "
+                        "new RentAsst-native record. Dropping the stale mapping and forward-syncing normally.",
+                    )
+                    store.delete(entity_type, reverse_source_name)
 
                 payload_hash = compute_payload_hash(item)
                 identifier = extract_identifier(entity_type, item)

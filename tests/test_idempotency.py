@@ -262,6 +262,56 @@ class TestIdempotencyMechanism(unittest.TestCase):
         self.assertEqual(stats["skipped"], 1)
         self.assertEqual(stats["failed"], 0)
 
+    def test_forward_sync_recovers_when_reverse_mapping_id_was_reused_after_a_reset(self):
+        """
+        The reverse-owned-record guard above is keyed purely on RentAsst's numeric id
+        matching a stale mapping's target_id — confirmed live: after RentAsst's own DB was
+        reset, id 1 (previously a reverse-synced Tally item, 'Moto G45', long since deleted
+        from Tally) got reused for a brand-new, RentAsst-native equipment item ('Dell
+        Laptop'). The old guard treated that id collision as "this came from Tally, never
+        forward-sync it" and permanently blocked the new item — 'Assets sync' stayed stuck
+        at skipped=1 forever. The guard must verify the stale mapping's own Tally-side
+        record still exists before trusting it, and forward-sync normally once it doesn't.
+        """
+        self.store.save_mapping(
+            entity_type="equipment",
+            source_id="Moto G45",
+            target_id="1",
+            source_system="tally",
+            target_system="rentasst",
+            status="synced",
+        )
+
+        mock_ext_client = MagicMock()
+        mock_ext_client.ping.return_value = True
+        # The stale mapping's own source ('Moto G45') is gone from Tally — this is the
+        # reused-id collision, not a genuine reverse-synced record.
+        mock_ext_client.check_exists_in_tally.return_value = False
+
+        sync_call_count = 0
+
+        def mock_sync_func(item):
+            nonlocal sync_call_count
+            sync_call_count += 1
+            return "TALLY-ID-NEW"
+
+        items = [{"id": "1", "name": "Dell Laptop"}]
+
+        stats = run_sync_pipeline(
+            entity_type="equipment",
+            fetch_func=lambda: items,
+            sync_func=mock_sync_func,
+            store=self.store,
+            external_client=mock_ext_client,
+        )
+
+        self.assertEqual(sync_call_count, 1)
+        self.assertEqual(stats["created"], 1)
+        self.assertEqual(stats["skipped"], 0)
+
+        # The stale mapping must be gone, not just bypassed once.
+        self.assertIsNone(self.store.find_mapping("equipment", "Moto G45", source_system="tally"))
+
     def test_forward_sync_still_pushes_a_rentasst_native_record(self):
         """The mirror case: a record with no reverse-sync mapping (genuinely created in
         RentAsst, never touched by reverse sync) must still forward-sync normally."""
