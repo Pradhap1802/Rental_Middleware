@@ -95,6 +95,30 @@ class TestEquipmentStockReconciliation(unittest.TestCase):
         self.assertEqual(mock_ext_client.reconcile_equipment_stock.call_count, 2)
         mock_ext_client.reconcile_equipment_stock.assert_called_with("Standee Banner", 7, unit="Nos")
 
+    def test_reconciliation_skips_an_item_whose_tally_stock_item_no_longer_exists(self):
+        """
+        A Physical Stock voucher against a STOCKITEM master Tally doesn't actually have
+        always fails with "Stock Item '<name>' does not exist!" — confirmed live,
+        repeating on every single sync cycle with no progress, because reconciliation
+        never checked whether its own prerequisite still existed before trying to use
+        it. This can happen when the item is deleted in Tally directly, lost to an
+        earlier crash, or the company data is reset, while the local mapping table
+        still says "synced". Reconciliation must skip (not attempt, not dead-letter)
+        in that case and simply retry on the next cycle, once the equipment sync's own
+        existing idempotency check has recreated the missing master.
+        """
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_equipment.return_value = [
+            {"id": 1, "name": "Dell Laptop", "available_quantity": 10},
+        ]
+        mock_ext_client = MagicMock()
+        mock_ext_client.check_exists_in_tally.return_value = False
+        mock_ext_client.sync_equipment.return_value = "TALLY-ID-1"
+
+        sync_equipment(rentasst_client=mock_ra_client, external_client=mock_ext_client, store=self.store)
+
+        mock_ext_client.reconcile_equipment_stock.assert_not_called()
+
     def test_units_are_precreated_in_tally_before_any_stock_item_is_synced(self):
         """
         Units used to be created piecemeal, bundled inline into whichever STOCKITEM

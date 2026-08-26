@@ -28,6 +28,16 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
 
     Invoice sync (build_sales_invoice_voucher_xml) references this order's VOUCHERNUMBER
     via ORDERALLOCATIONS.LIST so Tally can track fulfillment from order to invoice.
+
+    Each item line also carries its own ORDERALLOCATIONS.LIST/ORDERNO, self-referencing
+    this SAME order's own number — without it, Tally accepted the ALLINVENTORYENTRIES.LIST
+    shape fix above but still rejected every item-bearing order, surfaced in Tally's own
+    Import Exceptions log as "Order No. is missing in Item Allocations" (confirmed live,
+    reported directly from the Tally UI, not just the generic "Bad Order Number in
+    Voucher!" business-error text the XML response itself gives back). This is a
+    DIFFERENT use of ORDERNO than the invoice side: on the order voucher itself, ORDERNO
+    identifies which order each allocation line belongs to (itself); on an invoice line,
+    it identifies which order that line fulfills.
     """
     num = (
         data.get("number") or data.get("rent_code") or data.get("rent_number")
@@ -79,6 +89,9 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
               <AMOUNT>{item_total:.2f}</AMOUNT>
               <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
               <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
+              <ORDERALLOCATIONS.LIST>
+                <ORDERNO>{escape_xml(num)}</ORDERNO>
+              </ORDERALLOCATIONS.LIST>
             </ALLINVENTORYENTRIES.LIST>"""
 
     sales_entry = f"""

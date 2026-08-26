@@ -95,6 +95,25 @@ def _reconcile_all_stock(rentasst_client: RentAsstClient, external_client: Exter
         if store.is_duplicate("stock_reconciliation", name, current_hash):
             continue
         try:
+            # A Physical Stock voucher against a STOCKITEM master Tally doesn't actually
+            # have always fails with "Stock Item '<name>' does not exist!" — confirmed
+            # live, repeating on every single sync cycle with no progress, because this
+            # function (unlike the equipment master push above it in run_sync_pipeline)
+            # never checked whether its own prerequisite still exists before trying to
+            # reconcile against it. The local mapping table can say "synced" for an item
+            # Tally itself no longer has — deleted there, lost to an earlier crash, or
+            # the company data was reset — and nothing here would ever notice or recover.
+            # Skipping (not marking "synced") here means it's simply re-checked next
+            # cycle: once the equipment sync above recreates the missing STOCKITEM
+            # master (its own existing idempotency check already self-heals for that),
+            # reconciliation resumes on its own without any special handling needed here.
+            if not external_client.check_exists_in_tally("equipment", name):
+                logger.warning(
+                    f"Skipping stock reconciliation for '{name}' — its Tally stock item "
+                    "doesn't exist there right now. Will retry once the equipment sync "
+                    "recreates it."
+                )
+                continue
             external_client.reconcile_equipment_stock(name, qty, unit=_unit_name(item))
             store.save_mapping(
                 entity_type="stock_reconciliation",
