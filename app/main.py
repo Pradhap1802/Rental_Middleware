@@ -1,6 +1,9 @@
 import os
 import sys
 from contextlib import asynccontextmanager
+
+if sys.platform == "win32":
+    import msvcrt
 from fastapi import FastAPI, Depends
 from fastapi.responses import JSONResponse
 
@@ -33,10 +36,51 @@ scheduler = SyncScheduler(DATA_DIR)
 worker = QueueWorker(DATA_DIR, sync_executor=sync_service.execute_sync, max_workers=4)
 mapping_store = MappingStore(DB_PATH)
 
+INSTANCE_LOCK_PATH = os.path.join(DATA_DIR, "middleware.lock")
+
+
+def _acquire_single_instance_lock(path: str):
+    """
+    Refuses to start a second live middleware process against the same Tally company.
+
+    The Tally client's pacing/serialization lock (_TALLY_HTTP_LOCK in
+    connectors/tally/client.py) is an in-process threading.Lock — it only
+    serializes requests made by ONE Python process. Two middleware processes
+    running at once (confirmed live during development: two separate `python
+    run.py` instances left running simultaneously) each hold their own
+    independent copy of that lock, so it does nothing to stop both processes
+    from sending Tally genuinely concurrent, unserialized XML imports — the
+    exact scenario this codebase already documents as capable of corrupting
+    Tally's current-company context or crashing its process outright with a
+    native memory access violation. On win32 only (this app is Windows-only:
+    Tally Prime, the Windows Service packaging, NSSM).
+
+    Held for the entire process lifetime via the returned file handle — the OS
+    releases the lock automatically on any exit, including a crash or a hard
+    kill, so a dead prior instance never blocks a fresh one from starting.
+    """
+    if sys.platform != "win32":
+        return None
+    fh = open(path, "a+")
+    try:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        fh.close()
+        raise RuntimeError(
+            f"Another RentalMiddleware process already holds the lock at '{path}'. "
+            "Refusing to start a second instance against the same Tally company — "
+            "running two at once lets them send concurrent, unserialized requests "
+            "to Tally, which is known to corrupt or crash it. Stop the other "
+            "instance first."
+        )
+    return fh
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Application startup
+    app.state.instance_lock = _acquire_single_instance_lock(INSTANCE_LOCK_PATH)
     app.state.data_dir = DATA_DIR
     app.state.scheduler = scheduler
     app.state.worker = worker
@@ -66,6 +110,12 @@ async def lifespan(app: FastAPI):
         client = getattr(app.state, attr, None)
         if client:
             client.close()
+    lock_handle = getattr(app.state, "instance_lock", None)
+    if lock_handle:
+        try:
+            lock_handle.close()
+        except Exception:
+            pass
 
 
 app = FastAPI(

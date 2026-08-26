@@ -61,7 +61,21 @@ def _tally_post(session: requests.Session, base_url: str, data: bytes, timeout: 
         if wait > 0:
             time.sleep(wait)
         try:
-            return session.post(base_url, data=data, headers={"Content-Type": "text/xml"}, timeout=timeout)
+            # Connection: close forces a fresh TCP connection per request instead of
+            # requests' default keep-alive pooling — confirmed live: dozens of
+            # connections from long-dead middleware processes (killed abruptly during
+            # development, never sending a clean close) were still sitting in
+            # CLOSE_WAIT on Tally's listening socket hours later. Tally's embedded HTTP
+            # gateway is not a robust, battle-tested server; not giving it long-lived
+            # connections to leak in the first place is worth the small per-request
+            # handshake cost, especially given the 0.4s pacing below already dominates
+            # per-request latency.
+            return session.post(
+                base_url,
+                data=data,
+                headers={"Content-Type": "text/xml", "Connection": "close"},
+                timeout=timeout,
+            )
         finally:
             _last_tally_request_at = time.monotonic()
 
