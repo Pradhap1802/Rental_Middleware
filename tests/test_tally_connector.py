@@ -119,6 +119,107 @@ class TestTallyConnectorAndValidation(unittest.TestCase):
 
         self.assertIn("Stock Item 'Generator-500' is out of stock", str(ctx.exception))
 
+    def test_edu_mode_is_auto_detected_and_voucher_is_retried(self):
+        """
+        Confirmed live: a Tally company running under Educational/unlicensed mode
+        rejects every correctly-dated voucher with "Voucher date is missing..."
+        regardless of payload correctness (a hand-built minimal voucher with a valid
+        <DATE> tag was rejected identically), while the exact same voucher re-dated to
+        the 1st of the month succeeds outright. Rather than requiring an operator to
+        notice this pattern and manually flip tally_edu_mode, the client must detect it
+        from Tally's own rejection, retry once with the date forced, and remember the
+        setting for the rest of this run instead of re-discovering (and re-failing) it
+        on every subsequent voucher.
+        """
+        import re
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        self.assertFalse(cfg.tally_edu_mode)
+        mock_session = MagicMock()
+
+        check_exists_resp = MagicMock()
+        check_exists_resp.status_code = 200
+        check_exists_resp.content = b"<ENVELOPE><BODY><DATA><COLLECTION></COLLECTION></DATA></BODY></ENVELOPE>"
+
+        date_missing_resp = MagicMock()
+        date_missing_resp.status_code = 200
+        date_missing_resp.content = b"""<ENVELOPE><BODY><IMPORTRESULT>
+            <CREATED>0</CREATED>
+            <LINEERROR>Voucher date is missing for: 'Sales' voucher 31.  Verify the data, resolve errors (if any) and retry Split.</LINEERROR>
+        </IMPORTRESULT></BODY></ENVELOPE>"""
+
+        success_resp = MagicMock()
+        success_resp.status_code = 200
+        success_resp.content = b"<ENVELOPE><BODY><IMPORTRESULT><CREATED>1</CREATED><LASTVCHID>9</LASTVCHID></IMPORTRESULT></BODY></ENVELOPE>"
+
+        mock_session.post.side_effect = [check_exists_resp, date_missing_resp, success_resp]
+        client = TallyClient(cfg, session=mock_session)
+
+        result = client.sync_invoice({"id": 34, "number": "31", "customer_name": "Felix", "subtotal": 2000, "grand_total": 2360})
+
+        self.assertEqual(result, "RENTAL-INV-34")
+        self.assertEqual(mock_session.post.call_count, 3)  # check_exists, failed attempt, retry
+        self.assertTrue(cfg.tally_edu_mode)
+        self.assertTrue(client.edu_mode_auto_detected)
+
+        retry_call = mock_session.post.call_args_list[2]
+        retry_body = retry_call.kwargs.get("data")
+        retry_body = retry_body.decode("utf-8") if isinstance(retry_body, bytes) else retry_body
+        m = re.search(r"<DATE>(\d{8})</DATE>", retry_body)
+        self.assertIsNotNone(m)
+        self.assertTrue(m.group(1).endswith("01"), f"retry must be dated the 1st, got {m.group(1)}")
+
+    def test_edu_fallback_does_not_retry_once_already_in_edu_mode(self):
+        """A second, still-rejected voucher while already in edu mode must not loop."""
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally", tally_edu_mode=True)
+        mock_session = MagicMock()
+
+        check_exists_resp = MagicMock()
+        check_exists_resp.status_code = 200
+        check_exists_resp.content = b"<ENVELOPE><BODY><DATA><COLLECTION></COLLECTION></DATA></BODY></ENVELOPE>"
+
+        date_missing_resp = MagicMock()
+        date_missing_resp.status_code = 200
+        date_missing_resp.content = b"""<ENVELOPE><BODY><IMPORTRESULT>
+            <CREATED>0</CREATED>
+            <LINEERROR>Voucher date is missing for: 'Sales' voucher 31.  Verify the data, resolve errors (if any) and retry Split.</LINEERROR>
+        </IMPORTRESULT></BODY></ENVELOPE>"""
+
+        mock_session.post.side_effect = [check_exists_resp, date_missing_resp]
+        client = TallyClient(cfg, session=mock_session)
+
+        with self.assertRaises(ValueError):
+            client.sync_invoice({"id": 34, "number": "31", "customer_name": "Felix", "subtotal": 2000, "grand_total": 2360})
+
+        self.assertEqual(mock_session.post.call_count, 2)  # no retry loop
+        self.assertFalse(client.edu_mode_auto_detected)
+
+    def test_edu_fallback_does_not_mask_unrelated_business_errors(self):
+        """An unrelated Tally rejection (e.g. missing stock item) must surface as-is, not be swallowed as an edu-mode retry."""
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        mock_session = MagicMock()
+
+        check_exists_resp = MagicMock()
+        check_exists_resp.status_code = 200
+        check_exists_resp.content = b"<ENVELOPE><BODY><DATA><COLLECTION></COLLECTION></DATA></BODY></ENVELOPE>"
+
+        other_error_resp = MagicMock()
+        other_error_resp.status_code = 200
+        other_error_resp.content = b"""<ENVELOPE><BODY><IMPORTRESULT>
+            <CREATED>0</CREATED>
+            <LINEERROR>Stock Item 'Dell Mouse' does not exist!</LINEERROR>
+        </IMPORTRESULT></BODY></ENVELOPE>"""
+
+        mock_session.post.side_effect = [check_exists_resp, other_error_resp]
+        client = TallyClient(cfg, session=mock_session)
+
+        with self.assertRaises(ValueError) as ctx:
+            client.sync_invoice({"id": 34, "number": "31", "customer_name": "Felix", "subtotal": 2000, "grand_total": 2360})
+
+        self.assertIn("Dell Mouse", str(ctx.exception))
+        self.assertEqual(mock_session.post.call_count, 2)  # no retry attempted
+        self.assertFalse(cfg.tally_edu_mode)
+        self.assertFalse(client.edu_mode_auto_detected)
+
     def test_check_exists_does_not_false_positive_on_substring(self):
         """
         check_exists() used to do a plain substring search over the whole raw export

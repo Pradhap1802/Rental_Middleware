@@ -38,6 +38,17 @@ class SyncService:
             # run that legitimately found nothing new in the requested date range.
             store.set_checkpoint(f"last_synced:{status_key}", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
 
+        def persist_edu_mode_if_auto_detected() -> None:
+            # TallyClient auto-detects and self-corrects an Educational/unlicensed Tally
+            # company mid-sync (see _send_voucher_with_edu_fallback) by flipping
+            # cfg.tally_edu_mode in memory for the rest of THIS run — but cfg itself is
+            # re-loaded fresh from disk on every execute_sync() call, so without writing
+            # it back here the very next sync cycle would rediscover (and re-fail) the
+            # exact same thing all over again instead of starting with it already known.
+            if getattr(ext_client.tally, "edu_mode_auto_detected", False):
+                cfg.tally_edu_mode = True
+                cfg_store.save(cfg)
+
         try:
             entity = (entity_type or "").lower()
             if entity in ("tally_to_rentasst", "reverse_sync"):
@@ -85,6 +96,7 @@ class SyncService:
                     "failed": res_c["failed"] + res_e["failed"] + res_o["failed"] + res_i["failed"] + res_p["failed"] + res_t["failed"],
                 }
         finally:
+            persist_edu_mode_if_auto_detected()
             ra_client.close()
             ext_client.close()
 

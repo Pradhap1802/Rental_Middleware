@@ -2,7 +2,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 import requests
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Callable, Dict, Any, List, Optional, Tuple
 from requests.adapters import HTTPAdapter
 
 from ...models.domain import AppConfig
@@ -96,6 +96,13 @@ class TallyClient:
         # that redundant traffic entirely instead of just pacing it.
         self._exists_cache: Dict[Tuple[str, str], bool] = {}
 
+        # Set to True the moment auto-detection below (see
+        # _send_voucher_with_edu_fallback) discovers this Tally company only accepts
+        # Educational-Mode-restricted dates — callers with access to ConfigStore (e.g.
+        # SyncService) check this after a sync run to persist tally_edu_mode=True so
+        # future runs use it from the start instead of re-discovering it every time.
+        self.edu_mode_auto_detected = False
+
     def _exists_cache_key(self, entity_type: str, identifier: str) -> Tuple[str, str]:
         return ((entity_type or "").lower().strip(), (identifier or "").strip().lower())
 
@@ -139,6 +146,43 @@ class TallyClient:
             raise ValueError(err_msg or "Tally XML transaction failed accounting validation")
 
         return tally_id or "TALLY-SUCCESS"
+
+    def _send_voucher_with_edu_fallback(self, build_fn: Callable[[bool], str], expect_voucher: bool = True) -> str:
+        """
+        Some Tally installations run under an Educational/unlicensed mode that silently
+        rejects any voucher not dated the 1st, 2nd, or last day of a month — and Tally's
+        own rejection ("Voucher date is missing for: '<type>' voucher <name>...") gives
+        no hint that it's a license restriction rather than a real data problem.
+        Confirmed live: a company running Educational Mode rejected every correctly
+        dated Sales/Sales Order voucher this way regardless of payload correctness (a
+        hand-built minimal voucher with a valid <DATE> tag was rejected identically),
+        while the exact same voucher re-dated to the 1st of the month succeeded
+        outright. Detecting this from Tally's own response and retrying once with the
+        date forced means an operator no longer has to notice the pattern and manually
+        flip tally_edu_mode themselves — it's discovered and remembered automatically.
+
+        build_fn receives the edu_mode to build for and must return the XML to send —
+        callers pass a closure since each voucher type's builder has a different
+        signature (build_sales_order_voucher_xml, build_receipt_voucher_xml, etc).
+        """
+        edu_mode = bool(getattr(self.cfg, "tally_edu_mode", False))
+        xml = build_fn(edu_mode)
+        try:
+            return self.send_xml(xml, expect_voucher=expect_voucher)
+        except ValueError as e:
+            if edu_mode or "voucher date is missing" not in str(e).lower():
+                raise
+            log_event(
+                "ForwardSync",
+                f"Tally rejected a real transaction date ('{e}') — this looks like an "
+                "Educational/unlicensed Tally company that only accepts vouchers dated "
+                "the 1st, 2nd, or last day of a month. Retrying this voucher with that "
+                "restriction applied, and switching to it for the rest of this sync.",
+            )
+            self.cfg.tally_edu_mode = True
+            self.edu_mode_auto_detected = True
+            retry_xml = build_fn(True)
+            return self.send_xml(retry_xml, expect_voucher=expect_voucher)
 
     def fetch_companies(self) -> List[Dict[str, str]]:
         xml = build_fetch_companies_xml()
@@ -284,11 +328,11 @@ class TallyClient:
             return
         try:
             company_name = getattr(self.cfg, "tally_company_name", None)
-            edu_mode = getattr(self.cfg, "tally_edu_mode", False)
-            xml = build_physical_stock_voucher_xml(
-                item_name=item_name, quantity=quantity, unit=unit, company_name=company_name, edu_mode=edu_mode,
+            self._send_voucher_with_edu_fallback(
+                lambda edu_mode: build_physical_stock_voucher_xml(
+                    item_name=item_name, quantity=quantity, unit=unit, company_name=company_name, edu_mode=edu_mode,
+                )
             )
-            self.send_xml(xml, expect_voucher=True)
         except Exception as e:
             log_event("ForwardSync", f"Failed to reconcile Tally stock quantity for '{item_name}': {e}")
 
@@ -296,9 +340,9 @@ class TallyClient:
         remote_id = f"RENTAL-ORD-{data.get('id')}"
         action = "Alter" if self.check_exists("rental_orders", remote_id) else "Create"
         company_name = getattr(self.cfg, "tally_company_name", None)
-        edu_mode = getattr(self.cfg, "tally_edu_mode", False)
-        xml = build_sales_order_voucher_xml(data, action=action, company_name=company_name, edu_mode=edu_mode)
-        self.send_xml(xml, expect_voucher=True)
+        self._send_voucher_with_edu_fallback(
+            lambda edu_mode: build_sales_order_voucher_xml(data, action=action, company_name=company_name, edu_mode=edu_mode)
+        )
         return remote_id
 
     def sync_invoice(self, data: Dict[str, Any]) -> str:
@@ -306,16 +350,18 @@ class TallyClient:
         action = "Alter" if self.check_exists("invoices", remote_id) else "Create"
         company_name = getattr(self.cfg, "tally_company_name", None)
         company_state = getattr(self.cfg, "company_state", "") or ""
-        edu_mode = getattr(self.cfg, "tally_edu_mode", False)
-        xml = build_sales_invoice_voucher_xml(data, action=action, company_state=company_state, company_name=company_name, edu_mode=edu_mode)
-        self.send_xml(xml, expect_voucher=True)
+        self._send_voucher_with_edu_fallback(
+            lambda edu_mode: build_sales_invoice_voucher_xml(
+                data, action=action, company_state=company_state, company_name=company_name, edu_mode=edu_mode
+            )
+        )
         return remote_id
 
     def sync_payment(self, data: Dict[str, Any]) -> str:
         remote_id = f"RENTAL-PAY-{data.get('id')}"
         action = "Alter" if self.check_exists("payments", remote_id) else "Create"
         company_name = getattr(self.cfg, "tally_company_name", None)
-        edu_mode = getattr(self.cfg, "tally_edu_mode", False)
-        xml = build_receipt_voucher_xml(data, action=action, company_name=company_name, edu_mode=edu_mode)
-        self.send_xml(xml, expect_voucher=True)
+        self._send_voucher_with_edu_fallback(
+            lambda edu_mode: build_receipt_voucher_xml(data, action=action, company_name=company_name, edu_mode=edu_mode)
+        )
         return remote_id
