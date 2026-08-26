@@ -42,6 +42,39 @@ REAL_SALES_ORDER_XML = """<ENVELOPE>
 </ENVELOPE>"""
 
 
+class TestTallyFetcherSharedHttpLock(unittest.TestCase):
+    """
+    _post_xml() used to call bare requests.post() directly, completely bypassing
+    TallyClient's _tally_post()/_TALLY_HTTP_LOCK — QueueWorker runs up to 4 jobs
+    concurrently, and tally_to_rentasst (which uses this fetcher) is enqueued every
+    cycle alongside equipment/invoices/payments/rental_orders (which use TallyClient),
+    so this fetcher's requests could race against TallyClient's, unserialized, from
+    within a single process. Confirmed live: a burst of "Could not set
+    'SVCurrentCompany'" errors on equipment sync while reverse sync was also running —
+    the exact concurrency signature this codebase's own comments document as capable of
+    corrupting or crashing Tally. _post_xml must route through the same shared lock.
+    """
+
+    def test_post_xml_routes_through_the_shared_tally_post_lock(self):
+        from app.models.domain import AppConfig
+
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        fetcher = TallyFetcher(cfg)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b"<ENVELOPE>OK</ENVELOPE>"
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("app.connectors.tally_fetcher._tally_post", return_value=mock_resp) as mock_tally_post:
+            result = fetcher._post_xml("<ENVELOPE>test</ENVELOPE>")
+
+        mock_tally_post.assert_called_once()
+        called_session = mock_tally_post.call_args[0][0]
+        self.assertIs(called_session, fetcher.session)
+        self.assertIn("OK", result)
+
+
 class TestTallyFetcherInventoryParsing(unittest.TestCase):
     """
     fetch_vouchers()/​_parse_vouchers_xml() previously searched for a bare

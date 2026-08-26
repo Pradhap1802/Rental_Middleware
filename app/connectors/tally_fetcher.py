@@ -3,6 +3,7 @@ import xml.etree.ElementTree as ET
 import requests
 from typing import Dict, Any, List, Optional
 from ..models.domain import AppConfig
+from .tally.client import _tally_post
 
 
 def _to_tally_date(value: Optional[str]) -> Optional[str]:
@@ -30,11 +31,23 @@ class TallyFetcher:
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
         self.tally_url = cfg.external_url.rstrip("/")
+        self.session = requests.Session()
 
     def _post_xml(self, xml_payload: str) -> Optional[str]:
-        headers = {"Content-Type": "text/xml;charset=utf-8"}
+        """
+        Routes through the same _tally_post()/_TALLY_HTTP_LOCK TallyClient uses for
+        every forward-sync request — this used to call bare requests.post() directly,
+        completely bypassing that lock. QueueWorker runs up to 4 jobs concurrently
+        (ThreadPoolExecutor), and tally_to_rentasst (which uses this fetcher) is enqueued
+        every cycle alongside equipment/invoices/payments/rental_orders (which use
+        TallyClient) — so this fetcher's requests could and did race against TallyClient's
+        requests, unserialized, from within a single process. Confirmed live: a burst of
+        "Could not set 'SVCurrentCompany'" errors on equipment sync while reverse sync
+        was also active, the exact concurrency signature this codebase's own comments
+        already document as capable of corrupting or crashing Tally.
+        """
         try:
-            r = requests.post(self.tally_url, data=xml_payload.encode("utf-8"), headers=headers, timeout=10)
+            r = _tally_post(self.session, self.tally_url, xml_payload.encode("utf-8"), timeout=10)
             r.raise_for_status()
             return sanitize_tally_xml(r.content)
         except Exception:
