@@ -280,15 +280,26 @@ class TallyFetcher:
                             except ValueError:
                                 pass
 
-                # STANDARDPRICELIST.LIST is the Tally "Standard Selling Price" this
-                # middleware's own forward sync writes RentAsst's rent_price/
-                # day_based_rent_price into (see build_stock_item_xml) — confirmed live
-                # ('Dell Laptop', RATE "150.00/pc", matches its real RentAsst
-                # day_based_rent_price of 150.00). Never fetched before, so a stock item's
-                # rental price never made it back to RentAsst on reverse sync at all.
+                # Rental price also lives in one of two different places depending on how
+                # it was entered, exactly like GST above — confirmed live against a real
+                # user screenshot of Tally's Stock Item Alteration screen. A stock item
+                # entered through Tally's plain, everyday screen has its Rate set directly
+                # in the Opening Balance row (Quantity / Rate / Value) — that Rate is
+                # OPENINGRATE, and STANDARDPRICELIST.LIST ("Standard Selling Price", a
+                # separate, rarely-used price-list feature) is completely empty for it. A
+                # stock item this middleware's own forward sync created instead has its
+                # rent_price written into STANDARDPRICELIST.LIST (see build_stock_item_xml)
+                # with OPENINGRATE left at 0/unset (that field carries purchase_price for
+                # forward-synced items, not rent_price). Prefer STANDARDPRICELIST.LIST
+                # when it's populated; fall back to OPENINGRATE for the common case of a
+                # human directly entering a rate in Tally's everyday UI.
                 price_text = (s_node.findtext(".//STANDARDPRICELIST.LIST/RATE") or "").strip()
                 price_match = re.match(r"[-+]?\d+(\.\d+)?", price_text)
                 rent_price = float(price_match.group(0)) if price_match else 0.0
+                if not rent_price:
+                    opening_rate_text = (s_node.findtext("OPENINGRATE") or "").strip()
+                    opening_rate_match = re.match(r"[-+]?\d+(\.\d+)?", opening_rate_text)
+                    rent_price = float(opening_rate_match.group(0)) if opening_rate_match else 0.0
 
                 if not name:
                     continue

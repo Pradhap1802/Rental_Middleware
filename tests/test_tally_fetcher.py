@@ -302,6 +302,57 @@ class TestTallyFetcherStockItemGstAndPriceParsing(unittest.TestCase):
 
         self.assertEqual(items[0]["rent_price"], 0.0)
 
+    def test_falls_back_to_opening_rate_when_price_list_is_empty(self):
+        """
+        Confirmed live against a real user screenshot of Tally's Stock Item Alteration
+        screen: a stock item entered through Tally's plain, everyday UI has its rate set
+        directly in the Opening Balance row (Quantity 5 pc / Rate 150.00 / Value 750.00)
+        — that Rate is OPENINGRATE, not STANDARDPRICELIST.LIST (a separate, rarely-used
+        "Standard Selling Price" feature nobody had touched). Reading only
+        STANDARDPRICELIST.LIST silently returned 0 for every item entered this ordinary
+        way, which is the common case, not the exception.
+        """
+        xml = """<ENVELOPE>
+  <STOCKITEM NAME="DiagAssetQty2">
+    <NAME>DiagAssetQty2</NAME>
+    <OPENINGBALANCE> 5 pc</OPENINGBALANCE>
+    <OPENINGVALUE>-750.00</OPENINGVALUE>
+    <OPENINGRATE>150.00/pc</OPENINGRATE>
+    <STANDARDPRICELIST.LIST></STANDARDPRICELIST.LIST>
+  </STOCKITEM>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            items = fetcher.fetch_stock_items(last_alter_id=0)
+
+        self.assertEqual(items[0]["rent_price"], 150.0)
+
+    def test_standard_price_list_is_preferred_over_opening_rate_when_both_present(self):
+        """A forward-synced item (build_stock_item_xml) writes rent_price into
+        STANDARDPRICELIST.LIST and purchase_price into OPENINGRATE — the two must never
+        be confused, so STANDARDPRICELIST.LIST wins when both are populated."""
+        xml = """<ENVELOPE>
+  <STOCKITEM NAME="Dell Laptop">
+    <NAME>Dell Laptop</NAME>
+    <OPENINGRATE>25.00/pc</OPENINGRATE>
+    <STANDARDPRICELIST.LIST>
+      <DATE>20240401</DATE>
+      <RATE>150.00/pc</RATE>
+    </STANDARDPRICELIST.LIST>
+  </STOCKITEM>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            items = fetcher.fetch_stock_items(last_alter_id=0)
+
+        self.assertEqual(items[0]["rent_price"], 150.0)
+
 
 if __name__ == "__main__":
     unittest.main()
