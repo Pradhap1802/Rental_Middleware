@@ -216,7 +216,7 @@ class TallyFetcher:
             <TDLMESSAGE>
                <COLLECTION NAME="StockItemsCollection" ISMODIFY="No">
                   <TYPE>StockItem</TYPE>
-                  <FETCH>MASTERID, ALTERID, GUID, NAME, PARENT, BASEUNITS, OPENINGBALANCE, OPENINGRATE, OPENINGVALUE, DESCRIPTION, HSNCODE, HSNDETAILS.LIST, GSTDETAILS.LIST</FETCH>
+                  <FETCH>MASTERID, ALTERID, GUID, NAME, PARENT, BASEUNITS, OPENINGBALANCE, OPENINGRATE, OPENINGVALUE, CLOSINGBALANCE, DESCRIPTION, HSNCODE, HSNDETAILS.LIST, GSTDETAILS.LIST</FETCH>
                </COLLECTION>
             </TDLMESSAGE>
          </TDL>
@@ -237,6 +237,18 @@ class TallyFetcher:
                 alter_id_text = (s_node.findtext("ALTERID") or "0").strip()
                 unit = (s_node.findtext("BASEUNITS") or "Nos").strip()
                 desc = (s_node.findtext("DESCRIPTION") or "").strip()
+
+                # CLOSINGBALANCE is Tally's actual current stock-on-hand — OPENINGBALANCE
+                # is fixed at item creation and never reflects later stock movement (a
+                # Physical Stock voucher, a sale, a purchase). Confirmed live: a stock item
+                # with OPENINGBALANCE "6 pc" and no later movement still reports
+                # CLOSINGBALANCE "6 pc" (they only diverge once vouchers post against it),
+                # so CLOSINGBALANCE is the only field that's ever correct for "how many are
+                # there right now" — the same reasoning the forward-sync stock
+                # reconciliation already uses (Physical Stock vouchers, not OPENINGBALANCE).
+                closing_text = (s_node.findtext("CLOSINGBALANCE") or "").strip()
+                qty_match = re.match(r"[-+]?\d+(\.\d+)?", closing_text)
+                quantity = float(qty_match.group(0)) if qty_match else 0.0
 
                 # Extract HSN Code from top-level or HSNDETAILS.LIST
                 hsn = (s_node.findtext("HSNCODE") or s_node.findtext(".//HSNDETAILS.LIST/HSNCODE") or s_node.findtext(".//HSNCODE") or "").strip()
@@ -272,6 +284,7 @@ class TallyFetcher:
                     "description": desc,
                     "hsn_code": hsn,
                     "gst_rate": gst_rate,
+                    "quantity": quantity,
                 })
         except Exception:
             pass

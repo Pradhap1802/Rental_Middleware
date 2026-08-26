@@ -204,6 +204,37 @@ class TestCheckExistsInRentasst(unittest.TestCase):
 
         self.assertTrue(self.client.check_exists_in_rentasst("customer", "1"))
 
+    def test_equipment_html_shell_on_200_is_not_treated_as_existing(self):
+        """Same SPA-catch-all trap confirmed live for equipment: 'equipment/{id}' isn't a
+        real route (only 'asset/{id}' is) and returns HTML with status 200 for ANY id,
+        including one that was never created."""
+        real_404 = MagicMock()
+        real_404.status_code = 404
+
+        html_response = MagicMock()
+        html_response.status_code = 200
+        html_response.json.side_effect = ValueError("No JSON object could be decoded")
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/asset/99"):
+                return real_404
+            if url.endswith("/equipment/99"):
+                return html_response
+            raise AssertionError(f"unexpected URL: {url}")
+
+        self.client.session.get = MagicMock(side_effect=fake_get)
+
+        self.assertFalse(self.client.check_exists_in_rentasst("equipment", "99"))
+
+    def test_equipment_real_json_record_on_200_is_treated_as_existing(self):
+        json_response = MagicMock()
+        json_response.status_code = 200
+        json_response.json.return_value = {"id": 1, "name": "Dell Laptop"}
+
+        self.client.session.get = MagicMock(return_value=json_response)
+
+        self.assertTrue(self.client.check_exists_in_rentasst("equipment", "1"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,7 @@ from app.sync.tally_to_rentasst import (
     _extract_primary_mobile,
     _extract_address_payload,
     _customer_contact_hash,
+    _equipment_change_hash,
 )
 from app.sync.idempotency import generate_integration_key
 
@@ -1060,6 +1061,163 @@ class TestReverseSyncHardening(unittest.TestCase):
             )
 
         mock_ra_client.push_rentout_items.assert_not_called()
+
+
+class TestEquipmentReverseSync(unittest.TestCase):
+    """
+    Reverse sync (Tally -> RentAsst) of stock items into RentAsst equipment. Confirmed
+    live: a brand-new Tally-only stock item always landed in RentAsst with
+    available_quantity=0 (CLOSINGBALANCE was fetched by Tally's own STOCKITEM export but
+    never parsed or pushed), an already reverse-synced item's HSN/GST/quantity changes in
+    Tally never reached RentAsst (the lookup used to find its RentAsst mapping never
+    actually matched — same root cause as the equivalent customer bug), and — the most
+    dangerous gap — reverse sync could find a RentAsst-native (forward-sync-owned) asset by
+    a live name match and push Tally-derived changes onto it, which RentAsst itself
+    rejects once that asset has real rental history ("Asset has inventory history. Archive
+    stock first before disabling inventory tracking.").
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test_equipment_reverse_sync.db")
+        self.store = MappingStore(self.db_path)
+
+    def tearDown(self):
+        if hasattr(self, "store") and self.store:
+            self.store.db.close()
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _run_sync(self, ra_client, stock_item):
+        ext_client = MagicMock()
+        ext_client.cfg = MagicMock()
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_ledgers.return_value = []
+            mock_fetcher.fetch_stock_items.return_value = [stock_item]
+            mock_fetcher.fetch_vouchers.return_value = []
+            mock_fetcher_cls.return_value = mock_fetcher
+            return sync_tally_to_rentasst(
+                ra_client=ra_client, ext_client=ext_client, store=self.store, force_full_sync=True,
+            )
+
+    def test_creates_new_asset_with_quantity_from_closing_balance(self):
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_equipment.return_value = []
+        mock_ra_client.push_equipment.return_value = {"id": 10}
+
+        stock_item = {
+            "name": "New Tally Asset", "parent": "", "unit": "pc",
+            "hsn_code": "998877", "gst_rate": 18.0, "quantity": 6.0, "alter_id": 300,
+        }
+
+        stats = self._run_sync(mock_ra_client, stock_item)
+
+        mock_ra_client.push_equipment.assert_called_once()
+        payload = mock_ra_client.push_equipment.call_args[0][0]
+        self.assertEqual(payload["available_quantity"], 6)
+        self.assertEqual(payload["branch"], [{"branch_id": 1, "quantity": 6}])
+        self.assertEqual(stats["created"], 1)
+
+    def test_never_pushes_updates_onto_a_forward_owned_asset_with_matching_name(self):
+        """The critical safety boundary: an asset found only via a live name match (no
+        reverse-sync mapping) must never get update_equipment called on it, regardless of
+        how different its Tally-side HSN/GST/quantity looks."""
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_equipment.return_value = [{"id": 1, "name": "Dell Laptop"}]
+
+        stock_item = {
+            "name": "Dell Laptop", "parent": "Laptop", "unit": "pc",
+            "hsn_code": "256341", "gst_rate": 18.0, "quantity": 10.0, "alter_id": 233,
+        }
+
+        stats = self._run_sync(mock_ra_client, stock_item)
+
+        mock_ra_client.push_equipment.assert_not_called()
+        mock_ra_client.update_equipment.assert_not_called()
+        self.assertEqual(stats["skipped"], 1)
+
+        # Second run must ALSO never touch it — the cached mapping (saved without a hash)
+        # must keep resolving to "forward-owned, skip", not fall through to update.
+        mock_ra_client.reset_mock()
+        mock_ra_client.fetch_equipment.return_value = [{"id": 1, "name": "Dell Laptop"}]
+        stats2 = self._run_sync(mock_ra_client, stock_item)
+        mock_ra_client.update_equipment.assert_not_called()
+        mock_ra_client.push_equipment.assert_not_called()
+        self.assertEqual(stats2["skipped"], 1)
+
+    def test_updates_a_reverse_owned_asset_when_hsn_gst_or_quantity_changes(self):
+        self.store.save_mapping(
+            entity_type="equipment", source_id="Diag Reverse Asset", target_id="20",
+            source_system="tally", target_system="rentasst",
+            last_synced_hash="stale-hash-from-before-the-hsn-code-was-added",
+        )
+        mock_ra_client = MagicMock()
+        mock_ra_client.check_exists_in_rentasst.return_value = True
+
+        stock_item = {
+            "name": "Diag Reverse Asset", "parent": "", "unit": "pc",
+            "hsn_code": "998877", "gst_rate": 0.0, "quantity": 7.0, "alter_id": 234,
+        }
+
+        stats = self._run_sync(mock_ra_client, stock_item)
+
+        mock_ra_client.push_equipment.assert_not_called()
+        mock_ra_client.update_equipment.assert_called_once()
+        call_args = mock_ra_client.update_equipment.call_args
+        self.assertEqual(call_args[0][0], "20")
+        payload = call_args[0][1]
+        self.assertEqual(payload["name"], "Diag Reverse Asset")
+        self.assertEqual(payload["hsn_code"], "998877")
+        self.assertEqual(payload["available_quantity"], 7)
+        self.assertEqual(payload["branch"], [{"branch_id": 1, "quantity": 7}])
+        self.assertGreaterEqual(stats["updated"], 1)
+
+    def test_skips_reverse_owned_asset_when_nothing_changed(self):
+        unchanged_hash = _equipment_change_hash("998877", 0.0, 7.0, "", "pc")
+        self.store.save_mapping(
+            entity_type="equipment", source_id="Diag Reverse Asset", target_id="20",
+            source_system="tally", target_system="rentasst",
+            last_synced_hash=unchanged_hash,
+        )
+        mock_ra_client = MagicMock()
+        mock_ra_client.check_exists_in_rentasst.return_value = True
+
+        stock_item = {
+            "name": "Diag Reverse Asset", "parent": "", "unit": "pc",
+            "hsn_code": "998877", "gst_rate": 0.0, "quantity": 7.0, "alter_id": 234,
+        }
+
+        self._run_sync(mock_ra_client, stock_item)
+
+        mock_ra_client.update_equipment.assert_not_called()
+        mock_ra_client.push_equipment.assert_not_called()
+
+    def test_recreates_when_reverse_owned_mapping_target_no_longer_exists(self):
+        self.store.save_mapping(
+            entity_type="equipment", source_id="Diag Reverse Asset", target_id="99",
+            source_system="tally", target_system="rentasst",
+            last_synced_hash="some-hash-from-before-the-record-was-deleted",
+        )
+        mock_ra_client = MagicMock()
+        mock_ra_client.check_exists_in_rentasst.return_value = False
+        mock_ra_client.fetch_equipment.return_value = []
+        mock_ra_client.push_equipment.return_value = {"id": 55}
+
+        stock_item = {
+            "name": "Diag Reverse Asset", "parent": "", "unit": "pc",
+            "hsn_code": "998877", "gst_rate": 0.0, "quantity": 7.0, "alter_id": 234,
+        }
+
+        stats = self._run_sync(mock_ra_client, stock_item)
+
+        mock_ra_client.check_exists_in_rentasst.assert_called_once_with("equipment", "99")
+        mock_ra_client.update_equipment.assert_not_called()
+        mock_ra_client.push_equipment.assert_called_once()
+        self.assertEqual(stats["created"], 1)
+
+        refreshed = self.store.find_mapping("equipment", "Diag Reverse Asset")
+        self.assertEqual(refreshed["target_id"], "55")
 
 
 if __name__ == "__main__":

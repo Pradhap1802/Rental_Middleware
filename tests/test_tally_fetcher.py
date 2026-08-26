@@ -181,5 +181,49 @@ class TestTallyFetcherLedgerGstParsing(unittest.TestCase):
         self.assertEqual(ledgers[0]["gstin"], "NEW-GSTIN")
 
 
+class TestTallyFetcherStockItemQuantityParsing(unittest.TestCase):
+    """
+    fetch_stock_items() fetched OPENINGBALANCE but never CLOSINGBALANCE, and never parsed
+    any quantity field into the returned item dict at all — confirmed live, every
+    reverse-synced stock item landed in RentAsst with available_quantity=0 regardless of
+    Tally's real stock level. CLOSINGBALANCE (not OPENINGBALANCE, which is fixed at item
+    creation and never reflects later stock movement) is Tally's actual current
+    stock-on-hand.
+    """
+
+    def test_parses_quantity_from_closing_balance(self):
+        xml = """<ENVELOPE>
+  <STOCKITEM NAME="Diag Reverse Asset">
+    <NAME>Diag Reverse Asset</NAME>
+    <CLOSINGBALANCE> 6 pc</CLOSINGBALANCE>
+    <OPENINGBALANCE> 6 pc</OPENINGBALANCE>
+  </STOCKITEM>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            items = fetcher.fetch_stock_items(last_alter_id=0)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["quantity"], 6.0)
+
+    def test_missing_closing_balance_defaults_to_zero_quantity(self):
+        xml = """<ENVELOPE>
+  <STOCKITEM NAME="No Stock Movement Item">
+    <NAME>No Stock Movement Item</NAME>
+  </STOCKITEM>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            items = fetcher.fetch_stock_items(last_alter_id=0)
+
+        self.assertEqual(items[0]["quantity"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

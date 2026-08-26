@@ -356,6 +356,8 @@ class RentAsstClient:
             endpoints = [f"payment/{rid}", f"payments/{rid}"]
         elif ent in ("customer", "customers"):
             endpoints = [f"customer/{rid}", f"customers/{rid}"]
+        elif ent in ("equipment", "equipments", "asset", "assets", "product", "products"):
+            endpoints = [f"asset/{rid}", f"equipment/{rid}"]
         else:
             return True
 
