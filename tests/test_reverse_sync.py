@@ -1210,6 +1210,36 @@ class TestEquipmentReverseSync(unittest.TestCase):
         mock_ra_client.update_equipment.assert_not_called()
         mock_ra_client.push_equipment.assert_not_called()
 
+    def test_updates_a_reverse_owned_asset_when_only_description_changes(self):
+        """
+        'description' is sent in both the create and update payloads but was found
+        missing from the change-detection hash — a description-only edit in Tally
+        (every other field unchanged) would otherwise never move the hash and would
+        silently skip forever, same failure mode as the HSN/GST/quantity/rent_price gaps
+        fixed earlier for this same loop.
+        """
+        unchanged_hash = _equipment_change_hash("998877", 0.0, 7.0, "", "pc", 0.0, "Old description")
+        self.store.save_mapping(
+            entity_type="equipment", source_id="Diag Reverse Asset", target_id="20",
+            source_system="tally", target_system="rentasst",
+            last_synced_hash=unchanged_hash,
+        )
+        mock_ra_client = MagicMock()
+        mock_ra_client.check_exists_in_rentasst.return_value = True
+
+        stock_item = {
+            "name": "Diag Reverse Asset", "parent": "", "unit": "pc",
+            "hsn_code": "998877", "gst_rate": 0.0, "quantity": 7.0,
+            "description": "New description", "alter_id": 234,
+        }
+
+        stats = self._run_sync(mock_ra_client, stock_item)
+
+        mock_ra_client.update_equipment.assert_called_once()
+        payload = mock_ra_client.update_equipment.call_args[0][1]
+        self.assertEqual(payload["description"], "New description")
+        self.assertGreaterEqual(stats["updated"], 1)
+
     def test_recreates_when_reverse_owned_mapping_target_no_longer_exists(self):
         self.store.save_mapping(
             entity_type="equipment", source_id="Diag Reverse Asset", target_id="99",

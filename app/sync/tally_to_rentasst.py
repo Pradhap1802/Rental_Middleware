@@ -113,20 +113,24 @@ def _push_customer_address(ra_client: Any, ra_id: str, address_payload: Dict[str
 
 def _equipment_change_hash(
     hsn_code: str, gst_rate: float, quantity: float, parent_category: str,
-    unit_name: str, rent_price: float = 0.0,
+    unit_name: str, rent_price: float = 0.0, description: str = "",
 ) -> str:
     """
-    Hashes the Tally-side fields this reverse sync is responsible for keeping RentAsst's
-    equipment record in sync with. Without this, an already-mapped stock item was skipped
-    unconditionally forever the moment a mapping was found — confirmed live: an HSN code,
-    GST rate, quantity, or rental price corrected/changed in Tally after the item's first
-    reverse sync never reached RentAsst. Comparing this hash against what was last pushed
-    lets an unrelated Tally edit still resolve to "unchanged, skip" while a genuine change
-    resolves to "push an update".
+    Hashes every Tally-side field this reverse sync actually pushes into the create/
+    update payload (update_payload/asset_payload below) — anything sent but left out of
+    this hash would silently never trigger an update once a stock item is first synced,
+    because a real change to it wouldn't move the hash at all. Confirmed live: an HSN
+    code, GST rate, quantity, or rental price corrected/changed in Tally after the item's
+    first reverse sync never reached RentAsst before this hash existed; 'description' was
+    the same kind of gap found afterward — sent in both payloads but never part of the
+    hash, so a Tally-side description edit alone would never resolve to "push an update".
+    Comparing this hash against what was last pushed lets an unrelated Tally edit still
+    resolve to "unchanged, skip" while a genuine change resolves to "push an update".
     """
     raw = json.dumps(
         {"hsn_code": hsn_code, "gst_rate": gst_rate, "quantity": quantity,
-         "parent_category": parent_category, "unit_name": unit_name, "rent_price": rent_price},
+         "parent_category": parent_category, "unit_name": unit_name, "rent_price": rent_price,
+         "description": description},
         sort_keys=True, ensure_ascii=False,
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -626,6 +630,7 @@ def sync_tally_to_rentasst(
             gst_rate = s.get("gst_rate") or 0.0
             quantity = s.get("quantity") or 0.0
             rent_price = s.get("rent_price") or 0.0
+            description = s.get("description") or ""
             s_alter_id = s.get("alter_id") or 0
             if s_alter_id > max_alter_id:
                 max_alter_id = s_alter_id
@@ -633,7 +638,9 @@ def sync_tally_to_rentasst(
             if not item_name:
                 continue
 
-            current_hash = _equipment_change_hash(hsn_code, gst_rate, quantity, parent_category, unit_name, rent_price)
+            current_hash = _equipment_change_hash(
+                hsn_code, gst_rate, quantity, parent_category, unit_name, rent_price, description,
+            )
 
             # Resolve which RentAsst asset this Tally stock item already maps to, if any —
             # via a mapping this reverse sync saved earlier (find_mapping matches by
@@ -736,7 +743,7 @@ def sync_tally_to_rentasst(
                         "category_ids": json.dumps([category_id]) if category_id else None,
                         "skip_inventory": True,
                         "enabled_for_rent": True,
-                        "description": s.get("description") or "",
+                        "description": description,
                         "available_quantity": qty_int,
                         "branch": branch_payload,
                         "rent_price": f"{rent_price:.2f}",
@@ -775,7 +782,7 @@ def sync_tally_to_rentasst(
                 "category_ids": json.dumps([category_id]) if category_id else None,
                 "skip_inventory": True,
                 "enabled_for_rent": True,
-                "description": s.get("description") or "",
+                "description": description,
                 "available_quantity": qty_int,
                 "branch": branch_payload,
             }
