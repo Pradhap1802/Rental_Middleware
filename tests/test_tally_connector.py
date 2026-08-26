@@ -9,6 +9,7 @@ from app.connectors.tally.ledger import build_customer_ledger_xml
 from app.connectors.tally.sales_voucher import build_sales_invoice_voucher_xml
 from app.connectors.tally.receipt_voucher import build_receipt_voucher_xml
 from app.connectors.tally.stock_item import build_physical_stock_voucher_xml
+from app.connectors.tally.unit_match import resolve_existing_unit_name
 
 
 class TestTallyConnectorAndValidation(unittest.TestCase):
@@ -521,6 +522,143 @@ class TestTallyConnectorAndValidation(unittest.TestCase):
             xml,
         )]
         self.assertEqual(round(sum(ledger_amounts), 2), 0.0)
+
+
+class TestUnitNameMatching(unittest.TestCase):
+    """
+    RentAsst and Tally were confirmed live to disagree on unit spelling both by name
+    ("Meter" vs an existing Tally unit named "MTR") and by symbol/name mix
+    ("Piece"/"pc" vs an existing Tally unit named "Pieces"). resolve_existing_unit_name
+    must find the existing Tally unit either way and return ITS name, so callers reuse
+    it instead of creating a second, duplicate UNIT master for the same real unit.
+    """
+
+    def test_matches_via_synonym_group_regardless_of_which_field_matched(self):
+        existing = [
+            {"name": "MTR", "symbol": "Mtr"},
+            {"name": "Pieces", "symbol": "Pcs"},
+            {"name": "Nos", "symbol": ""},
+        ]
+        self.assertEqual(resolve_existing_unit_name("Meter", "m", existing), "MTR")
+        self.assertEqual(resolve_existing_unit_name("Piece", "pc", existing), "Pieces")
+        self.assertIsNone(resolve_existing_unit_name("Kilogram", "kg", existing))
+
+    def test_exact_normalized_match_without_a_synonym_entry(self):
+        existing = [{"name": "Box", "symbol": "Bx"}]
+        self.assertEqual(resolve_existing_unit_name("box", "", existing), "Box")
+
+    def test_no_match_returns_none_for_an_empty_registry(self):
+        self.assertIsNone(resolve_existing_unit_name("Meter", "m", []))
+
+
+class TestTallyClientUnitResolution(unittest.TestCase):
+    """
+    End-to-end (against a mocked Tally session): a RentAsst unit that Tally already
+    represents under a different spelling must resolve to Tally's existing unit at
+    every point that names a unit — STOCKITEM's BASEUNITS, unit pre-creation, and a
+    Physical Stock reconciliation voucher's ACTUALQTY/BILLEDQTY — not just one of them,
+    or the STOCKITEM master and its own reconciliation voucher would end up naming two
+    different Tally units for the same asset.
+    """
+
+    def test_sync_equipment_reuses_existing_tally_unit_with_different_spelling(self):
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        mock_session = MagicMock()
+
+        list_units_resp = MagicMock()
+        list_units_resp.status_code = 200
+        list_units_resp.content = b"""<ENVELOPE><BODY><DATA><COLLECTION>
+            <UNIT><NAME>MTR</NAME><SYMBOL>Mtr</SYMBOL></UNIT>
+        </COLLECTION></DATA></BODY></ENVELOPE>"""
+
+        equip_check_resp = MagicMock()
+        equip_check_resp.status_code = 200
+        equip_check_resp.content = b"<ENVELOPE><BODY><DATA><COLLECTION></COLLECTION></DATA></BODY></ENVELOPE>"
+
+        import_resp = MagicMock()
+        import_resp.status_code = 200
+        import_resp.content = b"<ENVELOPE><HEADER><VERSION>1</VERSION></HEADER><BODY><IMPORTRESULT><CREATED>1</CREATED></IMPORTRESULT></BODY></ENVELOPE>"
+
+        sent_bodies = []
+
+        def fake_post(url, data=None, headers=None, timeout=None):
+            body = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+            sent_bodies.append(body)
+            if "<ID>ListUnits</ID>" in body:
+                return list_units_resp
+            if "<TALLYREQUEST>EXPORT</TALLYREQUEST>" in body:
+                return equip_check_resp
+            return import_resp
+
+        mock_session.post.side_effect = fake_post
+        client = TallyClient(cfg, session=mock_session)
+
+        client.sync_equipment({
+            "id": 5, "name": "Measuring Tape",
+            "asset_unit": {"name": "Meter", "symbol": "m"},
+        })
+
+        import_calls = [b for b in sent_bodies if "<TALLYREQUEST>Import Data</TALLYREQUEST>" in b]
+        self.assertEqual(len(import_calls), 1)
+        self.assertIn("<BASEUNITS>MTR</BASEUNITS>", import_calls[0])
+        self.assertNotIn("ACTION=\"Create\">\n            <NAME>Meter</NAME>", import_calls[0])
+        self.assertNotIn('<UNIT NAME="MTR" ACTION="Create">', import_calls[0])
+
+        unit_check_calls = [b for b in sent_bodies if "<ID>CheckExistence</ID>" in b and "<TYPE>UNIT</TYPE>" in b]
+        self.assertEqual(len(unit_check_calls), 0, "a matched existing unit must skip the CheckExistence round-trip entirely")
+
+    def test_sync_unit_skips_creating_a_duplicate_when_an_equivalent_unit_exists(self):
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        mock_session = MagicMock()
+
+        list_units_resp = MagicMock()
+        list_units_resp.status_code = 200
+        list_units_resp.content = b"""<ENVELOPE><BODY><DATA><COLLECTION>
+            <UNIT><NAME>Pieces</NAME><SYMBOL>Pcs</SYMBOL></UNIT>
+        </COLLECTION></DATA></BODY></ENVELOPE>"""
+        mock_session.post.return_value = list_units_resp
+        client = TallyClient(cfg, session=mock_session)
+
+        created = client.sync_unit("Piece", symbol="pc")
+
+        self.assertFalse(created)
+        import_calls = [
+            c for c in mock_session.post.call_args_list
+            if "<TALLYREQUEST>Import Data</TALLYREQUEST>" in (c.kwargs.get("data") or b"").decode("utf-8", "ignore")
+        ]
+        self.assertEqual(len(import_calls), 0)
+
+    def test_reconcile_stock_quantity_uses_the_resolved_tally_unit_name(self):
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        mock_session = MagicMock()
+
+        list_units_resp = MagicMock()
+        list_units_resp.status_code = 200
+        list_units_resp.content = b"""<ENVELOPE><BODY><DATA><COLLECTION>
+            <UNIT><NAME>MTR</NAME><SYMBOL>Mtr</SYMBOL></UNIT>
+        </COLLECTION></DATA></BODY></ENVELOPE>"""
+
+        import_resp = MagicMock()
+        import_resp.status_code = 200
+        import_resp.content = b"<ENVELOPE><HEADER><VERSION>1</VERSION></HEADER><BODY><IMPORTRESULT><CREATED>1</CREATED><LASTVCHID>9</LASTVCHID></IMPORTRESULT></BODY></ENVELOPE>"
+
+        sent_bodies = []
+
+        def fake_post(url, data=None, headers=None, timeout=None):
+            body = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+            sent_bodies.append(body)
+            if "<ID>ListUnits</ID>" in body:
+                return list_units_resp
+            return import_resp
+
+        mock_session.post.side_effect = fake_post
+        client = TallyClient(cfg, session=mock_session)
+
+        client.reconcile_stock_quantity("Measuring Tape", 25, unit="Meter")
+
+        voucher_calls = [b for b in sent_bodies if "Physical Stock" in b]
+        self.assertEqual(len(voucher_calls), 1)
+        self.assertIn("25 MTR", voucher_calls[0])
 
 
 if __name__ == "__main__":

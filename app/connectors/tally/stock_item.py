@@ -30,8 +30,19 @@ def build_stock_item_xml(
     group_exists: bool = True,
     category_exists: bool = True,
     company_name: Optional[str] = None,
+    unit_override: Optional[str] = None,
 ) -> str:
-    """Builds full Tally STOCKITEM XML including prerequisites (Unit, StockGroup, StockCategory)."""
+    """
+    Builds full Tally STOCKITEM XML including prerequisites (Unit, StockGroup, StockCategory).
+
+    unit_override, when given, is the name of a Tally UNIT master that already
+    represents this item's RentAsst unit under a different name/symbol spelling (see
+    TallyClient.resolve_unit_name) — e.g. RentAsst "Meter" resolved to an existing
+    Tally unit "MTR". BASEUNITS and every rate/opening-balance field then reference
+    that existing unit directly instead of RentAsst's raw name, and no fresh <UNIT
+    ACTION="Create"> block is emitted for it (callers pass unit_exists=True alongside
+    an override for exactly this reason — there is nothing new to create).
+    """
     name = (data.get("name") or f"Item-{data.get('id')}").strip()
 
     # Unit of Measure & Symbol
@@ -46,8 +57,8 @@ def build_stock_item_xml(
         if "(" in raw_u and ")" in raw_u:
             unit_symbol = raw_u.split("(")[1].split(")")[0].strip()
 
-    unit = unit_name if unit_name else (unit_symbol or "Nos")
-    symbol_tag = f"\n            <SYMBOL>{escape_xml(unit_symbol)}</SYMBOL>" if unit_symbol else ""
+    unit = (unit_override or unit_name or unit_symbol or "Nos").strip()
+    symbol_tag = f"\n            <SYMBOL>{escape_xml(unit_symbol)}</SYMBOL>" if (unit_symbol and not unit_override) else ""
 
     # Stock Group
     group = "Primary"

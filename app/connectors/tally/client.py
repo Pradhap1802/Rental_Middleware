@@ -13,6 +13,7 @@ from .ledger import build_customer_ledger_xml
 from .stock_item import build_stock_item_xml, build_physical_stock_voucher_xml, build_unit_xml
 from .sales_voucher import build_sales_order_voucher_xml, build_sales_invoice_voucher_xml
 from .receipt_voucher import build_receipt_voucher_xml
+from .unit_match import resolve_existing_unit_name
 from ...logging.logger import log_event
 
 # Tally Prime's XML/HTTP server cannot safely handle overlapping requests — concurrent
@@ -109,6 +110,13 @@ class TallyClient:
         # "confirmed existing" per (entity_type, name) for this client's lifetime removes
         # that redundant traffic entirely instead of just pacing it.
         self._exists_cache: Dict[Tuple[str, str], bool] = {}
+
+        # All existing Tally UNIT masters (name + symbol), fetched once and cached for
+        # this client's lifetime — used by resolve_unit_name() to match a RentAsst unit
+        # against a Tally unit that already represents it under a different name/symbol
+        # spelling (RentAsst "Meter"/"m" vs Tally "MTR", RentAsst "Piece"/"pc" vs Tally
+        # "Pieces"), instead of blindly creating a duplicate. None until first fetched.
+        self._units_cache: Optional[List[Dict[str, str]]] = None
 
         # Set to True the moment auto-detection below (see
         # _send_voucher_with_edu_fallback) discovers this Tally company only accepts
@@ -260,17 +268,68 @@ class TallyClient:
             pass
         return False
 
+    def list_units(self) -> List[Dict[str, str]]:
+        """
+        Exports every existing Tally UNIT master (name + symbol), cached for this
+        client's lifetime. Used by resolve_unit_name() to find a unit Tally already has
+        that represents the same real-world unit as a RentAsst unit under a different
+        spelling — without this, a mismatch (RentAsst "Meter" vs Tally "MTR") was only
+        ever checked by exact name, so it silently created a second, duplicate UNIT
+        master every time instead of reusing the one Tally already had.
+        """
+        if self._units_cache is not None:
+            return self._units_cache
+        company_name = getattr(self.cfg, "tally_company_name", None)
+        xml = build_export_collection_envelope("ListUnits", "UNIT", "NAME, SYMBOL", company_name=company_name)
+        units: List[Dict[str, str]] = []
+        try:
+            r = _tally_post(self.session, self.base_url, xml.encode("utf-8"), timeout=10)
+            if r.status_code == 200:
+                clean = sanitize_tally_xml(r.content)
+                root = ET.fromstring(clean)
+                for unit_el in root.iter("UNIT"):
+                    name_el = unit_el.find("NAME")
+                    symbol_el = unit_el.find("SYMBOL")
+                    u_name = (name_el.text or "").strip() if name_el is not None and name_el.text else ""
+                    u_symbol = (symbol_el.text or "").strip() if symbol_el is not None and symbol_el.text else ""
+                    if u_name:
+                        units.append({"name": u_name, "symbol": u_symbol})
+        except Exception:
+            # A transient failure here isn't cached — resolve_unit_name() falls back to
+            # treating no unit as pre-existing, same as before this method existed.
+            return units
+        self._units_cache = units
+        return units
+
+    def resolve_unit_name(self, name: str, symbol: str = "") -> str:
+        """
+        Resolves a RentAsst unit to whichever Tally UNIT master should actually be
+        used: an existing one representing the same unit under a different name/symbol
+        spelling if one exists (see unit_match.resolve_existing_unit_name), otherwise
+        the RentAsst name itself, unchanged, for callers to create fresh exactly as
+        before this method existed.
+        """
+        clean_name = (name or "").strip()
+        if not clean_name:
+            return "Nos"
+        matched = resolve_existing_unit_name(clean_name, symbol, self.list_units())
+        return matched or clean_name
+
     def sync_unit(self, name: str, symbol: str = "") -> bool:
         """
         Pre-creates a single Tally UNIT master in its own isolated request, decoupled
         from any STOCKITEM import. Returns True if a Create was actually sent, False if
-        the unit was already known to exist (cached or freshly confirmed) — callers use
-        this to log/count how many units genuinely needed creating. A no-op for a blank
+        the unit was already known to exist (cached or freshly confirmed), OR if an
+        existing Tally unit already represents it under a different name/symbol
+        spelling (resolve_unit_name) — creating "Meter" when Tally already has "MTR"
+        would just leave Tally with two units for the same thing. A no-op for a blank
         name (RentAsst assets without an explicit unit fall back to "Nos" at the
         STOCKITEM layer, not here).
         """
         clean_name = (name or "").strip()
         if not clean_name:
+            return False
+        if self.resolve_unit_name(clean_name, symbol) != clean_name:
             return False
         if self.check_exists("unit", clean_name):
             return False
@@ -278,6 +337,8 @@ class TallyClient:
         xml = build_unit_xml(clean_name, symbol=symbol, action="Create", company_name=company_name)
         self.send_xml(xml, expect_voucher=False)
         self._mark_exists("unit", clean_name)
+        if self._units_cache is not None:
+            self._units_cache.append({"name": clean_name, "symbol": symbol})
         return True
 
     def sync_customer(self, data: Dict[str, Any]) -> str:
@@ -293,10 +354,22 @@ class TallyClient:
         name = (data.get("name") or f"Item-{data.get('id')}").strip()
 
         unit_name = "Nos"
+        unit_symbol = ""
         if isinstance(data.get("asset_unit"), dict):
             unit_name = (data["asset_unit"].get("name") or "Nos").strip()
+            unit_symbol = (data["asset_unit"].get("symbol") or "").strip()
         elif data.get("asset_unit_name"):
-            unit_name = data.get("asset_unit_name").split("(")[0].strip()
+            raw_u = data.get("asset_unit_name").strip()
+            unit_name = raw_u.split("(")[0].strip()
+            if "(" in raw_u and ")" in raw_u:
+                unit_symbol = raw_u.split("(")[1].split(")")[0].strip()
+
+        # Resolve against Tally's existing UNIT masters first — a spelling/abbreviation
+        # mismatch (RentAsst "Meter"/"m" vs an existing Tally unit "MTR", RentAsst
+        # "Piece"/"pc" vs an existing Tally unit "Pieces") must reuse the unit Tally
+        # already has as BASEUNITS, not create a second, duplicate one.
+        resolved_unit_name = self.resolve_unit_name(unit_name, unit_symbol)
+        matched_existing_unit = resolved_unit_name != unit_name
 
         group = "Primary"
         if isinstance(data.get("asset_category"), dict) and data.get("asset_category", {}).get("name"):
@@ -306,7 +379,7 @@ class TallyClient:
         if isinstance(data.get("asset_brand"), dict) and data.get("asset_brand", {}).get("name"):
             category = data["asset_brand"]["name"].strip()
 
-        unit_exists = self.check_exists("unit", unit_name)
+        unit_exists = matched_existing_unit or self.check_exists("unit", resolved_unit_name)
         # Always verify group existence in Tally — even 'Primary' may not exist as an explicit
         # named STOCKGROUP in the company, causing Tally to reject the STOCKITEM with
         # "Stock Group 'Primary' does not exist!"
@@ -324,6 +397,7 @@ class TallyClient:
             group_exists=group_exists,
             category_exists=category_exists,
             company_name=company_name,
+            unit_override=resolved_unit_name,
         )
         result = self.send_xml(xml)
 
@@ -333,7 +407,7 @@ class TallyClient:
         # same sync cycle sharing the same unit/group/category then skips re-checking
         # and re-sending a Create for it entirely.
         if not unit_exists:
-            self._mark_exists("unit", unit_name)
+            self._mark_exists("unit", resolved_unit_name)
         if group and not group_exists:
             self._mark_exists("stockgroup", group)
         if category and not category_exists:
@@ -357,14 +431,21 @@ class TallyClient:
         from Sales vouchers consuming stock there, not from RentAsst-side edits, so a
         content-hash "nothing changed, skip" check (as run_sync_pipeline applies to the
         STOCKITEM master push) would never catch it.
+
+        `unit` is resolved against Tally's existing UNIT masters before being sent —
+        the STOCKITEM's BASEUNITS was itself resolved the same way in sync_equipment(),
+        so ACTUALQTY/BILLEDQTY here must name that same Tally unit, not RentAsst's raw
+        spelling, or Tally rejects/mismatches the voucher against the item's actual
+        base unit.
         """
         if quantity is None:
             return
         try:
+            resolved_unit = self.resolve_unit_name(unit)
             company_name = getattr(self.cfg, "tally_company_name", None)
             self._send_voucher_with_edu_fallback(
                 lambda edu_mode: build_physical_stock_voucher_xml(
-                    item_name=item_name, quantity=quantity, unit=unit, company_name=company_name, edu_mode=edu_mode,
+                    item_name=item_name, quantity=quantity, unit=resolved_unit, company_name=company_name, edu_mode=edu_mode,
                 )
             )
         except Exception as e:
