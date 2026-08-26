@@ -363,7 +363,25 @@ class RentAsstClient:
             url = f"{self.base_url}/{endpoint.lstrip('/')}"
             try:
                 r = self.session.get(url, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
-                if r.status_code in (200, 204):
+                if r.status_code not in (200, 204):
+                    continue
+                # Not every endpoint tried above is a real API route for every entity
+                # (e.g. 'customers/{id}' and 'invoice/{id}' aren't real RentAsst routes —
+                # only 'customer/{id}' and 'invoices/{id}' are) — confirmed live, an
+                # invalid path falls through to the SPA's catch-all route, which returns
+                # HTTP 200 with a generic HTML shell instead of a 404. A raw status-code
+                # check alone treats that HTML page as "record exists", which is exactly
+                # backwards: it masks a genuinely deleted record as still present and
+                # blocks any self-healing (re-create) logic keyed off this check forever.
+                # A real API response is always JSON; require that before trusting a 200.
+                try:
+                    data = r.json()
+                except ValueError:
+                    continue
+                payload = data.get("data", data) if isinstance(data, dict) else data
+                if isinstance(payload, dict) and payload:
+                    return True
+                if isinstance(payload, list) and payload:
                     return True
             except Exception:
                 pass
