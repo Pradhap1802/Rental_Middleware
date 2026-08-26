@@ -1123,9 +1123,17 @@ class TestEquipmentReverseSync(unittest.TestCase):
         self.assertEqual(stats["created"], 1)
 
     def test_never_pushes_updates_onto_a_forward_owned_asset_with_matching_name(self):
-        """The critical safety boundary: an asset found only via a live name match (no
+        """
+        The critical safety boundary: an asset found only via a live name match (no
         reverse-sync mapping) must never get update_equipment called on it, regardless of
-        how different its Tally-side HSN/GST/quantity looks."""
+        how different its Tally-side HSN/GST/quantity looks. Also must NOT persist any
+        mapping row for this case — confirmed live this was a second, worse bug: a
+        mapping saved here as source_system="tally" is the exact shape
+        run_sync_pipeline's forward-sync guard (app/sync/base.py) reads as "this record
+        originated in Tally, never forward-sync it again", which silently blackholed ALL
+        future forward-sync GST/price/quantity updates for a real RentAsst-native asset
+        ('Dell Laptop') the moment reverse sync ever looked at it once.
+        """
         mock_ra_client = MagicMock()
         mock_ra_client.fetch_equipment.return_value = [{"id": 1, "name": "Dell Laptop"}]
 
@@ -1139,15 +1147,17 @@ class TestEquipmentReverseSync(unittest.TestCase):
         mock_ra_client.push_equipment.assert_not_called()
         mock_ra_client.update_equipment.assert_not_called()
         self.assertEqual(stats["skipped"], 1)
+        self.assertIsNone(self.store.find_mapping("equipment", "Dell Laptop"))
 
-        # Second run must ALSO never touch it — the cached mapping (saved without a hash)
-        # must keep resolving to "forward-owned, skip", not fall through to update.
+        # Second run must ALSO never touch it — re-scanning by name every cycle (since
+        # nothing is cached) must keep resolving to "forward-owned, skip".
         mock_ra_client.reset_mock()
         mock_ra_client.fetch_equipment.return_value = [{"id": 1, "name": "Dell Laptop"}]
         stats2 = self._run_sync(mock_ra_client, stock_item)
         mock_ra_client.update_equipment.assert_not_called()
         mock_ra_client.push_equipment.assert_not_called()
         self.assertEqual(stats2["skipped"], 1)
+        self.assertIsNone(self.store.find_mapping("equipment", "Dell Laptop"))
 
     def test_updates_a_reverse_owned_asset_when_hsn_gst_quantity_or_rent_price_changes(self):
         self.store.save_mapping(

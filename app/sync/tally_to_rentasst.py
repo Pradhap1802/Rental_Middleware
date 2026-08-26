@@ -664,15 +664,20 @@ def sync_tally_to_rentasst(
                     # quantity/skip_inventory onto a forward-owned asset with real rental
                     # history fails with RentAsst's own business rule ("Asset has inventory
                     # history. Archive stock first before disabling inventory tracking.").
-                    # Record the mapping (cheap lookup next cycle, avoids a duplicate
-                    # create) but deliberately WITHOUT a hash — last_synced_hash is the
-                    # ownership marker (see is_reverse_owned below): only a mapping this
-                    # loop's own create/update path wrote one for is safe to push updates
-                    # onto later.
-                    store.save_mapping(
-                        entity_type="equipment", source_id=item_name, target_id=ra_id,
-                        source_system="tally", target_system="rentasst",
-                    )
+                    #
+                    # Deliberately NOT persisting a mapping here (unlike every other
+                    # "found, remember it" branch in this file) — confirmed live this is
+                    # not just a missed optimization: a mapping row here, keyed
+                    # source_system="tally" targeting this RentAsst id, is EXACTLY the
+                    # shape run_sync_pipeline's forward-sync guard (app/sync/base.py) reads
+                    # to mean "this record originated in Tally, never push it forward again"
+                    # — writing one for a RentAsst-native asset silently blackholed ALL
+                    # future forward-sync updates (GST rate, rental price, anything) for
+                    # it, because the guard can't distinguish "Tally created this" from
+                    # "reverse sync is just remembering not to touch this." Re-scanning
+                    # RentAsst's equipment list by name every cycle for this one item is
+                    # the safe (if slightly less efficient) alternative — no cross-
+                    # direction ownership signal gets corrupted.
                     stats["skipped"] += 1
                     continue
 
