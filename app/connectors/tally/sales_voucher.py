@@ -12,6 +12,20 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
     without it, Tally rejects this voucher type with EXCEPTIONS>0 (confirmed live). This
     is a Tally application setting the client must enable; the middleware cannot toggle it.
 
+    Item lines go in a top-level ALLINVENTORYENTRIES.LIST (a sibling of
+    ALLLEDGERENTRIES.LIST, directly under VOUCHER) — NOT nested inside a ledger entry as
+    INVENTORYALLOCATIONS.LIST, which is the accounting-invoice shape, not what this
+    company's "Invoice Voucher View" Sales Order type expects. Confirmed both live and
+    against a real Tally-exported Sales Order (see REAL_SALES_ORDER_XML in
+    tests/test_tally_fetcher.py, captured from this same company): an order with no
+    items succeeds either way, but the moment an item line is added, the
+    INVENTORYALLOCATIONS.LIST-nested shape gets rejected outright with a misleading
+    "Bad Order Number in Voucher!" on every single attempt regardless of voucher
+    number, batch allocation, or order-due-date fields — while the real captured
+    export shows Tally itself always uses ALLINVENTORYENTRIES.LIST for this voucher
+    type. None of this company's stock items are batch-tracked (confirmed live), so
+    BATCHALLOCATIONS.LIST is dropped along with it — the real export doesn't send it.
+
     Invoice sync (build_sales_invoice_voucher_xml) references this order's VOUCHERNUMBER
     via ORDERALLOCATIONS.LIST so Tally can track fulfillment from order to invoice.
     """
@@ -46,7 +60,7 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
             </ALLLEDGERENTRIES.LIST>"""
 
     items = data.get("rent_items") or data.get("items") or data.get("assets") or data.get("details") or []
-    inventory_allocations = ""
+    inventory_entries = ""
     if isinstance(items, list) and len(items) > 0:
         for item in items:
             if isinstance(item, dict):
@@ -57,28 +71,21 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
                 item_total = float(item.get("total_price") or item.get("amount") or item.get("total") or (price * qty))
                 unit = item.get("unit") or "Nos"
 
-                inventory_allocations += f"""
-              <INVENTORYALLOCATIONS.LIST>
-                <STOCKITEMNAME>{escape_xml(item_name)}</STOCKITEMNAME>
-                <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
-                <RATE>{price:.2f}/{escape_xml(unit)}</RATE>
-                <AMOUNT>{item_total:.2f}</AMOUNT>
-                <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
-                <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
-                <BATCHALLOCATIONS.LIST>
-                  <GODOWNNAME>Main Location</GODOWNNAME>
-                  <BATCHNAME>Primary Batch</BATCHNAME>
-                  <AMOUNT>{item_total:.2f}</AMOUNT>
-                  <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
-                  <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
-                </BATCHALLOCATIONS.LIST>
-              </INVENTORYALLOCATIONS.LIST>"""
+                inventory_entries += f"""
+            <ALLINVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>{escape_xml(item_name)}</STOCKITEMNAME>
+              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+              <RATE>{price:.2f}/{escape_xml(unit)}</RATE>
+              <AMOUNT>{item_total:.2f}</AMOUNT>
+              <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
+              <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
+            </ALLINVENTORYENTRIES.LIST>"""
 
     sales_entry = f"""
             <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>Sales Account</LEDGERNAME>
               <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
-              <AMOUNT>{amount:.2f}</AMOUNT>{inventory_allocations}
+              <AMOUNT>{amount:.2f}</AMOUNT>
             </ALLLEDGERENTRIES.LIST>"""
 
     msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="Sales Order" ACTION="{action}" REMOTEID="RENTAL-ORD-{data.get('id')}">
@@ -88,7 +95,7 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
             <VOUCHERTYPENAME>Sales Order</VOUCHERTYPENAME>
             <VOUCHERNUMBER>{escape_xml(num)}</VOUCHERNUMBER>
             <NARRATION>RENTAL-ORD-{data.get('id')}</NARRATION>
-            <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{party_entry}{sales_entry}
+            <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{inventory_entries}{party_entry}{sales_entry}
           </VOUCHER>"""
 
     return build_import_envelope(msg, report_name="Vouchers", company_name=company_name)

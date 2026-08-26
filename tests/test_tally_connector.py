@@ -6,7 +6,7 @@ from app.connectors.tally.xml_builder import sanitize_tally_xml, escape_xml, for
 from app.connectors.tally.parser import validate_tally_accounting_success
 from app.connectors.tally.client import TallyClient
 from app.connectors.tally.ledger import build_customer_ledger_xml
-from app.connectors.tally.sales_voucher import build_sales_invoice_voucher_xml
+from app.connectors.tally.sales_voucher import build_sales_invoice_voucher_xml, build_sales_order_voucher_xml
 from app.connectors.tally.receipt_voucher import build_receipt_voucher_xml
 from app.connectors.tally.stock_item import build_physical_stock_voucher_xml
 from app.connectors.tally.unit_match import resolve_existing_unit_name
@@ -659,6 +659,57 @@ class TestTallyClientUnitResolution(unittest.TestCase):
         voucher_calls = [b for b in sent_bodies if "Physical Stock" in b]
         self.assertEqual(len(voucher_calls), 1)
         self.assertIn("25 MTR", voucher_calls[0])
+
+
+class TestSalesOrderVoucherInventoryShape(unittest.TestCase):
+    """
+    Confirmed live against a real Tally company: a Sales Order voucher with no items
+    succeeds, but the moment an item line was sent as INVENTORYALLOCATIONS.LIST nested
+    inside the "Sales Account" ALLLEDGERENTRIES.LIST entry (the accounting-invoice
+    shape), Tally rejected it outright with a misleading "Bad Order Number in
+    Voucher!" — reproduced on every attempt, regardless of voucher number, batch
+    allocation, or an added order-due-date field. A real Tally-exported Sales Order
+    (REAL_SALES_ORDER_XML in tests/test_tally_fetcher.py, captured from this same
+    company) shows Tally itself always uses a top-level ALLINVENTORYENTRIES.LIST — a
+    sibling of ALLLEDGERENTRIES.LIST, not nested inside one. The builder must match
+    that shape, and must not send BATCHALLOCATIONS.LIST at all (this company's stock
+    items aren't batch-tracked).
+    """
+
+    def test_item_lines_use_top_level_allinventoryentries_not_nested_allocations(self):
+        xml = build_sales_order_voucher_xml({
+            "id": 2, "number": "R100001", "customer_name": "Test", "grand_total": 114,
+            "items": [{"name": "Moto G45", "quantity": 1, "price": 97, "total_price": 97, "unit": "Piece"}],
+        })
+        self.assertIn("<ALLINVENTORYENTRIES.LIST>", xml)
+        self.assertIn("<STOCKITEMNAME>Moto G45</STOCKITEMNAME>", xml)
+        self.assertNotIn("INVENTORYALLOCATIONS.LIST", xml)
+        self.assertNotIn("BATCHALLOCATIONS.LIST", xml)
+
+        # ALLINVENTORYENTRIES.LIST must not be nested inside an ALLLEDGERENTRIES.LIST —
+        # it has to appear before the first ledger entry, as a sibling under VOUCHER.
+        self.assertLess(xml.index("<ALLINVENTORYENTRIES.LIST>"), xml.index("<ALLLEDGERENTRIES.LIST>"))
+
+    def test_multiple_items_produce_multiple_sibling_inventory_entries(self):
+        xml = build_sales_order_voucher_xml({
+            "id": 7, "number": "R100004", "customer_name": "Test", "grand_total": 560,
+            "items": [
+                {"name": "Dell Laptop Bag", "quantity": 1, "price": 10, "total_price": 20, "unit": "Piece"},
+                {"name": "Dell Keyboard", "quantity": 1, "price": 20, "total_price": 40, "unit": "Piece"},
+                {"name": "Dell Laptop 3440", "quantity": 1, "price": 250, "total_price": 500, "unit": "Piece"},
+            ],
+        })
+        self.assertEqual(xml.count("<ALLINVENTORYENTRIES.LIST>"), 3)
+        self.assertIn("Dell Laptop Bag", xml)
+        self.assertIn("Dell Keyboard", xml)
+        self.assertIn("Dell Laptop 3440", xml)
+
+    def test_order_with_no_items_has_no_inventory_block_at_all(self):
+        xml = build_sales_order_voucher_xml({
+            "id": 13, "number": "R100009", "customer_name": "Test", "grand_total": 270,
+        })
+        self.assertNotIn("ALLINVENTORYENTRIES.LIST", xml)
+        self.assertIn("<ALLLEDGERENTRIES.LIST>", xml)
 
 
 if __name__ == "__main__":
