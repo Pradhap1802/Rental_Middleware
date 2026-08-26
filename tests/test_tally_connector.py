@@ -686,7 +686,7 @@ class TestSalesOrderVoucherInventoryShape(unittest.TestCase):
             "id": 2, "number": "R100001", "customer_name": "Test", "grand_total": 114,
             "items": [{"name": "Moto G45", "quantity": 1, "price": 97, "total_price": 97, "unit": "Piece"}],
         })
-        self.assertIn("<VOUCHER VTYPE=\"Sales\" ACTION=\"Create\"", xml)
+        self.assertIn("<VOUCHER VTYPE=\"RentAsst Sales\" ACTION=\"Create\"", xml)
         self.assertIn("<INVENTORYALLOCATIONS.LIST>", xml)
         self.assertIn("<STOCKITEMNAME>Moto G45</STOCKITEMNAME>", xml)
         self.assertNotIn("ALLINVENTORYENTRIES.LIST>", xml)
@@ -726,10 +726,11 @@ class TestSalesOrderVoucherInventoryShape(unittest.TestCase):
         self.assertNotIn("INVENTORYALLOCATIONS.LIST", xml)
         self.assertIn("<ALLLEDGERENTRIES.LIST>", xml)
 
-    def test_leftover_amount_over_item_subtotal_is_booked_as_gst(self):
-        # grand_total=236 vs items summing to 200 -> the 36 leftover must appear as
-        # CGST/SGST, and the Sales Account ledger's own amount must stay at 200 (not
-        # the mismatched 236) to keep the voucher's ledger entries internally balanced.
+    def test_leftover_amount_over_item_subtotal_is_booked_as_gst_when_no_gst_percent_given(self):
+        # No `gst` field on this order -> falls back to deriving tax from the gap
+        # between grand_total (236) and the item subtotal (200): the 36 leftover must
+        # appear as CGST/SGST, and the Sales Account ledger's own amount must stay at
+        # 200 (not the mismatched 236) to keep the voucher's ledger entries balanced.
         xml = build_sales_order_voucher_xml({
             "id": 2, "number": "R100001", "customer_name": "Test", "grand_total": 236,
             "items": [
@@ -741,6 +742,65 @@ class TestSalesOrderVoucherInventoryShape(unittest.TestCase):
         self.assertIn("<LEDGERNAME>CGST</LEDGERNAME>", xml)
         self.assertIn("<LEDGERNAME>SGST</LEDGERNAME>", xml)
         self.assertIn("<AMOUNT>18.00</AMOUNT>", xml)
+
+    def test_gst_computed_from_real_percentage_field_not_derived_from_total(self):
+        """
+        Confirmed live: rental_order payloads carry a real `gst` percentage field
+        (e.g. "gst": 18) but grand_total can include non-taxable extras (shipping,
+        labour, deposit) the item lines don't cover — deriving tax as
+        (amount - item_subtotal) silently misbooked those extras as GST. When `gst`
+        is present, tax must instead be item_subtotal * gst% exactly, and the party/
+        bill amount recomputed from that (item_subtotal + tax), not trusted from
+        grand_total.
+        """
+        xml = build_sales_order_voucher_xml({
+            "id": 2, "number": "R100001", "customer_name": "Test", "grand_total": 300,
+            "gst": 18, "cgst": 18, "sgst": 18,  # RentAsst mirrors the same 18% into all three
+            "items": [
+                {"name": "Dell Laptop", "quantity": 1, "price": 150, "total_price": 150, "unit": "Piece"},
+                {"name": "Dell Mouse", "quantity": 1, "price": 50, "total_price": 50, "unit": "Piece"},
+            ],
+        })
+        # item_subtotal=200, 18% of 200 = 36 (NOT 300-200=100, which would double-count
+        # grand_total's non-taxable extras as GST).
+        self.assertIn("<AMOUNT>200.00</AMOUNT>", xml)
+        self.assertIn("<AMOUNT>18.00</AMOUNT>", xml)
+        self.assertIn("<AMOUNT>-236.00</AMOUNT>", xml)
+        self.assertNotIn("<AMOUNT>-300.00</AMOUNT>", xml)
+
+
+class TestSalesOrderVoucherTypeAndNumbering(unittest.TestCase):
+    """
+    Confirmed live: the reserved "Sales" voucher type's NUMBERINGMETHOD is "Default"
+    (Tally's built-in automatic numbering) — every custom VOUCHERNUMBER sent to it was
+    silently discarded and replaced with Tally's own sequential number (sent
+    "R1-CUSTOM-99", Tally stored "5"). build_sales_order_voucher_xml self-heals a
+    dedicated "RentAsst Sales" voucher type (NUMBERINGMETHOD="Manual") the same way it
+    self-heals prereq ledgers, so RentAsst's real order number is actually preserved
+    (confirmed live: the same custom number came back unchanged under this type).
+    """
+
+    def test_creates_dedicated_manual_numbering_voucher_type(self):
+        xml = build_sales_order_voucher_xml({
+            "id": 2, "number": "R100001", "customer_name": "Test", "grand_total": 236,
+        })
+        self.assertIn('<VOUCHERTYPE NAME="RentAsst Sales" ACTION="Create">', xml)
+        self.assertIn("<PARENT>Sales</PARENT>", xml)
+        self.assertIn("<NUMBERINGMETHOD>Manual</NUMBERINGMETHOD>", xml)
+
+    def test_voucher_uses_the_dedicated_type_not_the_shared_reserved_sales_type(self):
+        xml = build_sales_order_voucher_xml({
+            "id": 2, "number": "R100001", "customer_name": "Test", "grand_total": 236,
+        })
+        self.assertIn('<VOUCHER VTYPE="RentAsst Sales" ACTION="Create"', xml)
+        self.assertIn("<VOUCHERTYPENAME>RentAsst Sales</VOUCHERTYPENAME>", xml)
+        self.assertNotIn('VTYPE="Sales"', xml)
+
+    def test_rentasst_order_number_is_sent_as_the_voucher_number(self):
+        xml = build_sales_order_voucher_xml({
+            "id": 2, "number": "R100001-CUSTOM", "customer_name": "Test", "grand_total": 236,
+        })
+        self.assertIn("<VOUCHERNUMBER>R100001-CUSTOM</VOUCHERNUMBER>", xml)
 
 
 if __name__ == "__main__":

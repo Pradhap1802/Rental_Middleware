@@ -42,15 +42,27 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
     INVENTORYALLOCATIONS.LIST lines, or Tally rejects the whole voucher (confirmed
     live — this is what broke the first version of this fix: it put the GST-inclusive
     order `amount` on the ledger entry while the item lines only summed to the
-    pre-tax subtotal). So the item subtotal goes on Sales Account, and any leftover
-    (amount - item subtotal) — RentAsst's rental_order payload doesn't break GST into
-    CGST/SGST/IGST the way invoices do, just a flat `gst` percentage, and doesn't
-    include customer state either — is booked as an even CGST/SGST split (the same
-    domestic-default assumption build_sales_invoice_voucher_xml falls back to when it
-    has no real breakdown), reusing the same CGST/SGST ledger definitions. A single
-    ad-hoc "GST" ledger without a GSTDUTYHEAD was tried first and rejected by Tally
-    (confirmed live — CREATED climbed by 1 for the new ledger master but the voucher
-    itself still landed in EXCEPTIONS); CGST/SGST already carry a valid GSTDUTYHEAD.
+    pre-tax subtotal). So the item subtotal goes on Sales Account, and GST is computed
+    from RentAsst's own `gst` percentage field applied to that subtotal — NOT derived
+    as (amount - item subtotal), which was wrong whenever grand_total included
+    non-taxable extras (shipping/labour/deposit): that leftover silently got booked as
+    GST too. Split evenly as CGST/SGST (the rental_order payload has no customer state
+    to determine IGST vs CGST/SGST, same limitation build_sales_invoice_voucher_xml
+    has for its own no-breakdown fallback). A single ad-hoc "GST" ledger without a
+    GSTDUTYHEAD was tried first and rejected by Tally (confirmed live — CREATED
+    climbed by 1 for the new ledger master but the voucher itself still landed in
+    EXCEPTIONS); CGST/SGST already carry a valid GSTDUTYHEAD.
+
+    Uses a dedicated "RentAsst Sales" voucher type (a child of the reserved "Sales"
+    type, self-healing via ACTION="Create" the same way prereq ledgers are), not
+    "Sales" directly. Confirmed live: the reserved "Sales" voucher type's
+    NUMBERINGMETHOD is "Default" (Tally's built-in automatic numbering) — every custom
+    VOUCHERNUMBER sent to it was silently discarded and replaced with Tally's own
+    sequential number (e.g. we sent "R1-CUSTOM-99", Tally stored "5"). Altering the
+    shared reserved "Sales" type would change numbering behavior for every voucher the
+    company's own accountant enters by hand too, so instead this dedicated type is
+    created once with NUMBERINGMETHOD="Manual", which Tally then honors exactly
+    (confirmed live: the same "R1-CUSTOM-99" number came back unchanged).
     """
     num = (
         data.get("number") or data.get("rent_code") or data.get("rent_number")
@@ -89,15 +101,32 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
                 <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
                 <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
               </INVENTORYALLOCATIONS.LIST>"""
-    if not item_subtotal:
-        item_subtotal = amount
 
-    tax_amount = round(amount - item_subtotal, 2)
-    if tax_amount < 0:
+    gst_percent = _resolve_order_gst_percent(data)
+    if item_subtotal > 0 and gst_percent > 0:
+        tax_amount = round(item_subtotal * gst_percent / 100.0, 2)
+        amount = round(item_subtotal + tax_amount, 2)
+    elif item_subtotal > 0:
+        # RentAsst didn't report a usable GST rate, but there's still a real gap
+        # between the item subtotal and the order's total amount (grand_total
+        # commonly already includes tax even when the rate itself isn't broken out) —
+        # keep the voucher balanced by booking that gap as tax, same as before this
+        # fix, rather than silently dropping it and leaving party != Sales Account.
+        tax_amount = round(amount - item_subtotal, 2)
+        if tax_amount < 0:
+            tax_amount = 0.0
+            item_subtotal = amount
+    else:
+        # A header-only order with no items to apply a percentage to.
         tax_amount = 0.0
         item_subtotal = amount
 
-    prereq_ledgers = f"""          <LEDGER NAME="{escape_xml(cust_name)}" ACTION="Create">
+    prereq_ledgers = f"""          <VOUCHERTYPE NAME="RentAsst Sales" ACTION="Create">
+            <NAME>RentAsst Sales</NAME>
+            <PARENT>Sales</PARENT>
+            <NUMBERINGMETHOD>Manual</NUMBERINGMETHOD>
+          </VOUCHERTYPE>
+          <LEDGER NAME="{escape_xml(cust_name)}" ACTION="Create">
             <NAME>{escape_xml(cust_name)}</NAME>
             <PARENT>Sundry Debtors</PARENT>
           </LEDGER>
@@ -154,17 +183,40 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
               <AMOUNT>{sgst_val:.2f}</AMOUNT>
             </ALLLEDGERENTRIES.LIST>"""
 
-    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="Sales" ACTION="{action}" REMOTEID="RENTAL-ORD-{data.get('id')}">
+    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="RentAsst Sales" ACTION="{action}" REMOTEID="RENTAL-ORD-{data.get('id')}">
             <REMOTEID>RENTAL-ORD-{data.get('id')}</REMOTEID>
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
-            <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+            <VOUCHERTYPENAME>RentAsst Sales</VOUCHERTYPENAME>
             <VOUCHERNUMBER>{escape_xml(num)}</VOUCHERNUMBER>
             <NARRATION>RENTAL-ORD-{data.get('id')}</NARRATION>
             <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{party_entry}{sales_entry}{tax_entry}
           </VOUCHER>"""
 
     return build_import_envelope(msg, report_name="Vouchers", company_name=company_name)
+
+
+def _resolve_order_gst_percent(data: Dict[str, Any]) -> float:
+    """
+    RentAsst's rental_order payload carries GST as a flat percentage, under a few
+    possible field names (confirmed live: real orders use `gst`, e.g. `"gst": 18`) —
+    unlike invoices, it never reports actual CGST/SGST/IGST amounts, so there is no
+    amount-based path here the way build_sales_invoice_voucher_xml has. `cgst`/`sgst`
+    are deliberately NOT combined into a sum: confirmed live, a real order reported
+    `"gst": 18, "cgst": 18, "sgst": 18` all as the SAME 18% figure (not 9+9), so
+    treating them as independent additive components would double-count the rate.
+    """
+    for key in ("gst", "gst_percent", "gst_percentage", "gst_rate", "tax_percent"):
+        raw = data.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            pct = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if pct > 0:
+            return pct
+    return 0.0
 
 
 def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create", company_state: str = "", company_name: Optional[str] = None, edu_mode: bool = False) -> str:
