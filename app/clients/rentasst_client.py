@@ -583,6 +583,20 @@ class RentAsstClient:
         """Push a customer master from Tally to RentAsst Cloud API."""
         return self._post_with_fallback(["customer", "customers"], customer_data)
 
+    def update_customer(self, customer_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Update an existing RentAsst customer with corrected Tally-side contact/GST/address
+        details — used when a customer's Tally ledger changes after its first reverse sync
+        (mirrors update_equipment's pattern for the same reason)."""
+        url = f"{self.base_url}/customer/{customer_id}"
+        update_payload = dict(payload)
+        if str(customer_id).isdigit():
+            update_payload["id"] = int(customer_id)
+
+        r = self.session.put(url, json=update_payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("data", data) if isinstance(data, dict) else data
+
     def push_equipment(self, equipment_data: Dict[str, Any]) -> Dict[str, Any]:
         """Push an equipment/asset record from Tally to RentAsst Cloud API."""
         return self._post_with_fallback(["asset", "equipment", "assets"], equipment_data)

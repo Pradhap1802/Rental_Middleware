@@ -19,6 +19,77 @@ def _synthetic_mobile_number(name: str) -> str:
     digest = hashlib.md5(name.encode("utf-8")).hexdigest()
     return f"900{int(digest, 16) % 10000000:07d}"
 
+
+def _extract_primary_mobile(ledger: Dict[str, Any], cust_name: str) -> str:
+    """
+    LEDGERMOBILE is Tally's own single, clean primary-mobile field — the forward sync
+    (RentAsst -> Tally) always writes it as one plain number, unlike LEDGERPHONE, which
+    it writes as every mobile/alternate-mobile RentAsst has joined with ", " (e.g.
+    "08056997998, 08056997998"). Confirmed live: stripping non-digits from that whole
+    joined LEDGERPHONE string concatenates every number into one garbled value (e.g.
+    "0805699799808056997998"), which is exactly what reverse sync was pushing back to
+    RentAsst as this customer's mobile — a real but different-looking number, not the
+    customer's actual one. LEDGERMOBILE must be preferred; only fall back to the FIRST
+    comma-separated segment of LEDGERPHONE (never the whole string) for a ledger with no
+    LEDGERMOBILE, and only fall back to a synthetic placeholder if neither has a usable
+    number at all.
+    """
+    clean_mobile = re.sub(r"\D", "", str(ledger.get("mobile") or ""))
+    if len(clean_mobile) >= 10:
+        return clean_mobile
+    first_phone_segment = str(ledger.get("phone") or "").split(",")[0]
+    clean_phone = re.sub(r"\D", "", first_phone_segment)
+    if len(clean_phone) >= 10:
+        return clean_phone
+    return _synthetic_mobile_number(cust_name)
+
+
+def _extract_address_payload(ledger: Dict[str, Any]) -> Optional[list]:
+    """
+    Builds a RentAsst-shaped address list from a Tally ledger's ADDRESS.LIST/PINCODE/
+    COUNTRYNAME/LEDSTATENAME fields — reverse sync never fetched or pushed any of these
+    before, so a customer's address was never synced back from Tally at all, only
+    created blank. Tally's ADDRESS.LIST is free-text lines with no city/street split, so
+    the best available structure is all lines joined into address1, with the
+    city/state/country/pincode RentAsst does track kept in their own separate fields.
+    Returns None (omit the field entirely) when Tally has no address data at all, rather
+    than pushing an empty address object that would overwrite a real one already in
+    RentAsst with nothing.
+    """
+    lines = ledger.get("address_lines") or []
+    state = ledger.get("state") or ""
+    country = ledger.get("country") or ""
+    pincode = ledger.get("pincode") or ""
+    if not lines and not state and not country and not pincode:
+        return None
+    return [{
+        "address1": ", ".join(lines),
+        "city": "",
+        "state": state,
+        "country": country,
+        "zipcode": pincode,
+        "is_default": True,
+    }]
+
+
+def _customer_contact_hash(mobile: str, email: str, gst_number: str, address: Optional[list]) -> str:
+    """
+    Hashes the Tally-side fields this reverse sync is responsible for keeping RentAsst's
+    customer record in sync with. Without this, a customer whose mapping already exists
+    (created either by an earlier reverse sync or by the forward sync originally) was
+    skipped unconditionally the moment a mapping was found — confirmed live: a mobile
+    number corrected in Tally, a GST number added later, or an address filled in after
+    the customer's first sync never reached RentAsst at all, because the loop `continue`d
+    before any of these fields were ever looked at again. Comparing this hash against
+    what was last pushed lets an unrelated Tally ledger edit still resolve to "unchanged,
+    skip" while a genuine contact/GST/address change resolves to "push an update".
+    """
+    raw = json.dumps(
+        {"mobile": mobile, "email": email, "gst_number": gst_number, "address": address},
+        sort_keys=True, ensure_ascii=False,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
 # REMOTEID prefixes the forward (RentAsst -> Tally) sync stamps onto every voucher it
 # creates (see build_sales_order_voucher_xml / build_sales_invoice_voucher_xml /
 # build_receipt_voucher_xml). Any Tally voucher carrying one of these already
@@ -364,44 +435,83 @@ def sync_tally_to_rentasst(
             if not cust_name:
                 continue
 
-            cached_id = store.get_rentasst_id("customer", cust_name)
-            if cached_id:
+            mobile_number = _extract_primary_mobile(l, cust_name)
+            address_payload = _extract_address_payload(l)
+            email = l.get("email") or ""
+            gst_number = l.get("gstin") or ""
+            current_hash = _customer_contact_hash(mobile_number, email, gst_number, address_payload)
+
+            # Resolve which RentAsst customer this Tally ledger already maps to, if any —
+            # via a mapping this reverse sync saved earlier (find_mapping matches by
+            # source_id, which a prior reverse-sync create/update sets to the Tally
+            # ledger name — get_rentasst_id/find_by_target do NOT work here since they
+            # match by target_id/external_id, which hold the RentAsst id, not the Tally
+            # name) or, failing that, by name against RentAsst's own live customer list
+            # (covers a customer that already exists there from before this mapping
+            # tracking, or was created outside this middleware).
+            #
+            # Either way, a match used to mean "skip forever, no matter what changes in
+            # Tally afterward" — confirmed live: a customer's mobile number, GST number,
+            # and address never reached RentAsst even after being corrected/added in
+            # Tally well after the customer's first sync, because both paths returned
+            # unconditionally the moment a match was found, before any field was ever
+            # compared against what was last pushed.
+            existing_mapping = store.find_mapping("customer", cust_name)
+            ra_id = (existing_mapping or {}).get("target_id") or (existing_mapping or {}).get("external_id")
+
+            if not ra_id:
+                try:
+                    cloud_custs = ra_client.fetch_customers()
+                    if isinstance(cloud_custs, list):
+                        for c in cloud_custs:
+                            if (c.get("name") or "").strip().lower() == cust_name.lower():
+                                ra_id = str(c.get("id"))
+                                break
+                except Exception:
+                    pass
+
+            if ra_id:
+                stored_hash = (existing_mapping or {}).get("last_synced_hash") or (existing_mapping or {}).get("last_hash")
+                if stored_hash == current_hash:
+                    stats["skipped"] += 1
+                    continue
+                stats["processed"] += 1
+                try:
+                    update_payload = {"mobile": mobile_number, "email": email, "gst_number": gst_number}
+                    if address_payload is not None:
+                        update_payload["address"] = address_payload
+                    ra_client.update_customer(ra_id, update_payload)
+                    store.save_mapping(
+                        entity_type="customer",
+                        source_id=cust_name,
+                        target_id=ra_id,
+                        source_system="tally",
+                        target_system="rentasst",
+                        last_synced_hash=current_hash,
+                    )
+                    store.add_history(
+                        "customer", ra_id, "synced", external_id=cust_name,
+                        details="Tally Customer Reverse Sync (updated contact/GST/address)",
+                    )
+                    stats["updated"] += 1
+                except Exception as e:
+                    stats["failed"] += 1
+                    log_event("ReverseSync", f"Failed to update Tally customer '{cust_name}' in RentAsst: {e}")
                 continue
 
             stats["processed"] += 1
-            cloud_id = None
             try:
-                cloud_custs = ra_client.fetch_customers()
-                if isinstance(cloud_custs, list):
-                    for c in cloud_custs:
-                        if (c.get("name") or "").strip().lower() == cust_name.lower():
-                            cloud_id = str(c.get("id"))
-                            break
-            except Exception:
-                pass
-
-            if cloud_id:
-                store.save_mapping(
-                    entity_type="customer",
-                    source_id=cust_name,
-                    target_id=cloud_id,
-                    source_system="tally",
-                    target_system="rentasst",
-                )
-                stats["skipped"] += 1
-                continue
-
-            try:
-                clean_phone = re.sub(r"\D", "", str(l.get("phone") or l.get("mobile") or ""))
-                mobile_number = clean_phone if len(clean_phone) >= 10 else _synthetic_mobile_number(cust_name)
-
-                res = ra_client.push_customer({
+                create_payload = {
                     "name": cust_name,
                     "company_name": cust_name,
                     "mobile": mobile_number,
-                    "email": l.get("email") or "",
-                    "gst_number": l.get("gstin") or "",
-                })
+                    "email": email,
+                    "gst_number": gst_number,
+                }
+                if address_payload is not None:
+                    create_payload["address"] = address_payload
+
+                res = ra_client.push_customer(create_payload)
                 ra_id = str(res.get("id") or f"RA-CUST-{l_alter_id}")
                 store.save_mapping(
                     entity_type="customer",
@@ -409,6 +519,7 @@ def sync_tally_to_rentasst(
                     target_id=ra_id,
                     source_system="tally",
                     target_system="rentasst",
+                    last_synced_hash=current_hash,
                 )
                 store.add_history("customer", ra_id, "synced", external_id=cust_name, details="Tally Customer Reverse Sync")
                 stats["created"] += 1

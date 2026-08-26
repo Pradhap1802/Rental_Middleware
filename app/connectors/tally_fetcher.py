@@ -114,7 +114,7 @@ class TallyFetcher:
             <TDLMESSAGE>
                <COLLECTION NAME="LedgersCollection" ISMODIFY="No">
                   <TYPE>Ledger</TYPE>
-                  <FETCH>MASTERID, ALTERID, GUID, NAME, PARENT, MAILINGNAME, LEDGERPHONE, EMAIL, PARTYGSTIN, LEDGERCONTACT</FETCH>
+                  <FETCH>MASTERID, ALTERID, GUID, NAME, PARENT, MAILINGNAME, LEDGERPHONE, LEDGERMOBILE, EMAIL, PARTYGSTIN, LEDGERCONTACT, ADDRESS.LIST, PINCODE, COUNTRYNAME, LEDSTATENAME</FETCH>
                </COLLECTION>
             </TDLMESSAGE>
          </TDL>
@@ -133,9 +133,25 @@ class TallyFetcher:
                 parent = (l_node.findtext("PARENT") or "").strip()
                 guid = (l_node.findtext("GUID") or "").strip()
                 alter_id_text = (l_node.findtext("ALTERID") or "0").strip()
+                # LEDGERPHONE can hold multiple comma-joined numbers (the forward sync
+                # writes every mobile/alternate-mobile RentAsst has into it as one
+                # string, e.g. "08056997998, 08056997998") — confirmed live. Stripping
+                # non-digits from that whole string concatenates every number into one
+                # garbled value, so LEDGERMOBILE (Tally's own single clean primary
+                # mobile field) is fetched separately and preferred by the caller;
+                # "phone" is kept only as a fallback for ledgers with no LEDGERMOBILE.
                 phone = (l_node.findtext("LEDGERPHONE") or "").strip()
+                mobile = (l_node.findtext("LEDGERMOBILE") or "").strip()
                 email = (l_node.findtext("EMAIL") or "").strip()
                 gstin = (l_node.findtext("PARTYGSTIN") or "").strip()
+                address_lines = [
+                    (a.text or "").strip()
+                    for a in l_node.findall("ADDRESS.LIST/ADDRESS")
+                    if (a.text or "").strip()
+                ]
+                pincode = (l_node.findtext("PINCODE") or "").strip()
+                country = (l_node.findtext("COUNTRYNAME") or "").strip()
+                state = (l_node.findtext("LEDSTATENAME") or "").strip()
 
                 # Filter out system ledgers
                 if not name or name.lower() in ("profit & loss a/c", "cash", "sales account", "rental income", "cgst", "sgst", "igst"):
@@ -159,8 +175,13 @@ class TallyFetcher:
                     "tally_guid": guid,
                     "alter_id": alter_id,
                     "phone": phone,
+                    "mobile": mobile,
                     "email": email,
                     "gstin": gstin,
+                    "address_lines": address_lines,
+                    "pincode": pincode,
+                    "country": country,
+                    "state": state,
                 })
         except Exception:
             pass

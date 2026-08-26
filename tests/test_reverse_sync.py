@@ -5,7 +5,14 @@ import unittest
 from unittest.mock import MagicMock
 
 from app.mapping.store import MappingStore
-from app.sync.tally_to_rentasst import sync_tally_to_rentasst, is_tally_voucher_duplicate, _synthetic_mobile_number
+from app.sync.tally_to_rentasst import (
+    sync_tally_to_rentasst,
+    is_tally_voucher_duplicate,
+    _synthetic_mobile_number,
+    _extract_primary_mobile,
+    _extract_address_payload,
+    _customer_contact_hash,
+)
 from app.sync.idempotency import generate_integration_key
 
 
@@ -36,6 +43,157 @@ class TestReverseSyncHardening(unittest.TestCase):
 
         different = _synthetic_mobile_number("Different Party Name")
         self.assertNotEqual(first, different)
+
+    def test_extract_primary_mobile_prefers_ledgermobile_over_comma_joined_ledgerphone(self):
+        """
+        LEDGERPHONE can hold multiple comma-joined numbers (the forward sync writes every
+        mobile/alternate-mobile RentAsst has into it, e.g. "08056997998, 08056997998") —
+        confirmed live. Stripping non-digits from that whole string concatenates every
+        number into one garbled value ("0805699799808056997998") instead of the real
+        number, which is exactly the "synced a different number" bug. LEDGERMOBILE (a
+        single clean field) must be preferred.
+        """
+        ledger = {"mobile": "08056997998", "phone": "08056997998, 08056997998"}
+        self.assertEqual(_extract_primary_mobile(ledger, "Test"), "08056997998")
+
+    def test_extract_primary_mobile_falls_back_to_first_phone_segment_only(self):
+        """A ledger with no LEDGERMOBILE at all must take only the FIRST comma-separated
+        number from LEDGERPHONE, never the whole joined string."""
+        ledger = {"mobile": "", "phone": "9876543210, 9123456789"}
+        self.assertEqual(_extract_primary_mobile(ledger, "Test"), "9876543210")
+
+    def test_extract_primary_mobile_falls_back_to_synthetic_when_nothing_usable(self):
+        ledger = {"mobile": "", "phone": ""}
+        result = _extract_primary_mobile(ledger, "Some Party")
+        self.assertEqual(result, _synthetic_mobile_number("Some Party"))
+
+    def test_extract_address_payload_joins_lines_and_keeps_structured_fields(self):
+        ledger = {
+            "address_lines": ["Hosur", "Near IT Park", "Hosur"],
+            "state": "Tamil Nadu",
+            "country": "India",
+            "pincode": "635109",
+        }
+        payload = _extract_address_payload(ledger)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["address1"], "Hosur, Near IT Park, Hosur")
+        self.assertEqual(payload[0]["state"], "Tamil Nadu")
+        self.assertEqual(payload[0]["country"], "India")
+        self.assertEqual(payload[0]["zipcode"], "635109")
+
+    def test_extract_address_payload_returns_none_when_tally_has_no_address_data(self):
+        """Must omit the address field entirely (not push an empty object that would
+        overwrite a real RentAsst address with nothing) when Tally has none."""
+        self.assertIsNone(_extract_address_payload({"address_lines": [], "state": "", "country": "", "pincode": ""}))
+
+    def test_reverse_sync_creates_customer_with_clean_mobile_and_address(self):
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_customers.return_value = []
+        mock_ra_client.push_customer.return_value = {"id": 501}
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        ledger = {
+            "name": "Test",
+            "alter_id": 225,
+            "phone": "08056997998, 08056997998",
+            "mobile": "08056997998",
+            "email": "pradhapm07836@gmail.com",
+            "gstin": "33FDJPP7799K",
+            "address_lines": ["Hosur", "Hosur", "Near IT Park", "Hosur"],
+            "pincode": "635109",
+            "country": "India",
+            "state": "Tamil Nadu",
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_ledgers.return_value = [ledger]
+            mock_fetcher.fetch_stock_items.return_value = []
+            mock_fetcher.fetch_vouchers.return_value = []
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            sync_tally_to_rentasst(
+                ra_client=mock_ra_client, ext_client=mock_ext_client, store=self.store, force_full_sync=True,
+            )
+
+        mock_ra_client.push_customer.assert_called_once()
+        payload = mock_ra_client.push_customer.call_args[0][0]
+        self.assertEqual(payload["mobile"], "08056997998")
+        self.assertEqual(payload["gst_number"], "33FDJPP7799K")
+        self.assertEqual(payload["address"][0]["address1"], "Hosur, Hosur, Near IT Park, Hosur")
+        self.assertEqual(payload["address"][0]["state"], "Tamil Nadu")
+
+    def test_reverse_sync_updates_existing_customer_when_tally_contact_details_change(self):
+        """
+        A customer whose mapping already exists used to be skipped unconditionally, even
+        if their mobile/GST/address changed in Tally afterward — confirmed live, none of
+        these ever reached RentAsst after the customer's first sync. A real change must
+        now push an update instead of being silently ignored forever.
+        """
+        self.store.save_mapping(
+            entity_type="customer", source_id="Test", target_id="CLOUD-CUST-1",
+            source_system="tally", target_system="rentasst", status="synced",
+            last_synced_hash="stale-hash-from-before-the-gst-number-was-added",
+        )
+        mock_ra_client = MagicMock()
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        ledger = {
+            "name": "Test", "alter_id": 226, "phone": "", "mobile": "08056997998",
+            "email": "pradhapm07836@gmail.com", "gstin": "33FDJPP7799K",
+            "address_lines": [], "pincode": "", "country": "", "state": "",
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_ledgers.return_value = [ledger]
+            mock_fetcher.fetch_stock_items.return_value = []
+            mock_fetcher.fetch_vouchers.return_value = []
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            stats = sync_tally_to_rentasst(
+                ra_client=mock_ra_client, ext_client=mock_ext_client, store=self.store, force_full_sync=True,
+            )
+
+        mock_ra_client.push_customer.assert_not_called()
+        mock_ra_client.update_customer.assert_called_once_with(
+            "CLOUD-CUST-1", {"mobile": "08056997998", "email": "pradhapm07836@gmail.com", "gst_number": "33FDJPP7799K"},
+        )
+        self.assertGreaterEqual(stats["updated"], 1)
+
+    def test_reverse_sync_skips_existing_customer_when_tally_contact_details_unchanged(self):
+        """An unrelated Tally edit (or a re-run with nothing changed) must not spam an
+        update every single cycle."""
+        ledger = {
+            "name": "Test", "alter_id": 226, "phone": "", "mobile": "08056997998",
+            "email": "pradhapm07836@gmail.com", "gstin": "33FDJPP7799K",
+            "address_lines": [], "pincode": "", "country": "", "state": "",
+        }
+        unchanged_hash = _customer_contact_hash("08056997998", "pradhapm07836@gmail.com", "33FDJPP7799K", None)
+        self.store.save_mapping(
+            entity_type="customer", source_id="Test", target_id="CLOUD-CUST-1",
+            source_system="tally", target_system="rentasst", status="synced",
+            last_synced_hash=unchanged_hash,
+        )
+        mock_ra_client = MagicMock()
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_ledgers.return_value = [ledger]
+            mock_fetcher.fetch_stock_items.return_value = []
+            mock_fetcher.fetch_vouchers.return_value = []
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            sync_tally_to_rentasst(
+                ra_client=mock_ra_client, ext_client=mock_ext_client, store=self.store, force_full_sync=True,
+            )
+
+        mock_ra_client.update_customer.assert_not_called()
+        mock_ra_client.push_customer.assert_not_called()
 
     def test_reverse_deduplication_by_integration_key(self):
         tally_guid = "TALLY-VOUCHER-GUID-999"
