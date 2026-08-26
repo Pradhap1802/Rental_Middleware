@@ -44,17 +44,27 @@ def _extract_primary_mobile(ledger: Dict[str, Any], cust_name: str) -> str:
     return _synthetic_mobile_number(cust_name)
 
 
-def _extract_address_payload(ledger: Dict[str, Any]) -> Optional[list]:
+def _extract_address_payload(ledger: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    Builds a RentAsst-shaped address list from a Tally ledger's ADDRESS.LIST/PINCODE/
+    Builds a RentAsst-shaped address record from a Tally ledger's ADDRESS.LIST/PINCODE/
     COUNTRYNAME/LEDSTATENAME fields — reverse sync never fetched or pushed any of these
     before, so a customer's address was never synced back from Tally at all, only
     created blank. Tally's ADDRESS.LIST is free-text lines with no city/street split, so
     the best available structure is all lines joined into address1, with the
-    city/state/country/pincode RentAsst does track kept in their own separate fields.
-    Returns None (omit the field entirely) when Tally has no address data at all, rather
-    than pushing an empty address object that would overwrite a real one already in
-    RentAsst with nothing.
+    state/country/pincode RentAsst does track kept in their own separate fields.
+
+    Returns a single dict (NOT a list) — confirmed live that RentAsst's address record is
+    managed through its own dedicated endpoints (create_customer_address/
+    update_customer_address), one record at a time, never as an embedded array on the
+    customer payload (which silently ignores it entirely on both create and update).
+
+    'full_address' is required by RentAsst's create-address endpoint (confirmed live: a
+    422 "The full address field is required" without it) — built in the same
+    country/city/address1/state/zipcode order RentAsst itself uses when rendering an
+    existing address's own full_address field.
+
+    Returns None (omit entirely) when Tally has no address data at all, rather than
+    pushing an empty address that would overwrite a real one already in RentAsst.
     """
     lines = ledger.get("address_lines") or []
     state = ledger.get("state") or ""
@@ -62,17 +72,46 @@ def _extract_address_payload(ledger: Dict[str, Any]) -> Optional[list]:
     pincode = ledger.get("pincode") or ""
     if not lines and not state and not country and not pincode:
         return None
-    return [{
-        "address1": ", ".join(lines),
+    address1 = ", ".join(lines)
+    full_address = ", ".join(p for p in [country, address1, state, pincode] if p)
+    return {
+        "address1": address1,
         "city": "",
         "state": state,
         "country": country,
         "zipcode": pincode,
+        "full_address": full_address,
         "is_default": True,
-    }]
+        "is_billing": True,
+    }
 
 
-def _customer_contact_hash(mobile: str, email: str, gst_number: str, address: Optional[list]) -> str:
+def _push_customer_address(ra_client: Any, ra_id: str, address_payload: Dict[str, Any]) -> None:
+    """
+    Creates or updates a RentAsst customer's address, choosing the right call by checking
+    whether the customer already has an address record on file (RentAsst's address
+    create/update are two distinct endpoints, keyed by the address record's own id — see
+    create_customer_address/update_customer_address). Best-effort: an address failure must
+    never abort the surrounding customer create/update, which already succeeded.
+    """
+    try:
+        current = ra_client.get_customer(ra_id)
+        existing_addresses = (current or {}).get("address") or []
+        existing_id = existing_addresses[0].get("id") if existing_addresses else None
+    except Exception as e:
+        log_event("ReverseSync", f"Could not fetch RentAsst customer {ra_id} to resolve its address record: {e}")
+        return
+
+    try:
+        if existing_id:
+            ra_client.update_customer_address(ra_id, existing_id, address_payload)
+        else:
+            ra_client.create_customer_address(ra_id, address_payload)
+    except Exception as e:
+        log_event("ReverseSync", f"Failed to sync address for RentAsst customer {ra_id}: {e}")
+
+
+def _customer_contact_hash(mobile: str, email: str, gst_number: str, address: Optional[Dict[str, Any]]) -> str:
     """
     Hashes the Tally-side fields this reverse sync is responsible for keeping RentAsst's
     customer record in sync with. Without this, a customer whose mapping already exists
@@ -470,6 +509,20 @@ def sync_tally_to_rentasst(
                 except Exception:
                     pass
 
+            # A mapped RentAsst id can go stale (record deleted / DB reset on the RentAsst
+            # side) — confirmed live: PUT /customer/{id} against a deleted id 404s forever
+            # with no self-healing. Drop the stale mapping and fall through to the create
+            # path below, exactly like a genuinely new customer.
+            if ra_id and not ra_client.check_exists_in_rentasst("customer", ra_id):
+                log_event(
+                    "ReverseSync",
+                    f"RentAsst customer {ra_id} (mapped to Tally party '{cust_name}') no longer "
+                    "exists — dropping stale mapping and re-creating.",
+                )
+                store.delete("customer", cust_name)
+                existing_mapping = None
+                ra_id = None
+
             if ra_id:
                 stored_hash = (existing_mapping or {}).get("last_synced_hash") or (existing_mapping or {}).get("last_hash")
                 if stored_hash == current_hash:
@@ -477,10 +530,21 @@ def sync_tally_to_rentasst(
                     continue
                 stats["processed"] += 1
                 try:
-                    update_payload = {"mobile": mobile_number, "email": email, "gst_number": gst_number}
-                    if address_payload is not None:
-                        update_payload["address"] = address_payload
+                    # PUT /customer/{id} validates the FULL record (confirmed live: omitting
+                    # 'name' 422s with "The name field is required") even though only
+                    # contact/GST fields are actually changing here. RentAsst's own field for
+                    # GST is 'customer_gst_number' — 'gst_number' is silently ignored
+                    # (confirmed live). Address is handled separately below — an embedded
+                    # 'address' key here does nothing on this endpoint.
+                    update_payload = {
+                        "name": cust_name,
+                        "mobile": mobile_number,
+                        "email": email,
+                        "customer_gst_number": gst_number,
+                    }
                     ra_client.update_customer(ra_id, update_payload)
+                    if address_payload is not None:
+                        _push_customer_address(ra_client, ra_id, address_payload)
                     store.save_mapping(
                         entity_type="customer",
                         source_id=cust_name,
@@ -501,18 +565,22 @@ def sync_tally_to_rentasst(
 
             stats["processed"] += 1
             try:
+                # RentAsst's customer create endpoint also silently ignores an embedded
+                # 'address' key (confirmed live) — pushed separately below, once the
+                # customer id exists. GST uses the same 'customer_gst_number' field as
+                # update (confirmed live: 'gst_number' is a no-op here too).
                 create_payload = {
                     "name": cust_name,
                     "company_name": cust_name,
                     "mobile": mobile_number,
                     "email": email,
-                    "gst_number": gst_number,
+                    "customer_gst_number": gst_number,
                 }
-                if address_payload is not None:
-                    create_payload["address"] = address_payload
 
                 res = ra_client.push_customer(create_payload)
                 ra_id = str(res.get("id") or f"RA-CUST-{l_alter_id}")
+                if address_payload is not None:
+                    _push_customer_address(ra_client, ra_id, address_payload)
                 store.save_mapping(
                     entity_type="customer",
                     source_id=cust_name,

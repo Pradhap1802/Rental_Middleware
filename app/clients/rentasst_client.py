@@ -583,16 +583,61 @@ class RentAsstClient:
         """Push a customer master from Tally to RentAsst Cloud API."""
         return self._post_with_fallback(["customer", "customers"], customer_data)
 
+    def get_customer(self, customer_id: str) -> Dict[str, Any]:
+        """Fetches a single RentAsst customer's full detail (including its 'address' array
+        with real address record ids) — used before an address update to know whether to
+        POST a new address or PUT an existing one."""
+        return self._request_with_fallback([f"customer/{customer_id}"])
+
     def update_customer(self, customer_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Update an existing RentAsst customer with corrected Tally-side contact/GST/address
+        """
+        Update an existing RentAsst customer with corrected Tally-side contact/GST
         details — used when a customer's Tally ledger changes after its first reverse sync
-        (mirrors update_equipment's pattern for the same reason)."""
+        (mirrors update_equipment's pattern for the same reason).
+
+        NOTE: confirmed live against RentAsst's own PUT /customer/{id} — it validates the
+        FULL record, not a partial patch: omitting 'name' 422s with "The name field is
+        required" even though only mobile/email/GST are being changed. The caller MUST
+        include 'name' in payload. Also confirmed live: this endpoint's own 'gst_number'
+        key is silently ignored — RentAsst's actual field is 'customer_gst_number' (matches
+        what GET returns) — and an embedded 'address' key does nothing at all on this
+        endpoint; address changes must go through create_customer_address/
+        update_customer_address instead.
+        """
         url = f"{self.base_url}/customer/{customer_id}"
         update_payload = dict(payload)
         if str(customer_id).isdigit():
             update_payload["id"] = int(customer_id)
 
         r = self.session.put(url, json=update_payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("data", data) if isinstance(data, dict) else data
+
+    def create_customer_address(self, customer_id: str, address: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Creates a new address record for a RentAsst customer. Confirmed live: this is a
+        completely separate resource from the customer record itself — POST /customer/{id}
+        (via push_customer) and PUT /customer/{id} (via update_customer) both silently
+        ignore an embedded 'address' key. The real endpoint is POST /customer/{id}/address,
+        which requires 'full_address' (a single pre-joined string — confirmed live via a
+        422 "The full address field is required" when it's missing).
+        """
+        url = f"{self.base_url}/customer/{customer_id}/address"
+        create_payload = dict(address)
+        if str(customer_id).isdigit():
+            create_payload.setdefault("customer_id", int(customer_id))
+        r = self.session.post(url, json=create_payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("data", data) if isinstance(data, dict) else data
+
+    def update_customer_address(self, customer_id: str, address_id: str, address: Dict[str, Any]) -> Dict[str, Any]:
+        """Updates an existing RentAsst customer address record via PUT /customer/{id}/
+        address/{address_id} — confirmed live as the counterpart to create_customer_address
+        for a customer that already has an address on file."""
+        url = f"{self.base_url}/customer/{customer_id}/address/{address_id}"
+        r = self.session.put(url, json=dict(address), headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
         r.raise_for_status()
         data = r.json()
         return data.get("data", data) if isinstance(data, dict) else data

@@ -75,11 +75,11 @@ class TestReverseSyncHardening(unittest.TestCase):
             "pincode": "635109",
         }
         payload = _extract_address_payload(ledger)
-        self.assertEqual(len(payload), 1)
-        self.assertEqual(payload[0]["address1"], "Hosur, Near IT Park, Hosur")
-        self.assertEqual(payload[0]["state"], "Tamil Nadu")
-        self.assertEqual(payload[0]["country"], "India")
-        self.assertEqual(payload[0]["zipcode"], "635109")
+        self.assertEqual(payload["address1"], "Hosur, Near IT Park, Hosur")
+        self.assertEqual(payload["state"], "Tamil Nadu")
+        self.assertEqual(payload["country"], "India")
+        self.assertEqual(payload["zipcode"], "635109")
+        self.assertEqual(payload["full_address"], "India, Hosur, Near IT Park, Hosur, Tamil Nadu, 635109")
 
     def test_extract_address_payload_returns_none_when_tally_has_no_address_data(self):
         """Must omit the address field entirely (not push an empty object that would
@@ -90,6 +90,7 @@ class TestReverseSyncHardening(unittest.TestCase):
         mock_ra_client = MagicMock()
         mock_ra_client.fetch_customers.return_value = []
         mock_ra_client.push_customer.return_value = {"id": 501}
+        mock_ra_client.get_customer.return_value = {"address": []}
         mock_ext_client = MagicMock()
         mock_ext_client.cfg = MagicMock()
 
@@ -120,9 +121,19 @@ class TestReverseSyncHardening(unittest.TestCase):
         mock_ra_client.push_customer.assert_called_once()
         payload = mock_ra_client.push_customer.call_args[0][0]
         self.assertEqual(payload["mobile"], "08056997998")
-        self.assertEqual(payload["gst_number"], "33FDJPP7799K")
-        self.assertEqual(payload["address"][0]["address1"], "Hosur, Hosur, Near IT Park, Hosur")
-        self.assertEqual(payload["address"][0]["state"], "Tamil Nadu")
+        self.assertEqual(payload["customer_gst_number"], "33FDJPP7799K")
+        self.assertNotIn("address", payload)
+
+        # Address is pushed through the dedicated address endpoint, not embedded on the
+        # customer payload (confirmed live: RentAsst silently ignores an embedded 'address'
+        # key on create).
+        mock_ra_client.get_customer.assert_called_once_with("501")
+        mock_ra_client.create_customer_address.assert_called_once()
+        addr_call = mock_ra_client.create_customer_address.call_args[0]
+        self.assertEqual(addr_call[0], "501")
+        self.assertEqual(addr_call[1]["address1"], "Hosur, Hosur, Near IT Park, Hosur")
+        self.assertEqual(addr_call[1]["state"], "Tamil Nadu")
+        mock_ra_client.update_customer_address.assert_not_called()
 
     def test_reverse_sync_updates_existing_customer_when_tally_contact_details_change(self):
         """
@@ -159,7 +170,11 @@ class TestReverseSyncHardening(unittest.TestCase):
 
         mock_ra_client.push_customer.assert_not_called()
         mock_ra_client.update_customer.assert_called_once_with(
-            "CLOUD-CUST-1", {"mobile": "08056997998", "email": "pradhapm07836@gmail.com", "gst_number": "33FDJPP7799K"},
+            "CLOUD-CUST-1",
+            {
+                "name": "Test", "mobile": "08056997998",
+                "email": "pradhapm07836@gmail.com", "customer_gst_number": "33FDJPP7799K",
+            },
         )
         self.assertGreaterEqual(stats["updated"], 1)
 
@@ -194,6 +209,87 @@ class TestReverseSyncHardening(unittest.TestCase):
 
         mock_ra_client.update_customer.assert_not_called()
         mock_ra_client.push_customer.assert_not_called()
+
+    def test_reverse_sync_recreates_customer_when_mapped_rentasst_record_no_longer_exists(self):
+        """
+        A mapped RentAsst customer id can go stale (the record was deleted, or RentAsst's
+        DB was reset) — confirmed live: PUT /customer/{id} against a deleted id 404s
+        forever with no recovery. The stale mapping must be dropped and the customer
+        re-created, not left permanently failing.
+        """
+        self.store.save_mapping(
+            entity_type="customer", source_id="Test-1", target_id="3",
+            source_system="tally", target_system="rentasst", status="synced",
+            last_synced_hash="some-hash-from-before-the-record-was-deleted",
+        )
+        mock_ra_client = MagicMock()
+        mock_ra_client.check_exists_in_rentasst.return_value = False
+        mock_ra_client.push_customer.return_value = {"id": 9}
+        mock_ra_client.get_customer.return_value = {"address": []}
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        ledger = {
+            "name": "Test-1", "alter_id": 227, "phone": "", "mobile": "0987654321",
+            "email": "", "gstin": "", "address_lines": [], "pincode": "", "country": "", "state": "",
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_ledgers.return_value = [ledger]
+            mock_fetcher.fetch_stock_items.return_value = []
+            mock_fetcher.fetch_vouchers.return_value = []
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            stats = sync_tally_to_rentasst(
+                ra_client=mock_ra_client, ext_client=mock_ext_client, store=self.store, force_full_sync=True,
+            )
+
+        mock_ra_client.check_exists_in_rentasst.assert_called_once_with("customer", "3")
+        mock_ra_client.update_customer.assert_not_called()
+        mock_ra_client.push_customer.assert_called_once()
+        self.assertEqual(stats["created"], 1)
+
+        refreshed = self.store.find_mapping("customer", "Test-1")
+        self.assertEqual(refreshed["target_id"], "9")
+
+    def test_reverse_sync_updates_customer_address_when_one_already_exists(self):
+        """A customer that already has an address record on file must get it UPDATED
+        (PUT), not a second duplicate one created (POST)."""
+        self.store.save_mapping(
+            entity_type="customer", source_id="Test", target_id="1",
+            source_system="tally", target_system="rentasst", status="synced",
+            last_synced_hash="stale-hash",
+        )
+        mock_ra_client = MagicMock()
+        mock_ra_client.check_exists_in_rentasst.return_value = True
+        mock_ra_client.get_customer.return_value = {"address": [{"id": 7, "address1": "Old Line"}]}
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        ledger = {
+            "name": "Test", "alter_id": 228, "phone": "", "mobile": "08056997998",
+            "email": "pradhapm07836@gmail.com", "gstin": "33FDJPP7799K",
+            "address_lines": ["New Line"], "pincode": "635109", "country": "India", "state": "Tamil Nadu",
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_ledgers.return_value = [ledger]
+            mock_fetcher.fetch_stock_items.return_value = []
+            mock_fetcher.fetch_vouchers.return_value = []
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            sync_tally_to_rentasst(
+                ra_client=mock_ra_client, ext_client=mock_ext_client, store=self.store, force_full_sync=True,
+            )
+
+        mock_ra_client.update_customer_address.assert_called_once()
+        call_args = mock_ra_client.update_customer_address.call_args[0]
+        self.assertEqual(call_args[0], "1")
+        self.assertEqual(call_args[1], 7)
+        self.assertEqual(call_args[2]["address1"], "New Line")
+        mock_ra_client.create_customer_address.assert_not_called()
 
     def test_reverse_deduplication_by_integration_key(self):
         tally_guid = "TALLY-VOUCHER-GUID-999"
