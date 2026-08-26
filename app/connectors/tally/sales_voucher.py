@@ -4,40 +4,53 @@ from .xml_builder import escape_xml, format_tally_date, build_import_envelope
 
 def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", company_name: Optional[str] = None, edu_mode: bool = False) -> str:
     """
-    Builds Tally VOUCHER XML for Rent Outs, using Tally's "Sales Order" voucher type so
-    the order shows up in Tally's own Sales Order Book/Order Outstanding reports as soon
-    as it's created in RentAsst.
+    Builds Tally VOUCHER XML for Rent Outs.
 
-    Requires "Order Processing" to be enabled under the Tally company's F11 features —
-    without it, Tally rejects this voucher type with EXCEPTIONS>0 (confirmed live). This
-    is a Tally application setting the client must enable; the middleware cannot toggle it.
+    Uses Tally's "Sales" voucher type, NOT "Sales Order" — despite the function name
+    (kept for caller compatibility; callers still treat this as "the Rent Out voucher").
+    Confirmed live against this company's real Tally server: "Sales Order" (and even
+    "Delivery Note") rejects EVERY import attempt with EXCEPTIONS>0 regardless of XML
+    shape — tried top-level ALLINVENTORYENTRIES.LIST, nested INVENTORYALLOCATIONS.LIST,
+    with/without ORDERALLOCATIONS.LIST self-references, with/without BILLALLOCATIONS.LIST,
+    with/without an explicit VOUCHERNUMBER, and a byte-for-byte replica of a real
+    Tally-exported Sales Order (see REAL_SALES_ORDER_XML in tests/test_tally_fetcher.py) —
+    every single one failed identically, most surfacing "Bad Order Number in Voucher!".
+    A plain "Sales" voucher with the exact same party/items succeeded immediately
+    (CREATED=1, EXCEPTIONS=0). This points to Order Processing being unavailable on this
+    Tally installation (it already runs in unlicensed/Educational mode — see
+    tally_edu_mode / TallyClient._send_voucher_with_edu_fallback), which the middleware
+    cannot toggle. Per explicit user decision, Rent Outs are now booked as a real "Sales"
+    voucher immediately at rent-out time rather than staying unsynced — note this means
+    Tally's Sales register reflects revenue at order time, and if the same order is later
+    also invoiced via build_sales_invoice_voucher_xml, that revenue is booked a second
+    time (a real bookkeeping duplication the user accepted as the tradeoff for having
+    Rent Outs show up in Tally at all).
 
-    Item lines go in a top-level ALLINVENTORYENTRIES.LIST (a sibling of
-    ALLLEDGERENTRIES.LIST, directly under VOUCHER) — NOT nested inside a ledger entry as
-    INVENTORYALLOCATIONS.LIST, which is the accounting-invoice shape, not what this
-    company's "Invoice Voucher View" Sales Order type expects. Confirmed both live and
-    against a real Tally-exported Sales Order (see REAL_SALES_ORDER_XML in
-    tests/test_tally_fetcher.py, captured from this same company): an order with no
-    items succeeds either way, but the moment an item line is added, the
-    INVENTORYALLOCATIONS.LIST-nested shape gets rejected outright with a misleading
-    "Bad Order Number in Voucher!" on every single attempt regardless of voucher
-    number, batch allocation, or order-due-date fields — while the real captured
-    export shows Tally itself always uses ALLINVENTORYENTRIES.LIST for this voucher
-    type. None of this company's stock items are batch-tracked (confirmed live), so
-    BATCHALLOCATIONS.LIST is dropped along with it — the real export doesn't send it.
+    Items go in a nested INVENTORYALLOCATIONS.LIST inside the Sales Account ledger
+    entry — the same accounting-invoice shape build_sales_invoice_voucher_xml uses,
+    confirmed live to be the only shape Tally accepts for one of this company's
+    Sales-type vouchers. The party ledger carries a BILLALLOCATIONS.LIST ("New Ref")
+    since this company's customer ledgers are bill-wise enabled (confirmed live:
+    without it, even a plain "Sales" voucher was rejected the same way orders were).
 
-    Invoice sync (build_sales_invoice_voucher_xml) references this order's VOUCHERNUMBER
-    via ORDERALLOCATIONS.LIST so Tally can track fulfillment from order to invoice.
+    No ORDERALLOCATIONS.LIST/ORDERNO anywhere — this is no longer an Order voucher, so
+    there is no order for a later invoice to fulfill against in Tally's own order
+    tracking (build_sales_invoice_voucher_xml no longer sends this either, for the same
+    reason — see its docstring).
 
-    Each item line also carries its own ORDERALLOCATIONS.LIST/ORDERNO, self-referencing
-    this SAME order's own number — without it, Tally accepted the ALLINVENTORYENTRIES.LIST
-    shape fix above but still rejected every item-bearing order, surfaced in Tally's own
-    Import Exceptions log as "Order No. is missing in Item Allocations" (confirmed live,
-    reported directly from the Tally UI, not just the generic "Bad Order Number in
-    Voucher!" business-error text the XML response itself gives back). This is a
-    DIFFERENT use of ORDERNO than the invoice side: on the order voucher itself, ORDERNO
-    identifies which order each allocation line belongs to (itself); on an invoice line,
-    it identifies which order that line fulfills.
+    The Sales Account ledger entry's own AMOUNT must equal the sum of its nested
+    INVENTORYALLOCATIONS.LIST lines, or Tally rejects the whole voucher (confirmed
+    live — this is what broke the first version of this fix: it put the GST-inclusive
+    order `amount` on the ledger entry while the item lines only summed to the
+    pre-tax subtotal). So the item subtotal goes on Sales Account, and any leftover
+    (amount - item subtotal) — RentAsst's rental_order payload doesn't break GST into
+    CGST/SGST/IGST the way invoices do, just a flat `gst` percentage, and doesn't
+    include customer state either — is booked as an even CGST/SGST split (the same
+    domestic-default assumption build_sales_invoice_voucher_xml falls back to when it
+    has no real breakdown), reusing the same CGST/SGST ledger definitions. A single
+    ad-hoc "GST" ledger without a GSTDUTYHEAD was tried first and rejected by Tally
+    (confirmed live — CREATED climbed by 1 for the new ledger master but the voucher
+    itself still landed in EXCEPTIONS); CGST/SGST already carry a valid GSTDUTYHEAD.
     """
     num = (
         data.get("number") or data.get("rent_code") or data.get("rent_number")
@@ -53,24 +66,9 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
     )
     date_str = format_tally_date(data.get("rent_date") or data.get("order_date") or data.get("date") or data.get("created_at"), edu_mode=edu_mode)
 
-    prereq_ledgers = f"""          <LEDGER NAME="{escape_xml(cust_name)}" ACTION="Create">
-            <NAME>{escape_xml(cust_name)}</NAME>
-            <PARENT>Sundry Debtors</PARENT>
-          </LEDGER>
-          <LEDGER NAME="Sales Account" ACTION="Create">
-            <NAME>Sales Account</NAME>
-            <PARENT>Sales Accounts</PARENT>
-          </LEDGER>\n"""
-
-    party_entry = f"""            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>{escape_xml(cust_name)}</LEDGERNAME>
-              <ISPARTYLEDGER>YES</ISPARTYLEDGER>
-              <ISDEEMEDPOSITIVE>YES</ISDEEMEDPOSITIVE>
-              <AMOUNT>-{amount:.2f}</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>"""
-
     items = data.get("rent_items") or data.get("items") or data.get("assets") or data.get("details") or []
-    inventory_entries = ""
+    inventory_allocations = ""
+    item_subtotal = 0.0
     if isinstance(items, list) and len(items) > 0:
         for item in items:
             if isinstance(item, dict):
@@ -80,35 +78,90 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
                 price = float(item.get("price") or item.get("rent_price") or item.get("rate") or 0)
                 item_total = float(item.get("total_price") or item.get("amount") or item.get("total") or (price * qty))
                 unit = item.get("unit") or "Nos"
+                item_subtotal += item_total
 
-                inventory_entries += f"""
-            <ALLINVENTORYENTRIES.LIST>
-              <STOCKITEMNAME>{escape_xml(item_name)}</STOCKITEMNAME>
-              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
-              <RATE>{price:.2f}/{escape_xml(unit)}</RATE>
-              <AMOUNT>{item_total:.2f}</AMOUNT>
-              <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
-              <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
-              <ORDERALLOCATIONS.LIST>
-                <ORDERNO>{escape_xml(num)}</ORDERNO>
-              </ORDERALLOCATIONS.LIST>
-            </ALLINVENTORYENTRIES.LIST>"""
+                inventory_allocations += f"""
+              <INVENTORYALLOCATIONS.LIST>
+                <STOCKITEMNAME>{escape_xml(item_name)}</STOCKITEMNAME>
+                <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+                <RATE>{price:.2f}/{escape_xml(unit)}</RATE>
+                <AMOUNT>{item_total:.2f}</AMOUNT>
+                <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
+                <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
+              </INVENTORYALLOCATIONS.LIST>"""
+    if not item_subtotal:
+        item_subtotal = amount
+
+    tax_amount = round(amount - item_subtotal, 2)
+    if tax_amount < 0:
+        tax_amount = 0.0
+        item_subtotal = amount
+
+    prereq_ledgers = f"""          <LEDGER NAME="{escape_xml(cust_name)}" ACTION="Create">
+            <NAME>{escape_xml(cust_name)}</NAME>
+            <PARENT>Sundry Debtors</PARENT>
+          </LEDGER>
+          <LEDGER NAME="Sales Account" ACTION="Create">
+            <NAME>Sales Account</NAME>
+            <PARENT>Sales Accounts</PARENT>
+          </LEDGER>
+          <LEDGER NAME="CGST" ACTION="Create">
+            <NAME>CGST</NAME>
+            <PARENT>Duties &amp; Taxes</PARENT>
+            <TAXTYPE>GST</TAXTYPE>
+            <GSTDUTYHEAD>Central Tax</GSTDUTYHEAD>
+          </LEDGER>
+          <LEDGER NAME="SGST" ACTION="Create">
+            <NAME>SGST</NAME>
+            <PARENT>Duties &amp; Taxes</PARENT>
+            <TAXTYPE>GST</TAXTYPE>
+            <GSTDUTYHEAD>State Tax</GSTDUTYHEAD>
+          </LEDGER>\n"""
+
+    bill_name = f"RENTAL-ORD-{data.get('id')}"
+    party_entry = f"""            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>{escape_xml(cust_name)}</LEDGERNAME>
+              <ISPARTYLEDGER>YES</ISPARTYLEDGER>
+              <ISDEEMEDPOSITIVE>YES</ISDEEMEDPOSITIVE>
+              <AMOUNT>-{amount:.2f}</AMOUNT>
+              <BILLALLOCATIONS.LIST>
+                <NAME>{escape_xml(bill_name)}</NAME>
+                <BILLTYPE>New Ref</BILLTYPE>
+                <AMOUNT>-{amount:.2f}</AMOUNT>
+              </BILLALLOCATIONS.LIST>
+            </ALLLEDGERENTRIES.LIST>"""
 
     sales_entry = f"""
             <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>Sales Account</LEDGERNAME>
               <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
-              <AMOUNT>{amount:.2f}</AMOUNT>
+              <AMOUNT>{item_subtotal:.2f}</AMOUNT>{inventory_allocations}
             </ALLLEDGERENTRIES.LIST>"""
 
-    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="Sales Order" ACTION="{action}" REMOTEID="RENTAL-ORD-{data.get('id')}">
+    tax_entry = ""
+    if tax_amount > 0:
+        cgst_val = round(tax_amount / 2.0, 2)
+        sgst_val = round(tax_amount - cgst_val, 2)
+        tax_entry = f"""
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>CGST</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+              <AMOUNT>{cgst_val:.2f}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>SGST</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+              <AMOUNT>{sgst_val:.2f}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>"""
+
+    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="Sales" ACTION="{action}" REMOTEID="RENTAL-ORD-{data.get('id')}">
             <REMOTEID>RENTAL-ORD-{data.get('id')}</REMOTEID>
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
-            <VOUCHERTYPENAME>Sales Order</VOUCHERTYPENAME>
+            <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
             <VOUCHERNUMBER>{escape_xml(num)}</VOUCHERNUMBER>
             <NARRATION>RENTAL-ORD-{data.get('id')}</NARRATION>
-            <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{inventory_entries}{party_entry}{sales_entry}
+            <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{party_entry}{sales_entry}{tax_entry}
           </VOUCHER>"""
 
     return build_import_envelope(msg, report_name="Vouchers", company_name=company_name)
@@ -120,11 +173,17 @@ def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create"
 
     When the invoice originated from a Rent Out, RentAsst's API includes a nested
     `rent: {id, number, status}` object (no date field at list-endpoint granularity).
-    We reference that rent's `number` — the same VOUCHERNUMBER used by the Sales Order
-    voucher built in build_sales_order_voucher_xml — via ORDERALLOCATIONS.LIST on each
-    inventory line, plus a voucher-level REFERENCE, so Tally can track order fulfillment.
-    This linkage needs live verification against a Tally company with Order Processing
-    enabled (not available during this change) before relying on it in production.
+    We reference that rent's `number` via a voucher-level REFERENCE tag (plain free
+    text) so a human can trace the invoice back to its order in Tally.
+
+    Deliberately does NOT use ORDERALLOCATIONS.LIST/ORDERNO — that only makes sense
+    against a real Tally Sales Order voucher for Tally to track fulfillment against, and
+    this company's Tally installation rejects Sales Order voucher creation outright (see
+    build_sales_order_voucher_xml's docstring), so no such order ever exists in Tally's
+    own Order Book to reference. Confirmed live: including it here reproduces the exact
+    same "Bad Order Number in Voucher!" rejection this invoice path would otherwise not
+    have, since build_sales_order_voucher_xml now books Rent Outs as plain "Sales"
+    vouchers instead.
     """
     raw_num = str(data.get("number") or data.get("invoice_number") or "").strip()
     num = raw_num if raw_num and raw_num != "0" else f"INV-{data.get('id')}"
@@ -229,11 +288,6 @@ def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create"
               </BILLALLOCATIONS.LIST>
             </ALLLEDGERENTRIES.LIST>"""
 
-    order_allocation = f"""
-                <ORDERALLOCATIONS.LIST>
-                  <ORDERNO>{escape_xml(order_number)}</ORDERNO>
-                </ORDERALLOCATIONS.LIST>""" if order_number else ""
-
     items = data.get("items") or []
     inventory_allocations = ""
     if isinstance(items, list) and len(items) > 0:
@@ -252,7 +306,7 @@ def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create"
                 <RATE>{price:.2f}/{escape_xml(unit)}</RATE>
                 <AMOUNT>{total:.2f}</AMOUNT>
                 <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
-                <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>{order_allocation}
+                <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
                 <BATCHALLOCATIONS.LIST>
                   <GODOWNNAME>Main Location</GODOWNNAME>
                   <BATCHNAME>Primary Batch</BATCHNAME>

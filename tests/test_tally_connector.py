@@ -663,34 +663,49 @@ class TestTallyClientUnitResolution(unittest.TestCase):
 
 class TestSalesOrderVoucherInventoryShape(unittest.TestCase):
     """
-    Confirmed live against a real Tally company: a Sales Order voucher with no items
-    succeeds, but the moment an item line was sent as INVENTORYALLOCATIONS.LIST nested
-    inside the "Sales Account" ALLLEDGERENTRIES.LIST entry (the accounting-invoice
-    shape), Tally rejected it outright with a misleading "Bad Order Number in
-    Voucher!" — reproduced on every attempt, regardless of voucher number, batch
-    allocation, or an added order-due-date field. A real Tally-exported Sales Order
-    (REAL_SALES_ORDER_XML in tests/test_tally_fetcher.py, captured from this same
-    company) shows Tally itself always uses a top-level ALLINVENTORYENTRIES.LIST — a
-    sibling of ALLLEDGERENTRIES.LIST, not nested inside one. The builder must match
-    that shape, and must not send BATCHALLOCATIONS.LIST at all (this company's stock
-    items aren't batch-tracked).
+    build_sales_order_voucher_xml books Rent Outs as a real "Sales" voucher, not
+    "Sales Order" — confirmed live against this company's real Tally server that
+    "Sales Order" (and "Delivery Note") reject EVERY import attempt with EXCEPTIONS>0
+    regardless of XML shape (top-level ALLINVENTORYENTRIES.LIST, nested
+    INVENTORYALLOCATIONS.LIST, with/without ORDERALLOCATIONS.LIST, with/without
+    BILLALLOCATIONS.LIST, with/without an explicit VOUCHERNUMBER), most surfacing "Bad
+    Order Number in Voucher!" — while a plain "Sales" voucher with the identical
+    party/items succeeds immediately. See the function's own docstring for the full
+    live-verification history.
+
+    Items go in a nested INVENTORYALLOCATIONS.LIST inside the "Sales Account"
+    ALLLEDGERENTRIES.LIST entry — the same accounting-invoice shape
+    build_sales_invoice_voucher_xml uses. That ledger entry's own AMOUNT must equal the
+    sum of its nested item lines (the item subtotal, not the GST-inclusive total) or
+    Tally rejects the whole voucher — confirmed live, this is what broke the first
+    version of this fix.
     """
 
-    def test_item_lines_use_top_level_allinventoryentries_not_nested_allocations(self):
+    def test_item_lines_use_nested_inventoryallocations_inside_sales_ledger(self):
         xml = build_sales_order_voucher_xml({
             "id": 2, "number": "R100001", "customer_name": "Test", "grand_total": 114,
             "items": [{"name": "Moto G45", "quantity": 1, "price": 97, "total_price": 97, "unit": "Piece"}],
         })
-        self.assertIn("<ALLINVENTORYENTRIES.LIST>", xml)
+        self.assertIn("<VOUCHER VTYPE=\"Sales\" ACTION=\"Create\"", xml)
+        self.assertIn("<INVENTORYALLOCATIONS.LIST>", xml)
         self.assertIn("<STOCKITEMNAME>Moto G45</STOCKITEMNAME>", xml)
-        self.assertNotIn("INVENTORYALLOCATIONS.LIST", xml)
+        self.assertNotIn("ALLINVENTORYENTRIES.LIST>", xml)
+        self.assertNotIn("ORDERALLOCATIONS.LIST", xml)
         self.assertNotIn("BATCHALLOCATIONS.LIST", xml)
 
-        # ALLINVENTORYENTRIES.LIST must not be nested inside an ALLLEDGERENTRIES.LIST —
-        # it has to appear before the first ledger entry, as a sibling under VOUCHER.
-        self.assertLess(xml.index("<ALLINVENTORYENTRIES.LIST>"), xml.index("<ALLLEDGERENTRIES.LIST>"))
+        # INVENTORYALLOCATIONS.LIST must be nested inside the Sales Account
+        # ALLLEDGERENTRIES.LIST entry, not a sibling of it.
+        ledger_idx = xml.index("<LEDGERNAME>Sales Account</LEDGERNAME>")
+        inv_idx = xml.index("<INVENTORYALLOCATIONS.LIST>")
+        close_idx = xml.index("</ALLLEDGERENTRIES.LIST>", ledger_idx)
+        self.assertLess(ledger_idx, inv_idx)
+        self.assertLess(inv_idx, close_idx)
 
-    def test_multiple_items_produce_multiple_sibling_inventory_entries(self):
+        # The Sales Account ledger's own AMOUNT is the item subtotal (97), not the
+        # GST-inclusive grand_total (114) — the mismatch is what Tally rejected live.
+        self.assertIn("<AMOUNT>97.00</AMOUNT>", xml)
+
+    def test_multiple_items_produce_multiple_nested_inventory_entries(self):
         xml = build_sales_order_voucher_xml({
             "id": 7, "number": "R100004", "customer_name": "Test", "grand_total": 560,
             "items": [
@@ -699,7 +714,7 @@ class TestSalesOrderVoucherInventoryShape(unittest.TestCase):
                 {"name": "Dell Laptop 3440", "quantity": 1, "price": 250, "total_price": 500, "unit": "Piece"},
             ],
         })
-        self.assertEqual(xml.count("<ALLINVENTORYENTRIES.LIST>"), 3)
+        self.assertEqual(xml.count("<INVENTORYALLOCATIONS.LIST>"), 3)
         self.assertIn("Dell Laptop Bag", xml)
         self.assertIn("Dell Keyboard", xml)
         self.assertIn("Dell Laptop 3440", xml)
@@ -708,8 +723,24 @@ class TestSalesOrderVoucherInventoryShape(unittest.TestCase):
         xml = build_sales_order_voucher_xml({
             "id": 13, "number": "R100009", "customer_name": "Test", "grand_total": 270,
         })
-        self.assertNotIn("ALLINVENTORYENTRIES.LIST", xml)
+        self.assertNotIn("INVENTORYALLOCATIONS.LIST", xml)
         self.assertIn("<ALLLEDGERENTRIES.LIST>", xml)
+
+    def test_leftover_amount_over_item_subtotal_is_booked_as_gst(self):
+        # grand_total=236 vs items summing to 200 -> the 36 leftover must appear as
+        # CGST/SGST, and the Sales Account ledger's own amount must stay at 200 (not
+        # the mismatched 236) to keep the voucher's ledger entries internally balanced.
+        xml = build_sales_order_voucher_xml({
+            "id": 2, "number": "R100001", "customer_name": "Test", "grand_total": 236,
+            "items": [
+                {"name": "Dell Laptop", "quantity": 1, "price": 150, "total_price": 150, "unit": "Piece"},
+                {"name": "Dell Mouse", "quantity": 1, "price": 50, "total_price": 50, "unit": "Piece"},
+            ],
+        })
+        self.assertIn("<AMOUNT>200.00</AMOUNT>", xml)
+        self.assertIn("<LEDGERNAME>CGST</LEDGERNAME>", xml)
+        self.assertIn("<LEDGERNAME>SGST</LEDGERNAME>", xml)
+        self.assertIn("<AMOUNT>18.00</AMOUNT>", xml)
 
 
 if __name__ == "__main__":
