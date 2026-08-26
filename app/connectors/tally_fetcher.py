@@ -216,7 +216,7 @@ class TallyFetcher:
             <TDLMESSAGE>
                <COLLECTION NAME="StockItemsCollection" ISMODIFY="No">
                   <TYPE>StockItem</TYPE>
-                  <FETCH>MASTERID, ALTERID, GUID, NAME, PARENT, BASEUNITS, OPENINGBALANCE, OPENINGRATE, OPENINGVALUE, CLOSINGBALANCE, DESCRIPTION, HSNCODE, HSNDETAILS.LIST, GSTDETAILS.LIST</FETCH>
+                  <FETCH>MASTERID, ALTERID, GUID, NAME, PARENT, BASEUNITS, OPENINGBALANCE, OPENINGRATE, OPENINGVALUE, CLOSINGBALANCE, DESCRIPTION, HSNCODE, HSNDETAILS.LIST, GSTDETAILS.LIST, RATEOFVAT, STANDARDPRICELIST.LIST</FETCH>
                </COLLECTION>
             </TDLMESSAGE>
          </TDL>
@@ -253,16 +253,42 @@ class TallyFetcher:
                 # Extract HSN Code from top-level or HSNDETAILS.LIST
                 hsn = (s_node.findtext("HSNCODE") or s_node.findtext(".//HSNDETAILS.LIST/HSNCODE") or s_node.findtext(".//HSNCODE") or "").strip()
 
-                # Extract GST Rate from GSTDETAILS.LIST
+                # GST rate lives in one of two completely different places depending on
+                # how it was entered in Tally — confirmed live against two real stock
+                # items. A forward-synced item (created via this middleware, or entered
+                # in Tally's simple GST mode) carries it as the flat top-level RATEOFVAT,
+                # with GSTDETAILS.LIST/STATEWISEDETAILS.LIST present but EMPTY — Tally
+                # itself normalizes detailed rate blocks down to RATEOFVAT-only on import
+                # in this company's GST configuration. An item entered through Tally's
+                # detailed "Set/Alter GST Details" flow instead has RATEOFVAT at 0 and the
+                # real rate nested in STATEWISEDETAILS.LIST/RATEDETAILS.LIST/GSTRATE. Only
+                # reading RATEDETAILS.LIST (the old behavior) silently read 0 for every
+                # forward-synced item's real GST rate.
                 gst_rate = 0.0
-                for r_node in s_node.findall(".//RATEDETAILS.LIST"):
-                    head = (r_node.findtext("GSTRATEDUTYHEAD") or "").strip().upper()
-                    val = (r_node.findtext("GSTRATE") or "0").strip()
-                    if head == "IGST" and val:
-                        try:
-                            gst_rate = float(val)
-                        except ValueError:
-                            pass
+                rate_of_vat_text = (s_node.findtext("RATEOFVAT") or "").strip()
+                try:
+                    gst_rate = float(rate_of_vat_text) if rate_of_vat_text else 0.0
+                except ValueError:
+                    gst_rate = 0.0
+                if not gst_rate:
+                    for r_node in s_node.findall(".//RATEDETAILS.LIST"):
+                        head = (r_node.findtext("GSTRATEDUTYHEAD") or "").strip().upper()
+                        val = (r_node.findtext("GSTRATE") or "0").strip()
+                        if head == "IGST" and val:
+                            try:
+                                gst_rate = float(val)
+                            except ValueError:
+                                pass
+
+                # STANDARDPRICELIST.LIST is the Tally "Standard Selling Price" this
+                # middleware's own forward sync writes RentAsst's rent_price/
+                # day_based_rent_price into (see build_stock_item_xml) — confirmed live
+                # ('Dell Laptop', RATE "150.00/pc", matches its real RentAsst
+                # day_based_rent_price of 150.00). Never fetched before, so a stock item's
+                # rental price never made it back to RentAsst on reverse sync at all.
+                price_text = (s_node.findtext(".//STANDARDPRICELIST.LIST/RATE") or "").strip()
+                price_match = re.match(r"[-+]?\d+(\.\d+)?", price_text)
+                rent_price = float(price_match.group(0)) if price_match else 0.0
 
                 if not name:
                     continue
@@ -285,6 +311,7 @@ class TallyFetcher:
                     "hsn_code": hsn,
                     "gst_rate": gst_rate,
                     "quantity": quantity,
+                    "rent_price": rent_price,
                 })
         except Exception:
             pass

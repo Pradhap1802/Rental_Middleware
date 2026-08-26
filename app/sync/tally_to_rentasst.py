@@ -111,19 +111,22 @@ def _push_customer_address(ra_client: Any, ra_id: str, address_payload: Dict[str
         log_event("ReverseSync", f"Failed to sync address for RentAsst customer {ra_id}: {e}")
 
 
-def _equipment_change_hash(hsn_code: str, gst_rate: float, quantity: float, parent_category: str, unit_name: str) -> str:
+def _equipment_change_hash(
+    hsn_code: str, gst_rate: float, quantity: float, parent_category: str,
+    unit_name: str, rent_price: float = 0.0,
+) -> str:
     """
     Hashes the Tally-side fields this reverse sync is responsible for keeping RentAsst's
     equipment record in sync with. Without this, an already-mapped stock item was skipped
     unconditionally forever the moment a mapping was found — confirmed live: an HSN code,
-    GST rate, or quantity corrected/changed in Tally after the item's first reverse sync
-    never reached RentAsst. Comparing this hash against what was last pushed lets an
-    unrelated Tally edit still resolve to "unchanged, skip" while a genuine change resolves
-    to "push an update".
+    GST rate, quantity, or rental price corrected/changed in Tally after the item's first
+    reverse sync never reached RentAsst. Comparing this hash against what was last pushed
+    lets an unrelated Tally edit still resolve to "unchanged, skip" while a genuine change
+    resolves to "push an update".
     """
     raw = json.dumps(
         {"hsn_code": hsn_code, "gst_rate": gst_rate, "quantity": quantity,
-         "parent_category": parent_category, "unit_name": unit_name},
+         "parent_category": parent_category, "unit_name": unit_name, "rent_price": rent_price},
         sort_keys=True, ensure_ascii=False,
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -622,6 +625,7 @@ def sync_tally_to_rentasst(
             hsn_code = s.get("hsn_code") or ""
             gst_rate = s.get("gst_rate") or 0.0
             quantity = s.get("quantity") or 0.0
+            rent_price = s.get("rent_price") or 0.0
             s_alter_id = s.get("alter_id") or 0
             if s_alter_id > max_alter_id:
                 max_alter_id = s_alter_id
@@ -629,7 +633,7 @@ def sync_tally_to_rentasst(
             if not item_name:
                 continue
 
-            current_hash = _equipment_change_hash(hsn_code, gst_rate, quantity, parent_category, unit_name)
+            current_hash = _equipment_change_hash(hsn_code, gst_rate, quantity, parent_category, unit_name, rent_price)
 
             # Resolve which RentAsst asset this Tally stock item already maps to, if any —
             # via a mapping this reverse sync saved earlier (find_mapping matches by
@@ -730,6 +734,8 @@ def sync_tally_to_rentasst(
                         "description": s.get("description") or "",
                         "available_quantity": qty_int,
                         "branch": branch_payload,
+                        "rent_price": f"{rent_price:.2f}",
+                        "day_based_rent_price": f"{rent_price:.2f}",
                     }
                     ra_client.update_equipment(ra_id, update_payload)
                     store.save_mapping(
@@ -742,7 +748,7 @@ def sync_tally_to_rentasst(
                     )
                     store.add_history(
                         "equipment", ra_id, "synced", external_id=item_name,
-                        details="Tally Stock Item Reverse Sync (updated HSN/GST/quantity)",
+                        details="Tally Stock Item Reverse Sync (updated HSN/GST/quantity/rent price)",
                     )
                     stats["updated"] += 1
                 except Exception as e:
@@ -754,8 +760,8 @@ def sync_tally_to_rentasst(
             asset_payload = {
                 "name": item_name,
                 "calculation_method": "[1]",
-                "rent_price": "0.00",
-                "day_based_rent_price": "0.00",
+                "rent_price": f"{rent_price:.2f}",
+                "day_based_rent_price": f"{rent_price:.2f}",
                 "purchase_price": "0.00",
                 "hsn_code": hsn_code,
                 "gst_rate": gst_rate if gst_rate > 0 else None,

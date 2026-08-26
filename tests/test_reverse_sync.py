@@ -1101,14 +1101,15 @@ class TestEquipmentReverseSync(unittest.TestCase):
                 ra_client=ra_client, ext_client=ext_client, store=self.store, force_full_sync=True,
             )
 
-    def test_creates_new_asset_with_quantity_from_closing_balance(self):
+    def test_creates_new_asset_with_quantity_gst_and_rent_price(self):
         mock_ra_client = MagicMock()
         mock_ra_client.fetch_equipment.return_value = []
         mock_ra_client.push_equipment.return_value = {"id": 10}
 
         stock_item = {
             "name": "New Tally Asset", "parent": "", "unit": "pc",
-            "hsn_code": "998877", "gst_rate": 18.0, "quantity": 6.0, "alter_id": 300,
+            "hsn_code": "998877", "gst_rate": 18.0, "quantity": 6.0,
+            "rent_price": 150.0, "alter_id": 300,
         }
 
         stats = self._run_sync(mock_ra_client, stock_item)
@@ -1117,6 +1118,8 @@ class TestEquipmentReverseSync(unittest.TestCase):
         payload = mock_ra_client.push_equipment.call_args[0][0]
         self.assertEqual(payload["available_quantity"], 6)
         self.assertEqual(payload["branch"], [{"branch_id": 1, "quantity": 6}])
+        self.assertEqual(payload["rent_price"], "150.00")
+        self.assertEqual(payload["day_based_rent_price"], "150.00")
         self.assertEqual(stats["created"], 1)
 
     def test_never_pushes_updates_onto_a_forward_owned_asset_with_matching_name(self):
@@ -1146,7 +1149,7 @@ class TestEquipmentReverseSync(unittest.TestCase):
         mock_ra_client.push_equipment.assert_not_called()
         self.assertEqual(stats2["skipped"], 1)
 
-    def test_updates_a_reverse_owned_asset_when_hsn_gst_or_quantity_changes(self):
+    def test_updates_a_reverse_owned_asset_when_hsn_gst_quantity_or_rent_price_changes(self):
         self.store.save_mapping(
             entity_type="equipment", source_id="Diag Reverse Asset", target_id="20",
             source_system="tally", target_system="rentasst",
@@ -1157,7 +1160,8 @@ class TestEquipmentReverseSync(unittest.TestCase):
 
         stock_item = {
             "name": "Diag Reverse Asset", "parent": "", "unit": "pc",
-            "hsn_code": "998877", "gst_rate": 0.0, "quantity": 7.0, "alter_id": 234,
+            "hsn_code": "998877", "gst_rate": 18.0, "quantity": 7.0,
+            "rent_price": 200.0, "alter_id": 234,
         }
 
         stats = self._run_sync(mock_ra_client, stock_item)
@@ -1169,8 +1173,11 @@ class TestEquipmentReverseSync(unittest.TestCase):
         payload = call_args[0][1]
         self.assertEqual(payload["name"], "Diag Reverse Asset")
         self.assertEqual(payload["hsn_code"], "998877")
+        self.assertEqual(payload["gst_rate"], 18.0)
         self.assertEqual(payload["available_quantity"], 7)
         self.assertEqual(payload["branch"], [{"branch_id": 1, "quantity": 7}])
+        self.assertEqual(payload["rent_price"], "200.00")
+        self.assertEqual(payload["day_based_rent_price"], "200.00")
         self.assertGreaterEqual(stats["updated"], 1)
 
     def test_skips_reverse_owned_asset_when_nothing_changed(self):

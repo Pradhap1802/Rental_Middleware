@@ -225,5 +225,83 @@ class TestTallyFetcherStockItemQuantityParsing(unittest.TestCase):
         self.assertEqual(items[0]["quantity"], 0.0)
 
 
+class TestTallyFetcherStockItemGstAndPriceParsing(unittest.TestCase):
+    """
+    fetch_stock_items() only ever read the nested GSTDETAILS.LIST/STATEWISEDETAILS.LIST/
+    RATEDETAILS.LIST/GSTRATE structure for GST rate, and never fetched
+    STANDARDPRICELIST.LIST (Tally's "Standard Selling Price", where this middleware's own
+    forward sync writes RentAsst's rent_price) at all. Confirmed live against a real
+    forward-synced stock item ('Dell Laptop'): its GST rate is stored as the flat
+    top-level RATEOFVAT (18), with GSTDETAILS.LIST/STATEWISEDETAILS.LIST present but
+    EMPTY — Tally normalized the detailed rate block down to RATEOFVAT-only on import in
+    this company's GST configuration — so reading only the nested structure silently
+    returned 0 for its real GST rate, and its real rental price (STANDARDPRICELIST.LIST
+    RATE "150.00/pc") was never read at all.
+    """
+
+    def test_prefers_rateofvat_when_present(self):
+        xml = """<ENVELOPE>
+  <STOCKITEM NAME="Dell Laptop">
+    <NAME>Dell Laptop</NAME>
+    <RATEOFVAT> 18</RATEOFVAT>
+    <GSTDETAILS.LIST>
+      <STATEWISEDETAILS.LIST></STATEWISEDETAILS.LIST>
+    </GSTDETAILS.LIST>
+    <STANDARDPRICELIST.LIST>
+      <DATE>20240401</DATE>
+      <RATE>150.00/pc</RATE>
+    </STANDARDPRICELIST.LIST>
+  </STOCKITEM>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            items = fetcher.fetch_stock_items(last_alter_id=0)
+
+        self.assertEqual(items[0]["gst_rate"], 18.0)
+        self.assertEqual(items[0]["rent_price"], 150.0)
+
+    def test_falls_back_to_nested_ratedetails_when_rateofvat_is_zero(self):
+        xml = """<ENVELOPE>
+  <STOCKITEM NAME="Diag Reverse Asset">
+    <NAME>Diag Reverse Asset</NAME>
+    <RATEOFVAT>0</RATEOFVAT>
+    <GSTDETAILS.LIST>
+      <STATEWISEDETAILS.LIST>
+        <RATEDETAILS.LIST>
+          <GSTRATEDUTYHEAD>IGST</GSTRATEDUTYHEAD>
+          <GSTRATE> 18</GSTRATE>
+        </RATEDETAILS.LIST>
+      </STATEWISEDETAILS.LIST>
+    </GSTDETAILS.LIST>
+  </STOCKITEM>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            items = fetcher.fetch_stock_items(last_alter_id=0)
+
+        self.assertEqual(items[0]["gst_rate"], 18.0)
+
+    def test_missing_price_list_defaults_to_zero_rent_price(self):
+        xml = """<ENVELOPE>
+  <STOCKITEM NAME="No Price Item">
+    <NAME>No Price Item</NAME>
+  </STOCKITEM>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            items = fetcher.fetch_stock_items(last_alter_id=0)
+
+        self.assertEqual(items[0]["rent_price"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
