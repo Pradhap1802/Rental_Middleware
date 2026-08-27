@@ -49,6 +49,17 @@ class SyncService:
                 cfg.tally_edu_mode = True
                 cfg_store.save(cfg)
 
+        def persist_order_processing_if_auto_detected() -> None:
+            # Same reasoning as persist_edu_mode_if_auto_detected: sync_rental_order
+            # discovers (in-memory, on ext_client.tally) whether this Tally company's
+            # Order Processing actually works, but cfg is reloaded fresh from disk
+            # every execute_sync() call — without writing it back, the next
+            # rental_order sync would re-attempt (and, if unavailable, re-fail) the
+            # native Sales Order path from scratch instead of starting already known.
+            if getattr(ext_client.tally, "order_processing_auto_detected", False):
+                cfg.tally_order_processing_available = ext_client.tally.cfg.tally_order_processing_available
+                cfg_store.save(cfg)
+
         try:
             entity = (entity_type or "").lower()
             if entity in ("tally_to_rentasst", "reverse_sync"):
@@ -97,6 +108,7 @@ class SyncService:
                 }
         finally:
             persist_edu_mode_if_auto_detected()
+            persist_order_processing_if_auto_detected()
             ra_client.close()
             ext_client.close()
 

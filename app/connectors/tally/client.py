@@ -11,7 +11,7 @@ from .parser import validate_tally_accounting_success
 from .company import build_fetch_companies_xml, parse_fetch_companies_response
 from .ledger import build_customer_ledger_xml
 from .stock_item import build_stock_item_xml, build_physical_stock_voucher_xml, build_unit_xml
-from .sales_voucher import build_sales_order_voucher_xml, build_sales_invoice_voucher_xml
+from .sales_voucher import build_sales_order_voucher_xml, build_sales_order_voucher_xml_native, build_sales_invoice_voucher_xml
 from .receipt_voucher import build_receipt_voucher_xml
 from .unit_match import resolve_existing_unit_name
 from ...logging.logger import log_event
@@ -124,6 +124,12 @@ class TallyClient:
         # SyncService) check this after a sync run to persist tally_edu_mode=True so
         # future runs use it from the start instead of re-discovering it every time.
         self.edu_mode_auto_detected = False
+
+        # Same pattern as edu_mode_auto_detected, for whether this Tally company's
+        # Order Processing feature actually accepts Sales Order voucher imports (see
+        # sync_rental_order) — set the moment sync_rental_order discovers which one
+        # works, so SyncService can persist cfg.tally_order_processing_available.
+        self.order_processing_auto_detected = False
 
     def _exists_cache_key(self, entity_type: str, identifier: str) -> Tuple[str, str]:
         return ((entity_type or "").lower().strip(), (identifier or "").strip().lower())
@@ -452,13 +458,59 @@ class TallyClient:
             log_event("ForwardSync", f"Failed to reconcile Tally stock quantity for '{item_name}': {e}")
 
     def sync_rental_order(self, data: Dict[str, Any]) -> str:
+        """
+        Uses a real "Sales Order" voucher when Order Processing is known to work on
+        this Tally company (Rent Outs show up as actual orders, not premature
+        revenue), otherwise the plain "Sales" fallback (build_sales_order_voucher_xml).
+        cfg.tally_order_processing_available remembers which one actually works, the
+        same way tally_edu_mode is auto-detected.
+
+        Deliberately does NOT retry the SAME order with the fallback shape when the
+        native attempt fails and the mode was still unknown — confirmed live that a
+        failed import under a given REMOTEID/bill-name combination can leave Tally in
+        a state that rejects a SECOND attempt under that identical identifier too
+        (the same "stuck identifier" behavior seen with a real order stuck on
+        "Bad Order Number in Voucher!" even after switching voucher types entirely).
+        Instead: on first-ever failure, remember order_processing_available=False and
+        let this one order fail normally (dead-lettered, retried next cycle) — every
+        OTHER order in this same batch, and every order from here on, goes straight to
+        the fallback shape with a clean, never-before-attempted identifier.
+        """
         remote_id = f"RENTAL-ORD-{data.get('id')}"
         action = "Alter" if self.check_exists("rental_orders", remote_id) else "Create"
         company_name = getattr(self.cfg, "tally_company_name", None)
-        self._send_voucher_with_edu_fallback(
-            lambda edu_mode: build_sales_order_voucher_xml(data, action=action, company_name=company_name, edu_mode=edu_mode)
-        )
-        return remote_id
+        order_processing_available = getattr(self.cfg, "tally_order_processing_available", None)
+
+        if order_processing_available is False:
+            self._send_voucher_with_edu_fallback(
+                lambda edu_mode: build_sales_order_voucher_xml(data, action=action, company_name=company_name, edu_mode=edu_mode)
+            )
+            return remote_id
+
+        try:
+            self._send_voucher_with_edu_fallback(
+                lambda edu_mode: build_sales_order_voucher_xml_native(data, action=action, company_name=company_name, edu_mode=edu_mode)
+            )
+            if order_processing_available is None:
+                self.cfg.tally_order_processing_available = True
+                self.order_processing_auto_detected = True
+            return remote_id
+        except ValueError:
+            if order_processing_available is True:
+                # Already confirmed working before — a single failure here is more
+                # likely a real data problem with this specific order than the
+                # feature having vanished, so surface it instead of masking it.
+                raise
+            log_event(
+                "ForwardSync",
+                f"Tally rejected the native Sales Order voucher for RENTAL-ORD-{data.get('id')} — "
+                "Order Processing looks unavailable on this Tally company. Remembering this for "
+                "every other rental_order sync from now on; this specific order will retry with "
+                "the plain Sales fallback on the next sync cycle.",
+            )
+            self.cfg.tally_order_processing_available = False
+            self.order_processing_auto_detected = True
+            raise
 
     def sync_invoice(self, data: Dict[str, Any]) -> str:
         remote_id = f"RENTAL-INV-{data.get('id')}"

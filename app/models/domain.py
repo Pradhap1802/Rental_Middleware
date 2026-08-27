@@ -20,6 +20,14 @@ class AppConfig(BaseModel):
     # get rejected outright.
     tally_edu_mode: bool = Field(default=False)
 
+    # Whether this Tally company's "Order Processing" F11 feature actually accepts
+    # Sales Order voucher imports via the XML gateway. None = unknown (try the native
+    # "Sales Order" voucher first). False = confirmed unavailable (e.g. an unlicensed/
+    # Educational-mode install, or Order Processing disabled) — auto-detected the same
+    # way tally_edu_mode is, so Rent Out sync stops re-attempting a voucher type this
+    # Tally install will never accept. True = confirmed working.
+    tally_order_processing_available: Optional[bool] = Field(default=None)
+
     # General Settings
     sync_interval_minutes: int = Field(default=10)
     auto_sync_enabled: bool = Field(default=False)

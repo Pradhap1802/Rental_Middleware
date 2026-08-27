@@ -196,6 +196,100 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
     return build_import_envelope(msg, report_name="Vouchers", company_name=company_name)
 
 
+def build_sales_order_voucher_xml_native(data: Dict[str, Any], action: str = "Create", company_name: Optional[str] = None, edu_mode: bool = False) -> str:
+    """
+    Builds a REAL Tally "Sales Order" voucher for Rent Outs — the correct, non-posting
+    representation on a Tally company where "Order Processing" (F11) is actually
+    enabled, so Rent Outs show up in Tally's own Sales Order Book without prematurely
+    booking revenue the way build_sales_order_voucher_xml's "Sales" fallback does.
+
+    Only usable where Order Processing works — confirmed live this rejects on an
+    unlicensed/Educational-mode install (see build_sales_order_voucher_xml's docstring
+    for the exhaustive live verification). TallyClient.sync_rental_order tries this
+    first and falls back to build_sales_order_voucher_xml on failure, remembering the
+    outcome in cfg.tally_order_processing_available the same way tally_edu_mode is
+    auto-detected, so a working install always gets real orders and a non-working one
+    stops re-attempting this path every cycle.
+
+    Item lines go in a top-level ALLINVENTORYENTRIES.LIST (a sibling of
+    ALLLEDGERENTRIES.LIST, directly under VOUCHER) — matching a real Tally-exported
+    Sales Order (REAL_SALES_ORDER_XML in tests/test_tally_fetcher.py). No GST ledger
+    lines: Order vouchers are non-posting in Tally (they don't affect account
+    balances), so the party/sales ledger entries just carry the order's full amount —
+    GST is booked for real only later, on the actual Sales invoice.
+    """
+    num = (
+        data.get("number") or data.get("rent_code") or data.get("rent_number")
+        or data.get("code") or data.get("quotation_number") or f"ORD-{data.get('id')}"
+    )
+    cust_name = (
+        data.get("customer_name") or (data.get("customer") or {}).get("name")
+        or data.get("client_name") or f"Customer-{data.get('customer_id')}"
+    )
+    amount = float(
+        data.get("amount") or data.get("total_amount") or data.get("grand_total")
+        or data.get("rent_amount") or data.get("subtotal") or 0
+    )
+    date_str = format_tally_date(data.get("rent_date") or data.get("order_date") or data.get("date") or data.get("created_at"), edu_mode=edu_mode)
+
+    prereq_ledgers = f"""          <LEDGER NAME="{escape_xml(cust_name)}" ACTION="Create">
+            <NAME>{escape_xml(cust_name)}</NAME>
+            <PARENT>Sundry Debtors</PARENT>
+          </LEDGER>
+          <LEDGER NAME="Sales Account" ACTION="Create">
+            <NAME>Sales Account</NAME>
+            <PARENT>Sales Accounts</PARENT>
+          </LEDGER>\n"""
+
+    party_entry = f"""            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>{escape_xml(cust_name)}</LEDGERNAME>
+              <ISPARTYLEDGER>YES</ISPARTYLEDGER>
+              <ISDEEMEDPOSITIVE>YES</ISDEEMEDPOSITIVE>
+              <AMOUNT>-{amount:.2f}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>"""
+
+    items = data.get("rent_items") or data.get("items") or data.get("assets") or data.get("details") or []
+    inventory_entries = ""
+    if isinstance(items, list) and len(items) > 0:
+        for item in items:
+            if isinstance(item, dict):
+                raw_item_name = item.get("name") or (item.get("asset") or {}).get("name") or item.get("asset_name") or "Equipment"
+                item_name = raw_item_name.split(" - ")[0].strip() if " - " in raw_item_name else raw_item_name.strip()
+                qty = item.get("quantity") or item.get("qty") or 1
+                price = float(item.get("price") or item.get("rent_price") or item.get("rate") or 0)
+                item_total = float(item.get("total_price") or item.get("amount") or item.get("total") or (price * qty))
+                unit = item.get("unit") or "Nos"
+
+                inventory_entries += f"""
+            <ALLINVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>{escape_xml(item_name)}</STOCKITEMNAME>
+              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+              <RATE>{price:.2f}/{escape_xml(unit)}</RATE>
+              <AMOUNT>{item_total:.2f}</AMOUNT>
+              <ACTUALQTY>{qty} {escape_xml(unit)}</ACTUALQTY>
+              <BILLEDQTY>{qty} {escape_xml(unit)}</BILLEDQTY>
+            </ALLINVENTORYENTRIES.LIST>"""
+
+    sales_entry = f"""
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Sales Account</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>NO</ISDEEMEDPOSITIVE>
+              <AMOUNT>{amount:.2f}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>"""
+
+    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="Sales Order" ACTION="{action}" REMOTEID="RENTAL-ORD-{data.get('id')}">
+            <REMOTEID>RENTAL-ORD-{data.get('id')}</REMOTEID>
+            <DATE>{date_str}</DATE>
+            <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
+            <VOUCHERTYPENAME>Sales Order</VOUCHERTYPENAME>
+            <VOUCHERNUMBER>{escape_xml(num)}</VOUCHERNUMBER>
+            <NARRATION>RENTAL-ORD-{data.get('id')}</NARRATION>
+            <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{inventory_entries}{party_entry}{sales_entry}
+          </VOUCHER>"""
+
+    return build_import_envelope(msg, report_name="Vouchers", company_name=company_name)
+
+
 def _resolve_order_gst_percent(data: Dict[str, Any]) -> float:
     """
     RentAsst's rental_order payload carries GST as a flat percentage, under a few

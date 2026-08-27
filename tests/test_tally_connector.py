@@ -803,5 +803,91 @@ class TestSalesOrderVoucherTypeAndNumbering(unittest.TestCase):
         self.assertIn("<VOUCHERNUMBER>R100001-CUSTOM</VOUCHERNUMBER>", xml)
 
 
+class TestRentalOrderNativeVsFallbackVoucherType(unittest.TestCase):
+    """
+    TallyClient.sync_rental_order tries a real "Sales Order" voucher first (correct
+    when Order Processing works) and falls back to the "Sales" shape
+    (build_sales_order_voucher_xml) only when that's rejected — confirmed live that
+    Order Processing is unavailable on some Tally installations (unlicensed/
+    Educational mode, or the feature just disabled) while a plain Sales voucher works
+    fine. cfg.tally_order_processing_available remembers the outcome so it isn't
+    re-discovered (and re-failed) on every single rental_order sync.
+    """
+
+    def _check_exists_resp(self):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"<ENVELOPE><BODY><DATA><COLLECTION></COLLECTION></DATA></BODY></ENVELOPE>"
+        return resp
+
+    def _rejected_resp(self):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"""<ENVELOPE><BODY><IMPORTRESULT>
+            <CREATED>0</CREATED>
+            <LINEERROR>Bad Order Number in Voucher!</LINEERROR>
+        </IMPORTRESULT></BODY></ENVELOPE>"""
+        return resp
+
+    def _success_resp(self):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"<ENVELOPE><BODY><IMPORTRESULT><CREATED>1</CREATED><LASTVCHID>9</LASTVCHID></IMPORTRESULT></BODY></ENVELOPE>"
+        return resp
+
+    def test_unknown_mode_tries_native_first_and_never_double_attempts_the_same_order(self):
+        """
+        Confirmed live: a failed import under a given REMOTEID/bill-name can leave
+        Tally rejecting a SECOND attempt under that identical identifier too, even
+        with a totally different voucher type. So when Order Processing is unknown, a
+        rejected native attempt must raise (dead-lettering just this one order) rather
+        than immediately retrying the SAME order with the fallback shape.
+        """
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        self.assertIsNone(cfg.tally_order_processing_available)
+        mock_session = MagicMock()
+        mock_session.post.side_effect = [self._check_exists_resp(), self._rejected_resp()]
+        client = TallyClient(cfg, session=mock_session)
+
+        with self.assertRaises(ValueError):
+            client.sync_rental_order({"id": 2, "number": "R100001", "customer_name": "Test", "grand_total": 118})
+
+        self.assertEqual(mock_session.post.call_count, 2)  # check_exists + one rejected attempt, no retry
+        self.assertFalse(cfg.tally_order_processing_available)
+        self.assertTrue(client.order_processing_auto_detected)
+
+        native_call_body = mock_session.post.call_args_list[1].kwargs.get("data")
+        native_call_body = native_call_body.decode("utf-8") if isinstance(native_call_body, bytes) else native_call_body
+        self.assertIn('VTYPE="Sales Order"', native_call_body)
+
+    def test_known_unavailable_goes_straight_to_fallback(self):
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally", tally_order_processing_available=False)
+        mock_session = MagicMock()
+        mock_session.post.side_effect = [self._check_exists_resp(), self._success_resp()]
+        client = TallyClient(cfg, session=mock_session)
+
+        result = client.sync_rental_order({"id": 3, "number": "R100002", "customer_name": "Test", "grand_total": 118})
+
+        self.assertEqual(result, "RENTAL-ORD-3")
+        self.assertEqual(mock_session.post.call_count, 2)  # check_exists + one successful fallback attempt
+        fallback_body = mock_session.post.call_args_list[1].kwargs.get("data")
+        fallback_body = fallback_body.decode("utf-8") if isinstance(fallback_body, bytes) else fallback_body
+        self.assertIn('VTYPE="RentAsst Sales"', fallback_body)
+
+    def test_known_available_uses_native_and_does_not_fall_back_on_a_real_error(self):
+        """Once confirmed working, a fresh rejection is a real data problem with THIS
+        order, not evidence Order Processing vanished — it must surface, not be masked."""
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally", tally_order_processing_available=True)
+        mock_session = MagicMock()
+        mock_session.post.side_effect = [self._check_exists_resp(), self._rejected_resp()]
+        client = TallyClient(cfg, session=mock_session)
+
+        with self.assertRaises(ValueError):
+            client.sync_rental_order({"id": 4, "number": "R100003", "customer_name": "Test", "grand_total": 118})
+
+        self.assertTrue(cfg.tally_order_processing_available)  # unchanged
+        self.assertFalse(client.order_processing_auto_detected)
+
+
 if __name__ == "__main__":
     unittest.main()
