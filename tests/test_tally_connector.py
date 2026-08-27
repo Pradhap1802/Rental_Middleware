@@ -1018,6 +1018,58 @@ class TestRentalOrderNativeVsFallbackVoucherType(unittest.TestCase):
         self.assertTrue(cfg.tally_order_processing_available)  # unchanged
         self.assertFalse(client.order_processing_auto_detected)
 
+    def _exception_only_resp(self):
+        # No LINEERROR/ERROR/EXCEPTION text at all — confirmed live this is a real
+        # Tally response shape for a permanently rejected REMOTEID: EXCEPTIONS>0 with
+        # nothing actually created/altered for the voucher itself, but no readable
+        # error text anywhere in the response.
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"<ENVELOPE><BODY><IMPORTRESULT><CREATED>0</CREATED><ALTERED>5</ALTERED><LASTVCHID>0</LASTVCHID><EXCEPTIONS>1</EXCEPTIONS></IMPORTRESULT></BODY></ENVELOPE>"
+        return resp
+
+    def test_permanently_rejected_identifier_retries_once_under_a_suffixed_id(self):
+        """
+        Confirmed live against a real order: Tally can permanently reject a specific
+        REMOTEID/bill-name with EXCEPTIONS>0 and no readable error text, even after
+        switching voucher types entirely — check_exists confirms nothing was ever
+        actually created under it, yet every attempt under that identifier keeps
+        failing identically. A single retry under a deterministic '-R2' suffix must
+        let the order through instead of leaving it dead-lettered on every cycle
+        forever.
+        """
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally", tally_order_processing_available=False)
+        mock_session = MagicMock()
+        mock_session.post.side_effect = [
+            self._check_exists_resp(),      # check_exists for RENTAL-ORD-5
+            self._exception_only_resp(),    # first attempt under RENTAL-ORD-5 -> rejected
+            self._check_exists_resp(),      # check_exists for RENTAL-ORD-5-R2
+            self._success_resp(),           # retry under RENTAL-ORD-5-R2 -> succeeds
+        ]
+        client = TallyClient(cfg, session=mock_session)
+
+        result = client.sync_rental_order({"id": 5, "number": "R100003", "customer_name": "Test", "grand_total": 118})
+
+        self.assertEqual(result, "RENTAL-ORD-5-R2")
+        self.assertEqual(mock_session.post.call_count, 4)
+        retry_body = mock_session.post.call_args_list[3].kwargs.get("data")
+        retry_body = retry_body.decode("utf-8") if isinstance(retry_body, bytes) else retry_body
+        self.assertIn('REMOTEID="RENTAL-ORD-5-R2"', retry_body)
+
+    def test_a_real_data_rejection_with_error_text_is_not_treated_as_permanently_stuck(self):
+        """The mirror case: a rejection that DOES carry real LINEERROR text (a
+        genuine data problem) must not trigger the suffix-retry — that's reserved
+        for the silent 'nothing created, no error text' signature specifically."""
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally", tally_order_processing_available=False)
+        mock_session = MagicMock()
+        mock_session.post.side_effect = [self._check_exists_resp(), self._rejected_resp()]
+        client = TallyClient(cfg, session=mock_session)
+
+        with self.assertRaises(ValueError):
+            client.sync_rental_order({"id": 6, "number": "R100004", "customer_name": "Test", "grand_total": 118})
+
+        self.assertEqual(mock_session.post.call_count, 2)  # no retry attempted
+
 
 if __name__ == "__main__":
     unittest.main()

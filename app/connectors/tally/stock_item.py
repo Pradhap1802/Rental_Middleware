@@ -181,11 +181,21 @@ def build_stock_item_xml(
             category_master_xml = f"""          <STOCKCATEGORY NAME="{escape_xml(category)}" ACTION="Create">\n            <NAME>{escape_xml(category)}</NAME>\n          </STOCKCATEGORY>\n"""
         category_item_tag = f"\n            <CATEGORY>{escape_xml(category)}</CATEGORY>"
 
+    # BASEUNITS is only sent on Create. Confirmed live: Tally hard-rejects an ENTIRE
+    # Alter with "Cannot alter Units of '<name>'!" the moment a stock item has any
+    # transaction history (opening balance, a voucher, etc.) — Tally treats a stock
+    # item's base unit as locked in at creation, and refuses the whole Alter even when
+    # the resent value is identical to what's already there. Since BASEUNITS was
+    # unconditionally included on every Alter, this made EVERY subsequent update
+    # (GST/price/description/anything) permanently fail forever for any item with real
+    # stock movement, not just genuine unit changes. Tally itself keeps the item's
+    # existing BASEUNITS unchanged when the tag is simply omitted from an Alter.
+    baseunits_tag = f"\n            <BASEUNITS>{escape_xml(unit)}</BASEUNITS>" if action != "Alter" else ""
+
     item_xml = f"""{unit_xml}{group_xml}{category_master_xml}          <STOCKITEM NAME="{escape_xml(name)}" ACTION="{action}">
             <NAME>{escape_xml(name)}</NAME>
             <MAILINGNAME.LIST ISMODIFY="Yes" ACTION="Delete"/>
-            <PARENT>{escape_xml(group)}</PARENT>{category_item_tag}
-            <BASEUNITS>{escape_xml(unit)}</BASEUNITS>{desc_tag}{opening_balance_tag}{opening_rate_tag}{opening_val_tag}{gst_block}{price_xml}{cost_xml}
+            <PARENT>{escape_xml(group)}</PARENT>{category_item_tag}{baseunits_tag}{desc_tag}{opening_balance_tag}{opening_rate_tag}{opening_val_tag}{gst_block}{price_xml}{cost_xml}
           </STOCKITEM>"""
 
     return build_import_envelope(item_xml, report_name="All Masters", company_name=company_name)

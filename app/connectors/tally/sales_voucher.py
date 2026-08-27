@@ -2,7 +2,7 @@ from typing import Dict, Any, Optional
 from .xml_builder import escape_xml, format_tally_date, build_import_envelope
 
 
-def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", company_name: Optional[str] = None, edu_mode: bool = False) -> str:
+def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", company_name: Optional[str] = None, edu_mode: bool = False, remote_id: Optional[str] = None) -> str:
     """
     Builds Tally VOUCHER XML for Rent Outs.
 
@@ -156,7 +156,12 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
             <GSTDUTYHEAD>State Tax</GSTDUTYHEAD>
           </LEDGER>\n"""
 
-    bill_name = f"RENTAL-ORD-{data.get('id')}"
+    # remote_id defaults to the standard RENTAL-ORD-{id} marker, but callers can
+    # override it — TallyClient.sync_rental_order() does this to retry once under a
+    # deterministic suffixed identifier when Tally has permanently rejected the
+    # original one (see that method's docstring for why a rejected voucher's own
+    # REMOTEID can get permanently stuck, unrelated to any real data problem).
+    bill_name = remote_id or f"RENTAL-ORD-{data.get('id')}"
     party_entry = f"""            <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>{escape_xml(cust_name)}</LEDGERNAME>
               <ISPARTYLEDGER>YES</ISPARTYLEDGER>
@@ -192,20 +197,20 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
               <AMOUNT>{sgst_val:.2f}</AMOUNT>
             </ALLLEDGERENTRIES.LIST>"""
 
-    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="RentAsst Sales" ACTION="{action}" REMOTEID="RENTAL-ORD-{data.get('id')}">
-            <REMOTEID>RENTAL-ORD-{data.get('id')}</REMOTEID>
+    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="RentAsst Sales" ACTION="{action}" REMOTEID="{escape_xml(bill_name)}">
+            <REMOTEID>{escape_xml(bill_name)}</REMOTEID>
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
             <VOUCHERTYPENAME>RentAsst Sales</VOUCHERTYPENAME>
             <VOUCHERNUMBER>{escape_xml(num)}</VOUCHERNUMBER>
-            <NARRATION>RENTAL-ORD-{data.get('id')}</NARRATION>
+            <NARRATION>{escape_xml(bill_name)}</NARRATION>
             <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{party_entry}{sales_entry}{tax_entry}
           </VOUCHER>"""
 
     return build_import_envelope(msg, report_name="Vouchers", company_name=company_name)
 
 
-def build_sales_order_voucher_xml_native(data: Dict[str, Any], action: str = "Create", company_name: Optional[str] = None, edu_mode: bool = False) -> str:
+def build_sales_order_voucher_xml_native(data: Dict[str, Any], action: str = "Create", company_name: Optional[str] = None, edu_mode: bool = False, remote_id: Optional[str] = None) -> str:
     """
     Builds a REAL Tally "Sales Order" voucher for Rent Outs — the correct, non-posting
     representation on a Tally company where "Order Processing" (F11) is actually
@@ -286,13 +291,17 @@ def build_sales_order_voucher_xml_native(data: Dict[str, Any], action: str = "Cr
               <AMOUNT>{amount:.2f}</AMOUNT>
             </ALLLEDGERENTRIES.LIST>"""
 
-    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="Sales Order" ACTION="{action}" REMOTEID="RENTAL-ORD-{data.get('id')}">
-            <REMOTEID>RENTAL-ORD-{data.get('id')}</REMOTEID>
+    # See build_sales_order_voucher_xml's matching comment: remote_id lets
+    # TallyClient.sync_rental_order() retry once under a deterministic suffixed
+    # identifier when Tally has permanently rejected the original one.
+    rid = remote_id or f"RENTAL-ORD-{data.get('id')}"
+    msg = f"""{prereq_ledgers}          <VOUCHER VTYPE="Sales Order" ACTION="{action}" REMOTEID="{escape_xml(rid)}">
+            <REMOTEID>{escape_xml(rid)}</REMOTEID>
             <DATE>{date_str}</DATE>
             <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
             <VOUCHERTYPENAME>Sales Order</VOUCHERTYPENAME>
             <VOUCHERNUMBER>{escape_xml(num)}</VOUCHERNUMBER>
-            <NARRATION>RENTAL-ORD-{data.get('id')}</NARRATION>
+            <NARRATION>{escape_xml(rid)}</NARRATION>
             <PARTYLEDGERNAME>{escape_xml(cust_name)}</PARTYLEDGERNAME>{inventory_entries}{party_entry}{sales_entry}
           </VOUCHER>"""
 

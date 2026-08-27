@@ -474,31 +474,48 @@ class TallyClient:
         cfg.tally_order_processing_available remembers which one actually works, the
         same way tally_edu_mode is auto-detected.
 
-        Deliberately does NOT retry the SAME order with the fallback shape when the
-        native attempt fails and the mode was still unknown — confirmed live that a
-        failed import under a given REMOTEID/bill-name combination can leave Tally in
-        a state that rejects a SECOND attempt under that identical identifier too
-        (the same "stuck identifier" behavior seen with a real order stuck on
-        "Bad Order Number in Voucher!" even after switching voucher types entirely).
-        Instead: on first-ever failure, remember order_processing_available=False and
-        let this one order fail normally (dead-lettered, retried next cycle) — every
-        OTHER order in this same batch, and every order from here on, goes straight to
-        the fallback shape with a clean, never-before-attempted identifier.
+        A voucher Tally rejects outright — EXCEPTIONS>0 with nothing actually created
+        (validate_tally_accounting_success's "voucher touched=False") — can leave that
+        specific REMOTEID/bill-name permanently stuck: confirmed live that a real
+        order kept failing under its original identifier ("Bad Order Number in
+        Voucher!") even after order_processing_available was learned False and every
+        OTHER order started succeeding via the fallback shape — switching voucher type
+        did not un-stick it, and Tally's own check_exists confirmed nothing was ever
+        actually created under that identifier either. _attempt() below is retried
+        exactly once under a deterministic '-R2' suffix when this exact signature is
+        seen, so the order stops being permanently stuck instead of dead-lettering
+        forever on every cycle. Deterministic (not random) so a mapping saved under
+        the '-R2' id stays stable across future cycles instead of drifting.
         """
         remote_id = f"RENTAL-ORD-{data.get('id')}"
+        try:
+            return self._attempt_sync_rental_order(data, remote_id)
+        except ValueError as e:
+            if "voucher touched=False" not in str(e):
+                raise
+            retry_remote_id = f"{remote_id}-R2"
+            log_event(
+                "ForwardSync",
+                f"Tally permanently rejected '{remote_id}' with nothing actually created ({e}) — "
+                f"retrying once under a fresh identifier '{retry_remote_id}' instead of leaving "
+                "this order dead-lettered forever.",
+            )
+            return self._attempt_sync_rental_order(data, retry_remote_id)
+
+    def _attempt_sync_rental_order(self, data: Dict[str, Any], remote_id: str) -> str:
         action = "Alter" if self.check_exists("rental_orders", remote_id) else "Create"
         company_name = getattr(self.cfg, "tally_company_name", None)
         order_processing_available = getattr(self.cfg, "tally_order_processing_available", None)
 
         if order_processing_available is False:
             self._send_voucher_with_edu_fallback(
-                lambda edu_mode: build_sales_order_voucher_xml(data, action=action, company_name=company_name, edu_mode=edu_mode)
+                lambda edu_mode: build_sales_order_voucher_xml(data, action=action, company_name=company_name, edu_mode=edu_mode, remote_id=remote_id)
             )
             return remote_id
 
         try:
             self._send_voucher_with_edu_fallback(
-                lambda edu_mode: build_sales_order_voucher_xml_native(data, action=action, company_name=company_name, edu_mode=edu_mode)
+                lambda edu_mode: build_sales_order_voucher_xml_native(data, action=action, company_name=company_name, edu_mode=edu_mode, remote_id=remote_id)
             )
             if order_processing_available is None:
                 self.cfg.tally_order_processing_available = True
