@@ -1440,6 +1440,35 @@ class TestEquipmentReverseSync(unittest.TestCase):
         mock_ra_client.push_equipment.assert_not_called()
         self.assertEqual(stats2["skipped"], 1)
 
+    def test_matches_existing_asset_despite_extra_internal_whitespace_in_its_name(self):
+        """
+        Confirmed live: a RentAsst asset named "Water  Bottle" (double space) failed to
+        name-match Tally's "Water Bottle" (single space) under a plain .strip().lower()
+        comparison, so reverse sync never found it and created a genuine duplicate
+        asset. Matching must collapse internal whitespace on both sides, not just trim
+        the ends, so a formatting difference like this doesn't cause a duplicate create.
+        """
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_equipment.return_value = [{"id": 9, "name": "Water  Bottle"}]
+        mock_ra_client.get_equipment.return_value = {
+            "skip_inventory": True, "available_quantity": 5,
+            "branch": [{"branch_id": 1, "quantity": 5}],
+            "unit_id": 3, "category_id": None, "category_ids": None,
+            "enabled_for_rent": True,
+        }
+
+        stock_item = {
+            "name": "Water Bottle", "parent": "", "unit": "pc",
+            "hsn_code": "392690", "gst_rate": 18.0, "quantity": 5.0,
+            "rent_price": 20.0, "alter_id": 401,
+        }
+
+        stats = self._run_sync(mock_ra_client, stock_item)
+
+        mock_ra_client.push_equipment.assert_not_called()
+        mock_ra_client.update_equipment.assert_called_once_with("9", unittest.mock.ANY)
+        self.assertEqual(stats["updated"], 1)
+
     def test_updates_a_reverse_owned_asset_when_hsn_gst_quantity_or_rent_price_changes(self):
         self.store.save_mapping(
             entity_type="equipment", source_id="Diag Reverse Asset", target_id="20",

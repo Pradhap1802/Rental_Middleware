@@ -7,6 +7,20 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
 
+def _normalize_name_for_match(name: Optional[str]) -> str:
+    """
+    Lowercases, trims, and collapses internal whitespace runs to a single space —
+    used wherever a Tally record name is matched against RentAsst's live list to
+    decide "does this already exist" before creating a new record. A plain
+    .strip().lower() only handles leading/trailing whitespace and case; confirmed
+    live that a RentAsst asset named "Water  Bottle" (double space) failed to match
+    Tally's "Water Bottle" (single space) under that comparison, so reverse sync
+    never found it and created a genuine duplicate. Collapsing internal whitespace
+    on both sides closes that gap without weakening the match otherwise.
+    """
+    return re.sub(r"\s+", " ", (name or "").strip().lower())
+
+
 def _synthetic_mobile_number(name: str) -> str:
     """
     Deterministic placeholder mobile number for a Tally party with no real one, used
@@ -577,7 +591,7 @@ def sync_tally_to_rentasst(
                     cloud_custs = ra_client.fetch_customers()
                     if isinstance(cloud_custs, list):
                         for c in cloud_custs:
-                            if (c.get("name") or "").strip().lower() == cust_name.lower():
+                            if _normalize_name_for_match(c.get("name")) == _normalize_name_for_match(cust_name):
                                 ra_id = str(c.get("id"))
                                 break
                     else:
@@ -772,7 +786,7 @@ def sync_tally_to_rentasst(
                     cloud_assets = ra_client.fetch_equipment()
                     if isinstance(cloud_assets, list):
                         for a in cloud_assets:
-                            if (a.get("name") or "").strip().lower() == item_name.lower():
+                            if _normalize_name_for_match(a.get("name")) == _normalize_name_for_match(item_name):
                                 ra_id = str(a.get("id"))
                                 break
                     else:
