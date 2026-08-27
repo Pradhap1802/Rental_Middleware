@@ -44,6 +44,25 @@ def _extract_primary_mobile(ledger: Dict[str, Any], cust_name: str) -> str:
     return _synthetic_mobile_number(cust_name)
 
 
+def _has_real_tally_mobile(ledger: Dict[str, Any]) -> bool:
+    """
+    True only when this Tally ledger has an actual mobile/phone number entered —
+    i.e. _extract_primary_mobile() didn't have to fall back to a synthetic
+    placeholder. Used to decide whether reverse sync's UPDATE path is allowed to
+    touch RentAsst's 'mobile' field at all: confirmed live that a customer with no
+    mobile entered in Tally had their REAL RentAsst mobile silently overwritten with
+    a fake placeholder number on every reverse sync, purely because Tally's ledger
+    had nothing filled in — not entering a mobile in Tally must mean "leave RentAsst's
+    own value alone", not "erase it with a synthetic one".
+    """
+    clean_mobile = re.sub(r"\D", "", str(ledger.get("mobile") or ""))
+    if len(clean_mobile) >= 10:
+        return True
+    first_phone_segment = str(ledger.get("phone") or "").split(",")[0]
+    clean_phone = re.sub(r"\D", "", first_phone_segment)
+    return len(clean_phone) >= 10
+
+
 def _extract_address_payload(ledger: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Builds a RentAsst-shaped address record from a Tally ledger's ADDRESS.LIST/PINCODE/
@@ -417,7 +436,7 @@ def is_tally_voucher_duplicate(v: Dict[str, Any], store: MappingStore, ra_client
             except Exception as e:
                 log_event("ReverseSync", f"Cloud invoice deduplication lookup note: {e}")
 
-        elif v_type in ("sales order", "sales orders", "order", "orders", "rental order", "rental orders"):
+        elif v_type in ("sales order", "sales orders", "order", "orders", "rental order", "rental orders", "rentasst sales"):
             try:
                 cloud_orders = ra_client.fetch_rental_orders()
                 if isinstance(cloud_orders, list):
@@ -508,6 +527,7 @@ def sync_tally_to_rentasst(
                 continue
 
             mobile_number = _extract_primary_mobile(l, cust_name)
+            has_real_mobile = _has_real_tally_mobile(l)
             address_payload = _extract_address_payload(l)
             email = l.get("email") or ""
             gst_number = l.get("gstin") or ""
@@ -571,10 +591,23 @@ def sync_tally_to_rentasst(
                     # 'address' key here does nothing on this endpoint.
                     update_payload = {
                         "name": cust_name,
-                        "mobile": mobile_number,
                         "email": email,
                         "customer_gst_number": gst_number,
                     }
+                    if has_real_mobile:
+                        update_payload["mobile"] = mobile_number
+                    else:
+                        # RentAsst's PUT /customer/{id} validates the full record —
+                        # 'mobile' is required, omitting it 422s (confirmed live) — so
+                        # when Tally has no real mobile, read back and resend RentAsst's
+                        # OWN current value unchanged rather than the synthetic
+                        # placeholder, which would otherwise overwrite a real mobile the
+                        # customer already has on file.
+                        try:
+                            current_detail = ra_client.get_customer(ra_id) or {}
+                        except Exception:
+                            current_detail = {}
+                        update_payload["mobile"] = current_detail.get("mobile") or mobile_number
                     ra_client.update_customer(ra_id, update_payload)
                     if address_payload is not None:
                         _push_customer_address(ra_client, ra_id, address_payload)
@@ -901,7 +934,16 @@ def sync_tally_to_rentasst(
 
             v_type = (v.get("voucher_type") or "").lower().strip()
             is_invoice_type = v_type in ("sales", "sales invoice", "invoice")
-            is_rentout_type = v_type in ("sales order", "sales orders", "order", "orders", "rental order", "rental orders")
+            # "rentasst sales" is TallyClient.sync_rental_order's own dedicated voucher
+            # type (build_sales_order_voucher_xml — see its docstring for why it's not
+            # a real "Sales Order"). A forward-synced rentout is already excluded above
+            # by is_own_forward_sync_voucher regardless of type, but any NEW rentout a
+            # human enters directly in Tally naturally lands under this same type too,
+            # since it's the only Order-like option this company's Tally now has —
+            # confirmed live: a real, non-forward-synced "RentAsst Sales" voucher fell
+            # through unclassified (matched neither is_invoice_type nor is_rentout_type)
+            # and was silently never reverse-synced at all.
+            is_rentout_type = v_type in ("sales order", "sales orders", "order", "orders", "rental order", "rental orders", "rentasst sales")
 
             # Invoices and rentouts get their own create-vs-update-vs-skip handling further
             # down (an already-synced record must still be checked for missing line items
@@ -916,7 +958,7 @@ def sync_tally_to_rentasst(
                 party_name = v.get("party_name") or "Customer"
                 iso_date = format_iso_date(v.get("date"))
 
-                if v_type in ("sales order", "sales orders", "order", "orders", "rental order", "rental orders"):
+                if v_type in ("sales order", "sales orders", "order", "orders", "rental order", "rental orders", "rentasst sales"):
                     cust_id = resolve_customer_id(party_name, ra_client, store)
                     amount = float(v.get("amount") or 0.0)
                     # RentAsst's create-rent-details endpoint (RentDetailsRequest) requires
