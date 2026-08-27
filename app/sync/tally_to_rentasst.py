@@ -280,6 +280,48 @@ def _int_or_none(value: Optional[str]) -> Optional[int]:
     return int(text) if text.isdigit() else None
 
 
+def _resolve_equipment_rentasst_id(item_name: str, store: MappingStore, ra_client: Optional[Any]) -> Optional[str]:
+    """
+    Resolves a Tally stock item name to its RentAsst asset id, for stamping onto a
+    reverse-synced rentout/invoice line's asset_id field.
+
+    store.get_external_id("equipment", name) only finds a hit for a Tally-originated
+    (reverse-owned) equipment mapping — a RentAsst-native asset that also happens to
+    exist in Tally under the same name (the equipment reverse-sync loop's
+    "forward_owned" case) is tracked under the separate EQUIPMENT_REVERSE_WATCH_ENTITY
+    synthetic entity type instead, and never gets an entity_type="equipment" mapping
+    row at all. Leaving asset_id null for a genuinely existing item is dangerous, not
+    just a missed enrichment: confirmed live against RentAsst's own RentService::
+    createQuickAssetCreateAndReconstructItems() (routes/api.php's store/rent_items and
+    invoice-items endpoints both go through it) — when asset_id is null it silently
+    "quick-creates" a brand-new placeholder asset from the item's bare name instead of
+    rejecting or erroring, a convenience feature meant for a human typing a new item
+    directly into RentAsst's own UI. Every voucher referencing a RentAsst-native item
+    (e.g. 'Bag', created directly in RentAsst before ever existing in Tally) hit this
+    exact gap, producing a genuine duplicate asset with none of the real GST/HSN/
+    category/quantity data every single time. Falls back to the watch mapping, then to
+    a live name match against RentAsst's own equipment list as a last resort (covers
+    an item this cycle's own equipment reverse-sync hasn't reached yet) — a genuinely
+    unmatched item is the only case that still resolves to None.
+    """
+    if not item_name:
+        return None
+    rid = store.get_external_id("equipment", item_name) or store.get_external_id(EQUIPMENT_REVERSE_WATCH_ENTITY, item_name)
+    if rid:
+        return rid
+    if not ra_client:
+        return None
+    try:
+        cloud_assets = ra_client.fetch_equipment()
+        if isinstance(cloud_assets, list):
+            for a in cloud_assets:
+                if _normalize_name_for_match(a.get("name")) == _normalize_name_for_match(item_name):
+                    return str(a.get("id"))
+    except Exception:
+        pass
+    return None
+
+
 def _resolve_price_and_total(rate: Any, amount: Any, qty: int) -> "tuple[float, float]":
     """
     Derives a consistent (price, total_price) pair from Tally's per-item RATE/AMOUNT
@@ -892,7 +934,17 @@ def sync_tally_to_rentasst(
                     ] or [{"branch_id": 1, "quantity": current_detail.get("available_quantity") or 0}]
                     update_payload = {
                         "name": item_name,
-                        "calculation_method": current_detail.get("calculation_methods") or "[1]",
+                        # calculation_method (singular) is RentAsst's own plain-integer
+                        # rent-duration-basis column (1=day, 2=hour, 3=month, 4=flat) —
+                        # confirmed live against a real RentAsst-created asset, which
+                        # stores it separately from calculation_methods (plural, a
+                        # JSON-array-string of every ENABLED method, e.g. "[1]"). This
+                        # was reading the plural field back and writing it into the
+                        # singular key, sending a string like "[1]" where RentAsst
+                        # expects a plain int — preserve the asset's own current
+                        # singular value instead, defaulting to 1 (day-based) only if
+                        # it's genuinely missing.
+                        "calculation_method": current_detail.get("calculation_method") or 1,
                         "hsn_code": hsn_code,
                         "gst_rate": gst_rate if gst_rate > 0 else None,
                         "description": description,
@@ -955,7 +1007,10 @@ def sync_tally_to_rentasst(
                         pass
                     update_payload = {
                         "name": item_name,
-                        "calculation_method": "[1]",
+                        # 1 = day-based (RentAsst's own plain-integer calculation_method
+                        # column — see the matching comment on the forward-owned branch
+                        # above for why this must be a plain int, not "[1]").
+                        "calculation_method": 1,
                         "hsn_code": hsn_code,
                         "gst_rate": gst_rate if gst_rate > 0 else None,
                         "unit_id": unit_id,
@@ -992,7 +1047,7 @@ def sync_tally_to_rentasst(
             stats["processed"] += 1
             asset_payload = {
                 "name": item_name,
-                "calculation_method": "[1]",
+                "calculation_method": 1,  # day-based — see matching comment above
                 "rent_price": f"{rent_price:.2f}",
                 "day_based_rent_price": f"{rent_price:.2f}",
                 "purchase_price": "0.00",
@@ -1152,7 +1207,7 @@ def sync_tally_to_rentasst(
                             # live: omitting rent_from raised "Undefined array key 'rent_from'"
                             # inside that availability check and surfaced as an HTTP 500).
                             "id": None,
-                            "asset_id": _int_or_none(store.get_external_id("equipment", item_name)),
+                            "asset_id": _int_or_none(_resolve_equipment_rentasst_id(item_name, store, ra_client)),
                             "asset_name": item_name,
                             "rented_quantity": qty,
                             "price": price,
@@ -1391,7 +1446,7 @@ def sync_tally_to_rentasst(
                         price, total_price = _resolve_price_and_total(it.get("rate"), it.get("amount"), qty)
                         resolved_items.append({
                             "name": item_name,
-                            "asset_id": _int_or_none(store.get_external_id("equipment", item_name)),
+                            "asset_id": _int_or_none(_resolve_equipment_rentasst_id(item_name, store, ra_client)),
                             "quantity": qty,
                             "price": price,
                             "total_price": total_price,

@@ -970,6 +970,99 @@ class TestReverseSyncHardening(unittest.TestCase):
         self.assertTrue(pushed_rentout["settings"])
         self.assertIn("refund_type", pushed_rentout["settings"])
 
+    def test_reverse_sync_resolves_asset_id_for_a_rentasst_native_item_via_the_watch_mapping(self):
+        """
+        A RentAsst-native asset (created directly in RentAsst, never through this
+        reverse-sync's own equipment-create path) is tracked under the separate
+        EQUIPMENT_REVERSE_WATCH_ENTITY synthetic entity type, never under
+        entity_type="equipment" — store.get_external_id("equipment", name) alone
+        always misses it. Confirmed live: leaving asset_id null for a voucher line
+        referencing an item in this state made RentAsst's own "quick asset create"
+        feature (RentService::createQuickAssetCreateAndReconstructItems) silently
+        spawn a genuine duplicate asset with none of the real GST/HSN/category/
+        quantity data, instead of resolving to the real existing asset.
+        """
+        self.store.save_mapping(
+            entity_type="equipment_reverse_watch",
+            source_id="Bag",
+            target_id="24",
+            source_system="tally",
+            target_system="rentasst",
+        )
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_customers.return_value = []
+        mock_ra_client.push_customer.return_value = {"id": 9}
+        mock_ra_client.push_rentout.return_value = {"id": "CLOUD-ORD-NATIVE"}
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        voucher = {
+            "tally_guid": "GUID-SALES-ORDER-NATIVE",
+            "alter_id": 32,
+            "voucher_type": "Sales Order",
+            "voucher_number": "ORD-NATIVE",
+            "party_name": "Acme Corp",
+            "date": "2026-08-20",
+            "amount": 100.0,
+            "items": [{"name": "Bag", "quantity": "10 Piece", "rate": "10.00/Piece", "amount": "100.00"}],
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_vouchers.return_value = [voucher]
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            sync_tally_to_rentasst(
+                ra_client=mock_ra_client,
+                ext_client=mock_ext_client,
+                store=self.store,
+                force_full_sync=True,
+            )
+
+        pushed_items = mock_ra_client.push_rentout_items.call_args[0][1]
+        self.assertEqual(pushed_items[0]["asset_id"], 24)
+        mock_ra_client.fetch_equipment.assert_not_called()  # resolved via the watch mapping, no live lookup needed
+
+    def test_reverse_sync_falls_back_to_a_live_equipment_lookup_when_no_mapping_exists_yet(self):
+        """The last-resort case: an item with no local mapping at all (this cycle's
+        own equipment reverse-sync hasn't reached it yet) still resolves asset_id via
+        a live name match against RentAsst's own equipment list, rather than leaving
+        it null and letting RentAsst's quick-create spawn a duplicate."""
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_customers.return_value = []
+        mock_ra_client.push_customer.return_value = {"id": 9}
+        mock_ra_client.push_rentout.return_value = {"id": "CLOUD-ORD-LIVE"}
+        mock_ra_client.fetch_equipment.return_value = [{"id": 55, "name": "Unmapped Widget"}]
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        voucher = {
+            "tally_guid": "GUID-SALES-ORDER-LIVE",
+            "alter_id": 33,
+            "voucher_type": "Sales Order",
+            "voucher_number": "ORD-LIVE",
+            "party_name": "Acme Corp",
+            "date": "2026-08-20",
+            "amount": 50.0,
+            "items": [{"name": "Unmapped Widget", "quantity": "1 Piece", "rate": "50.00/Piece", "amount": "50.00"}],
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_vouchers.return_value = [voucher]
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            sync_tally_to_rentasst(
+                ra_client=mock_ra_client,
+                ext_client=mock_ext_client,
+                store=self.store,
+                force_full_sync=True,
+            )
+
+        pushed_items = mock_ra_client.push_rentout_items.call_args[0][1]
+        self.assertEqual(pushed_items[0]["asset_id"], 55)
+
     def test_reverse_sync_skips_voucher_already_being_processed_by_a_concurrent_reverse_sync_run(self):
         """
         Same reverse-sync-vs-reverse-sync guard as the customer/equipment loops, applied
@@ -1470,6 +1563,12 @@ class TestEquipmentReverseSync(unittest.TestCase):
         self.assertEqual(payload["branch"], [{"branch_id": 1, "quantity": 6}])
         self.assertEqual(payload["rent_price"], "150.00")
         self.assertEqual(payload["day_based_rent_price"], "150.00")
+        # RentAsst's calculation_method column is a plain int (1=day-based), not the
+        # JSON-array-string "[1]" calculation_methods (plural) uses — confirmed live
+        # against a real RentAsst-created asset. Sending the wrong type/field here is
+        # what phantom duplicate assets (RentAsst's own quick-asset-create feature)
+        # ended up with instead of a real day-based rental item.
+        self.assertEqual(payload["calculation_method"], 1)
         self.assertEqual(stats["created"], 1)
 
     def test_updates_gst_hsn_and_rent_price_on_a_forward_owned_asset_without_touching_quantity(self):
@@ -1500,7 +1599,7 @@ class TestEquipmentReverseSync(unittest.TestCase):
             "skip_inventory": False, "available_quantity": 10,
             "branch": [{"branch_id": 1, "quantity": 10}],
             "unit_id": 11, "category_id": 1, "category_ids": [1],
-            "enabled_for_rent": True, "calculation_methods": "[1]",
+            "enabled_for_rent": True, "calculation_method": 1, "calculation_methods": "[1]",
         }
 
         stock_item = {
@@ -1524,6 +1623,10 @@ class TestEquipmentReverseSync(unittest.TestCase):
         self.assertEqual(payload["skip_inventory"], False)
         self.assertEqual(payload["available_quantity"], 10)
         self.assertEqual(payload["branch"], [{"branch_id": 1, "quantity": 10}])
+        # Preserved from the asset's own current singular calculation_method (a plain
+        # int), not the plural calculation_methods (a JSON-array-string) — confirmed
+        # live these are two separate RentAsst fields.
+        self.assertEqual(payload["calculation_method"], 1)
         self.assertEqual(stats["updated"], 1)
 
         self.assertIsNone(self.store.find_mapping("equipment", "Dell Laptop"))
