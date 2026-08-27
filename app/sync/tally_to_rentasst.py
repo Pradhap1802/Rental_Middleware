@@ -2,6 +2,7 @@ import time
 import json
 import re
 import hashlib
+import threading
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
@@ -231,6 +232,7 @@ from ..logging.logger import log_event
 from .idempotency import generate_integration_key
 from .ownership import filter_payload_by_ownership
 from ..validation.validator import validate_entity_payload
+from ..queue.lock_manager import LockManager
 
 
 def format_iso_date(tally_date: Optional[str]) -> str:
@@ -501,6 +503,8 @@ def sync_tally_to_rentasst(
     """
     stats = {"processed": 0, "created": 0, "updated": 0, "failed": 0, "skipped": 0}
     start_time = time.time()
+    lock_mgr = LockManager(store.db_path)
+    worker_id = f"reverse-thread-{threading.get_ident()}"
 
     fetcher = TallyFetcher(ext_client.cfg)
     if force_full_sync:
@@ -663,18 +667,31 @@ def sync_tally_to_rentasst(
 
                 res = ra_client.push_customer(create_payload)
                 ra_id = str(res.get("id") or f"RA-CUST-{l_alter_id}")
-                if address_payload is not None:
-                    _push_customer_address(ra_client, ra_id, address_payload)
-                store.save_mapping(
-                    entity_type="customer",
-                    source_id=cust_name,
-                    target_id=ra_id,
-                    source_system="tally",
-                    target_system="rentasst",
-                    last_synced_hash=current_hash,
-                )
-                store.add_history("customer", ra_id, "synced", external_id=cust_name, details="Tally Customer Reverse Sync")
-                stats["created"] += 1
+                # Reserve this brand-new RentAsst id under forward sync's OWN lock key
+                # (same company/entity_type/"forward"/item_id scheme app/sync/base.py
+                # uses) immediately, before any further network calls — a concurrently
+                # running forward sync that fetches this record before our mapping row
+                # is saved would otherwise treat it as RentAsst-native (no mapping yet
+                # found) and push it right back into Tally as a duplicate. Holding this
+                # lock through save_mapping makes forward sync's own acquire_lock() for
+                # the same id fail and skip that item for this cycle instead.
+                xdir_lock_key = lock_mgr.generate_lock_key("default", "customer", "forward", ra_id)
+                lock_mgr.acquire_lock(xdir_lock_key, worker_id, lease_seconds=120)
+                try:
+                    if address_payload is not None:
+                        _push_customer_address(ra_client, ra_id, address_payload)
+                    store.save_mapping(
+                        entity_type="customer",
+                        source_id=cust_name,
+                        target_id=ra_id,
+                        source_system="tally",
+                        target_system="rentasst",
+                        last_synced_hash=current_hash,
+                    )
+                    store.add_history("customer", ra_id, "synced", external_id=cust_name, details="Tally Customer Reverse Sync")
+                    stats["created"] += 1
+                finally:
+                    lock_mgr.release_lock(xdir_lock_key, worker_id)
             except Exception as e:
                 stats["failed"] += 1
                 log_event("ReverseSync", f"Failed to push Tally customer '{cust_name}': {e}")
@@ -926,16 +943,25 @@ def sync_tally_to_rentasst(
             try:
                 res = ra_client.push_equipment(asset_payload)
                 ra_id = str(res.get("id") or f"RA-ASSET-{s_alter_id}")
-                store.save_mapping(
-                    entity_type="equipment",
-                    source_id=item_name,
-                    target_id=ra_id,
-                    source_system="tally",
-                    target_system="rentasst",
-                    last_synced_hash=current_hash,
-                )
-                store.add_history("equipment", ra_id, "synced", external_id=item_name, details="Tally Stock Item Reverse Sync")
-                stats["created"] += 1
+                # See the matching comment on the customer create path above: reserve
+                # this id under forward sync's own "forward" lock key immediately so a
+                # concurrently running forward sync can't treat it as RentAsst-native
+                # and push it back into Tally as a duplicate before our mapping lands.
+                xdir_lock_key = lock_mgr.generate_lock_key("default", "equipment", "forward", ra_id)
+                lock_mgr.acquire_lock(xdir_lock_key, worker_id, lease_seconds=120)
+                try:
+                    store.save_mapping(
+                        entity_type="equipment",
+                        source_id=item_name,
+                        target_id=ra_id,
+                        source_system="tally",
+                        target_system="rentasst",
+                        last_synced_hash=current_hash,
+                    )
+                    store.add_history("equipment", ra_id, "synced", external_id=item_name, details="Tally Stock Item Reverse Sync")
+                    stats["created"] += 1
+                finally:
+                    lock_mgr.release_lock(xdir_lock_key, worker_id)
             except Exception as e:
                 stats["failed"] += 1
                 log_event("ReverseSync", f"Failed to push Tally stock item '{item_name}': {e}")
@@ -1109,25 +1135,36 @@ def sync_tally_to_rentasst(
                     ra_id = str(res.get("id") or res.get("rentasst_id") or f"RA-ORD-{alter_id}")
                     rev_key = generate_integration_key("default", "rental_order", tally_guid, "reverse")
 
-                    store.save_mapping(
-                        entity_type="rental_order",
-                        source_id=tally_guid,
-                        target_id=ra_id,
-                        source_system="tally",
-                        target_system="rentasst",
-                        integration_key=rev_key,
-                        status="synced",
-                    )
-                    store.add_history("rental_order", ra_id, "synced", external_id=tally_guid, details="Tally Sales Order Reverse Sync")
+                    # Reserve this brand-new RentAsst id under forward sync's own
+                    # "forward" lock key immediately — see the matching comment on the
+                    # customer create path above. Prevents a concurrently running
+                    # forward sync from treating this rentout as RentAsst-native and
+                    # pushing it right back into Tally as a duplicate voucher before
+                    # our mapping row lands.
+                    xdir_lock_key = lock_mgr.generate_lock_key("default", "rental_order", "forward", ra_id)
+                    lock_mgr.acquire_lock(xdir_lock_key, worker_id, lease_seconds=120)
+                    try:
+                        store.save_mapping(
+                            entity_type="rental_order",
+                            source_id=tally_guid,
+                            target_id=ra_id,
+                            source_system="tally",
+                            target_system="rentasst",
+                            integration_key=rev_key,
+                            status="synced",
+                        )
+                        store.add_history("rental_order", ra_id, "synced", external_id=tally_guid, details="Tally Sales Order Reverse Sync")
 
-                    # 5. Push asset/quantity/price lines once, right after creation
-                    if resolved_items:
-                        try:
-                            ra_client.push_rentout_items(ra_id, resolved_items)
-                        except Exception as e:
-                            log_event("ReverseSync", f"Failed to push rent items for RentAsst rentout {ra_id} (Tally GUID {tally_guid}): {e}")
+                        # 5. Push asset/quantity/price lines once, right after creation
+                        if resolved_items:
+                            try:
+                                ra_client.push_rentout_items(ra_id, resolved_items)
+                            except Exception as e:
+                                log_event("ReverseSync", f"Failed to push rent items for RentAsst rentout {ra_id} (Tally GUID {tally_guid}): {e}")
 
-                    stats["created"] += 1
+                        stats["created"] += 1
+                    finally:
+                        lock_mgr.release_lock(xdir_lock_key, worker_id)
 
                 elif v_type in ("sales", "sales invoice", "invoice"):
                     cust_id = resolve_customer_id(party_name, ra_client, store)
@@ -1278,25 +1315,36 @@ def sync_tally_to_rentasst(
                     ra_id = str(res.get("id") or res.get("rentasst_id") or f"RA-INV-{alter_id}")
                     rev_key = generate_integration_key("default", "invoice", tally_guid, "reverse")
 
-                    store.save_mapping(
-                        entity_type="invoice",
-                        source_id=tally_guid,
-                        target_id=ra_id,
-                        source_system="tally",
-                        target_system="rentasst",
-                        integration_key=rev_key,
-                        status="synced",
-                    )
-                    store.add_history("invoice", ra_id, "synced", external_id=tally_guid, details="Tally Sales Register Reverse Sync")
+                    # Reserve this brand-new RentAsst id under forward sync's own
+                    # "forward" lock key immediately — see the matching comment on the
+                    # customer create path above. Prevents a concurrently running
+                    # forward sync from treating this invoice as RentAsst-native and
+                    # pushing it right back into Tally as a duplicate before our
+                    # mapping row lands.
+                    xdir_lock_key = lock_mgr.generate_lock_key("default", "invoice", "forward", ra_id)
+                    lock_mgr.acquire_lock(xdir_lock_key, worker_id, lease_seconds=120)
+                    try:
+                        store.save_mapping(
+                            entity_type="invoice",
+                            source_id=tally_guid,
+                            target_id=ra_id,
+                            source_system="tally",
+                            target_system="rentasst",
+                            integration_key=rev_key,
+                            status="synced",
+                        )
+                        store.add_history("invoice", ra_id, "synced", external_id=tally_guid, details="Tally Sales Register Reverse Sync")
 
-                    # 6. Push product lines once, right after creation
-                    if resolved_items:
-                        try:
-                            ra_client.push_invoice_items(ra_id, resolved_items)
-                        except Exception as e:
-                            log_event("ReverseSync", f"Failed to push line items for RentAsst invoice {ra_id} (Tally GUID {tally_guid}): {e}")
+                        # 6. Push product lines once, right after creation
+                        if resolved_items:
+                            try:
+                                ra_client.push_invoice_items(ra_id, resolved_items)
+                            except Exception as e:
+                                log_event("ReverseSync", f"Failed to push line items for RentAsst invoice {ra_id} (Tally GUID {tally_guid}): {e}")
 
-                    stats["created"] += 1
+                        stats["created"] += 1
+                    finally:
+                        lock_mgr.release_lock(xdir_lock_key, worker_id)
 
                 elif v_type in ("receipt", "payment", "receipts", "payments"):
                     amount = float(v.get("amount") or 0.0)
@@ -1376,17 +1424,28 @@ def sync_tally_to_rentasst(
                     ra_id = str(res.get("id") or res.get("rentasst_id") or f"RA-PAY-{alter_id}")
                     rev_key = generate_integration_key("default", "payment", tally_guid, "reverse")
 
-                    store.save_mapping(
-                        entity_type="payment",
-                        source_id=tally_guid,
-                        target_id=ra_id,
-                        source_system="tally",
-                        target_system="rentasst",
-                        integration_key=rev_key,
-                        status="synced",
-                    )
-                    store.add_history("payment", ra_id, "synced", external_id=tally_guid, details="Tally Voucher Reverse Sync")
-                    stats["created"] += 1
+                    # Reserve this brand-new RentAsst id under forward sync's own
+                    # "forward" lock key immediately — see the matching comment on the
+                    # customer create path above. Prevents a concurrently running
+                    # forward sync from treating this payment as RentAsst-native and
+                    # pushing it right back into Tally as a duplicate before our
+                    # mapping row lands.
+                    xdir_lock_key = lock_mgr.generate_lock_key("default", "payment", "forward", ra_id)
+                    lock_mgr.acquire_lock(xdir_lock_key, worker_id, lease_seconds=120)
+                    try:
+                        store.save_mapping(
+                            entity_type="payment",
+                            source_id=tally_guid,
+                            target_id=ra_id,
+                            source_system="tally",
+                            target_system="rentasst",
+                            integration_key=rev_key,
+                            status="synced",
+                        )
+                        store.add_history("payment", ra_id, "synced", external_id=tally_guid, details="Tally Voucher Reverse Sync")
+                        stats["created"] += 1
+                    finally:
+                        lock_mgr.release_lock(xdir_lock_key, worker_id)
                 else:
                     stats["skipped"] += 1
 

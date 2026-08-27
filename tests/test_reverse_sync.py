@@ -136,6 +136,59 @@ class TestReverseSyncHardening(unittest.TestCase):
         self.assertEqual(addr_call[1]["state"], "Tamil Nadu")
         mock_ra_client.update_customer_address.assert_not_called()
 
+    def test_reverse_sync_holds_forward_lock_key_during_customer_create_critical_section(self):
+        """
+        Reverse sync's create path used to have no locking at all between "RentAsst
+        confirms the record was created" and "our local mapping row is saved" — a
+        concurrently running forward sync could fetch the just-created RentAsst
+        customer in that window, find no mapping yet, and push it right back into
+        Tally as a duplicate. It must now reserve the new id under forward sync's own
+        lock key (same company/entity_type/"forward"/item_id scheme app/sync/base.py
+        uses) for the duration of that window, so a concurrent forward-sync
+        acquire_lock() for the same id fails and that item is skipped instead.
+        """
+        from app.queue.lock_manager import LockManager
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_customers.return_value = []
+        mock_ra_client.push_customer.return_value = {"id": 501}
+        mock_ra_client.get_customer.return_value = {"address": []}
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        probe_lock_mgr = LockManager(self.db_path)
+        held_during_create = {}
+
+        def fake_save_mapping(*args, **kwargs):
+            lock_key = probe_lock_mgr.generate_lock_key("default", "customer", "forward", "501")
+            held_during_create["locked"] = not probe_lock_mgr.acquire_lock(lock_key, "rival-forward-worker", lease_seconds=5)
+            return None
+
+        self.store.save_mapping = MagicMock(side_effect=fake_save_mapping)
+
+        ledger = {
+            "name": "Test", "alter_id": 225, "phone": "", "mobile": "0987654321",
+            "email": "", "gstin": "", "address_lines": [], "pincode": "", "country": "", "state": "",
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_ledgers.return_value = [ledger]
+            mock_fetcher.fetch_stock_items.return_value = []
+            mock_fetcher.fetch_vouchers.return_value = []
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            sync_tally_to_rentasst(
+                ra_client=mock_ra_client, ext_client=mock_ext_client, store=self.store, force_full_sync=True,
+            )
+
+        self.assertTrue(held_during_create.get("locked"), "expected the forward-direction lock for the new id to be held during save_mapping")
+
+        # And it must be released afterward — a real forward sync for this id must be
+        # able to acquire it on its own next attempt.
+        lock_key = probe_lock_mgr.generate_lock_key("default", "customer", "forward", "501")
+        self.assertTrue(probe_lock_mgr.acquire_lock(lock_key, "another-worker", lease_seconds=5))
+
     def test_reverse_sync_skips_new_customer_when_existence_check_fails_instead_of_creating_duplicate(self):
         """
         Same class of bug already fixed for equipment (confirmed live: a transient
