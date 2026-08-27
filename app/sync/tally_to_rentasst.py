@@ -1196,13 +1196,18 @@ def sync_tally_to_rentasst(
                                         # unconditionally and retry once; a rentout that
                                         # already has non-default settings would already have
                                         # succeeded on the first attempt above and never reach
-                                        # here.
+                                        # here. rent_from/rent_to are deliberately omitted —
+                                        # confirmed live that including them on this PATCH-like
+                                        # update crashes RentAsst's update-rent-details endpoint
+                                        # with a 500 (likely an availability/conflict
+                                        # recalculation triggered by a date change, run before
+                                        # this rentout has any rent items yet) — the rentout
+                                        # already has valid dates from its original create, so
+                                        # this patch only needs to touch 'settings'.
                                         ra_client.update_rentout(existing_ra_id, {
                                             "settings": DEFAULT_RENTOUT_SETTINGS,
                                             "status": 1,
                                             "customer_id": cust_id,
-                                            "rent_from": iso_datetime,
-                                            "rent_to": iso_datetime,
                                         })
                                         ra_client.push_rentout_items(existing_ra_id, resolved_items)
                                     store.add_history("rental_order", existing_ra_id, "synced", external_id=tally_guid, details="Tally Sales Order Reverse Sync — backfilled missing rent items")
