@@ -235,6 +235,31 @@ class TestCheckExistsInRentasst(unittest.TestCase):
 
         self.assertTrue(self.client.check_exists_in_rentasst("equipment", "1"))
 
+    def test_total_connection_failure_fails_open_not_treated_as_deleted(self):
+        """
+        Confirmed live: RentAsst's local API has intermittent outages. If every
+        endpoint attempt raises (timeout/connection error) rather than returning a
+        real HTTP response, that must NOT be read as "record deleted" — reverse
+        sync's self-heal path drops the mapping and creates a genuine duplicate asset
+        the instant that happens, which is exactly what occurred live to both
+        'Dell Laptop' and 'Dell Mouse'.
+        """
+        import requests as requests_module
+
+        self.client.session.get = MagicMock(side_effect=requests_module.exceptions.ReadTimeout("timed out"))
+
+        self.assertTrue(self.client.check_exists_in_rentasst("equipment", "1"))
+
+    def test_real_404_response_still_treated_as_not_existing(self):
+        # A genuine HTTP response (even a 404) is a real signal from the server, unlike
+        # a network-level failure -- this must still resolve to "doesn't exist".
+        real_404 = MagicMock()
+        real_404.status_code = 404
+
+        self.client.session.get = MagicMock(return_value=real_404)
+
+        self.assertFalse(self.client.check_exists_in_rentasst("equipment", "1"))
+
 
 if __name__ == "__main__":
     unittest.main()

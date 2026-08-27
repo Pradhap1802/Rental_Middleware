@@ -361,10 +361,12 @@ class RentAsstClient:
         else:
             return True
 
+        got_any_response = False
         for endpoint in endpoints:
             url = f"{self.base_url}/{endpoint.lstrip('/')}"
             try:
                 r = self.session.get(url, headers=self.headers, timeout=5, verify=self.cfg.verify_ssl)
+                got_any_response = True
                 if r.status_code not in (200, 204):
                     continue
                 # Not every endpoint tried above is a real API route for every entity
@@ -386,7 +388,18 @@ class RentAsstClient:
                 if isinstance(payload, list) and payload:
                     return True
             except Exception:
-                pass
+                continue
+
+        if not got_any_response:
+            # Every single attempt failed at the network level (timeout/connection
+            # error) — RentAsst's local API is confirmed live to have intermittent
+            # outages. Returning False here would tell reverse sync's self-heal logic
+            # "this record was deleted," which drops a perfectly valid mapping and
+            # creates a genuine duplicate asset the moment the connection recovers
+            # (confirmed live: this happened repeatedly to 'Dell Laptop'/'Dell Mouse').
+            # Only a real response (even a 404) is trusted to mean "doesn't exist" —
+            # a total connectivity failure must fail open instead.
+            return True
         return False
 
 
