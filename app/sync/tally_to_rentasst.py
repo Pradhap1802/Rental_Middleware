@@ -400,16 +400,35 @@ def is_tally_voucher_duplicate(v: Dict[str, Any], store: MappingStore, ra_client
 
     if tally_guid:
         for ent in ("rental_orders", "rental_order", "invoice", "payment"):
+            # A matching integration_key used to return True immediately here, before
+            # ever reaching the check_exists_in_rentasst staleness check below — since
+            # save_mapping() always sets integration_key on create, that made this the
+            # path virtually every already-mapped voucher took, and the self-heal
+            # logic below effectively never ran in practice. Resolve ra_id from
+            # EITHER source first, then verify existence once, so a genuinely deleted
+            # RentAsst record still gets self-healed regardless of which lookup found
+            # its mapping (confirmed live: rentout 9's mapping was only found via
+            # integration_key, never get_rentasst_id, so it kept being treated as
+            # "still exists" forever with no self-heal).
             rev_key = generate_integration_key("default", ent, tally_guid, "reverse")
-            if store.find_by_integration_key(rev_key):
-                return True
-            ra_id = store.get_rentasst_id(ent, tally_guid)
-            if ra_id:
-                if ra_client and not ra_client.check_exists_in_rentasst(ent, ra_id):
-                    log_event("ReverseSync", f"Record Tally GUID {tally_guid} ('{v_no}') exists in middleware DB but was deleted in RentAsst. Resyncing...")
-                    store.delete(ent, ra_id)
-                    return False
-                return True
+            key_match = store.find_by_integration_key(rev_key)
+            ra_id = store.get_rentasst_id(ent, tally_guid) or ((key_match or {}).get("target_id") if key_match else None)
+            if not ra_id:
+                continue
+            if ra_client and not ra_client.check_exists_in_rentasst(ent, ra_id):
+                log_event("ReverseSync", f"Record Tally GUID {tally_guid} ('{v_no}') exists in middleware DB but was deleted in RentAsst. Resyncing...")
+                # store.delete() matches its own mapping table's rentasst_id/source_id
+                # columns — for every reverse-sync-created voucher mapping those are
+                # always tally_guid (save_mapping is always called with
+                # source_id=tally_guid throughout this module), never ra_id (the
+                # RentAsst-side target_id). Passing ra_id here matched zero rows,
+                # silently no-opping the delete — the stale mapping was never actually
+                # dropped, so is_tally_voucher_duplicate kept re-discovering and
+                # re-reporting the same "deleted in RentAsst, resyncing" state forever
+                # without ever letting a fresh create through.
+                store.delete(ent, tally_guid)
+                return False
+            return True
 
     if v_no:
         for ent in ("rental_orders", "rental_order", "invoice", "payment"):
@@ -1177,6 +1196,15 @@ def sync_tally_to_rentasst(
                         # safe to run on every sync: once items exist, this never re-pushes
                         # and never duplicates them.
                         if existing_ra_id and resolved_items:
+                            # A rentout whose item push has already failed repeatedly (see
+                            # the 3-strike logic below) is skipped instantly, without a
+                            # network round-trip or a fresh error log every single cycle
+                            # forever. record_lock_key is released by the outer finally
+                            # below regardless of which branch/continue is taken.
+                            failure_tracker = store.find_mapping("rentout_backfill_failures", tally_guid)
+                            if (failure_tracker or {}).get("status") == "blocked":
+                                stats["skipped"] += 1
+                                continue
                             try:
                                 # get_rentout() hits 'get-rent-details/{id}' — confirmed live
                                 # to 404 on this RentAsst deployment, unlike the sibling
@@ -1198,34 +1226,69 @@ def sync_tally_to_rentasst(
                                 if not current_count:
                                     try:
                                         ra_client.push_rentout_items(existing_ra_id, resolved_items)
-                                    except Exception:
+                                        store.add_history("rental_order", existing_ra_id, "synced", external_id=tally_guid, details="Tally Sales Order Reverse Sync — backfilled missing rent items")
+                                        stats["updated"] += 1
+                                    except Exception as push_err:
                                         # A rentout created before 'settings' was included on
                                         # create (below) still has a null settings column,
                                         # which crashes RentAsst's own item-creation
-                                        # transaction (see DEFAULT_RENTOUT_SETTINGS) and rolls
-                                        # back the item insert — the first push_rentout_items
-                                        # attempt above fails in exactly that case. Since the
-                                        # rentout's current settings can no longer be checked
-                                        # proactively (get_rentout is broken), patch it
-                                        # unconditionally and retry once; a rentout that
-                                        # already has non-default settings would already have
-                                        # succeeded on the first attempt above and never reach
-                                        # here. rent_from/rent_to are deliberately omitted —
-                                        # confirmed live that including them on this PATCH-like
-                                        # update crashes RentAsst's update-rent-details endpoint
-                                        # with a 500 (likely an availability/conflict
-                                        # recalculation triggered by a date change, run before
-                                        # this rentout has any rent items yet) — the rentout
-                                        # already has valid dates from its original create, so
-                                        # this patch only needs to touch 'settings'.
-                                        ra_client.update_rentout(existing_ra_id, {
-                                            "settings": DEFAULT_RENTOUT_SETTINGS,
-                                            "status": 1,
-                                            "customer_id": cust_id,
-                                        })
-                                        ra_client.push_rentout_items(existing_ra_id, resolved_items)
-                                    store.add_history("rental_order", existing_ra_id, "synced", external_id=tally_guid, details="Tally Sales Order Reverse Sync — backfilled missing rent items")
-                                    stats["updated"] += 1
+                                        # transaction (see DEFAULT_RENTOUT_SETTINGS). Patching
+                                        # settings via update-rent-details was tried here
+                                        # before, but confirmed live (against this exact
+                                        # deployment) that update-rent-details unconditionally
+                                        # overwrites customer_id/customer_address_id/settings
+                                        # on EVERY call, and crashes with "Attempt to read
+                                        # property 'customer_id' on null" for any rentout
+                                        # whose OWN customer_id is already null in RentAsst's
+                                        # database — reproduced against real rentouts with
+                                        # every payload shape tried (with/without customer_id,
+                                        # nested/flat), so for THOSE specific records this is
+                                        # a RentAsst-side data/server bug no payload from here
+                                        # can work around. Not every push_rentout_items()
+                                        # failure is necessarily that same unrecoverable case
+                                        # though (a transient network blip is still possible),
+                                        # so this doesn't give up on the very first failure —
+                                        # sync_version on the failures mapping counts
+                                        # consecutive attempts (save_mapping auto-increments it
+                                        # on every upsert to the same key) and only stops
+                                        # retrying after 3 straight failures, avoiding a
+                                        # forever-noisy retry loop for a truly permanent case
+                                        # while still giving a one-off transient failure a
+                                        # couple of cycles to recover on its own.
+                                        store.save_mapping(
+                                            entity_type="rentout_backfill_failures",
+                                            source_id=tally_guid,
+                                            target_id=existing_ra_id,
+                                            source_system="tally",
+                                            target_system="rentasst",
+                                            status="failed",
+                                        )
+                                        attempts = (store.find_mapping("rentout_backfill_failures", tally_guid) or {}).get("sync_version") or 1
+                                        if attempts >= 3:
+                                            store.save_mapping(
+                                                entity_type="rentout_backfill_failures",
+                                                source_id=tally_guid,
+                                                target_id=existing_ra_id,
+                                                source_system="tally",
+                                                target_system="rentasst",
+                                                status="blocked",
+                                            )
+                                            log_event(
+                                                "ReverseSync",
+                                                f"RentAsst rentout {existing_ra_id} (Tally GUID {tally_guid}) has failed to "
+                                                f"receive its rent items {attempts} sync cycles in a row ({push_err}) — likely "
+                                                "a null/broken settings or customer link on this specific rentout in "
+                                                "RentAsst's own database that the API can't repair (update-rent-details "
+                                                "itself 500s on records in this state). Not retrying automatically anymore "
+                                                "— fix this rentout directly in RentAsst.",
+                                            )
+                                        else:
+                                            log_event(
+                                                "ReverseSync",
+                                                f"Failed to backfill rent items for RentAsst rentout {existing_ra_id} "
+                                                f"(Tally GUID {tally_guid}), attempt {attempts}/3: {push_err}",
+                                            )
+                                        stats["failed"] += 1
                                 else:
                                     stats["skipped"] += 1
                             except Exception as e:

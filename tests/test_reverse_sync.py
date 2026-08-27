@@ -436,6 +436,38 @@ class TestReverseSyncHardening(unittest.TestCase):
         is_dup = is_tally_voucher_duplicate(voucher, self.store)
         self.assertTrue(is_dup)
 
+    def test_reverse_deduplication_self_heals_when_integration_key_matches_a_deleted_record(self):
+        """
+        A matching integration_key used to return True immediately, before the
+        check_exists_in_rentasst staleness check ever ran — since save_mapping()
+        always sets integration_key on create, that made this the path virtually
+        every already-mapped voucher took, so the self-heal logic never actually ran
+        in practice. Confirmed live: a rentout deleted from RentAsst kept being
+        treated as "still exists" forever, because its mapping was only ever found
+        via integration_key. A genuinely deleted RentAsst record must still be
+        detected and self-healed (stale mapping dropped, is_dup=False) regardless of
+        which lookup found its mapping.
+        """
+        tally_guid = "TALLY-VOUCHER-GUID-DELETED"
+        rev_key = generate_integration_key("default", "rental_order", tally_guid, "reverse")
+        self.store.save_mapping(
+            entity_type="rental_order",
+            source_id=tally_guid,
+            target_id="4",
+            integration_key=rev_key,
+            status="synced",
+        )
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.check_exists_in_rentasst.return_value = False
+
+        voucher = {"tally_guid": tally_guid, "voucher_number": "ORD-DELETED", "voucher_type": "Sales Order"}
+        is_dup = is_tally_voucher_duplicate(voucher, self.store, mock_ra_client)
+
+        self.assertFalse(is_dup)
+        mock_ra_client.check_exists_in_rentasst.assert_called_once_with("rental_order", "4")
+        self.assertIsNone(self.store.find_mapping("rental_order", tally_guid))
+
     def test_reverse_sync_preflight_validation_failure_dlq(self):
         mock_ra_client = MagicMock()
         mock_ext_client = MagicMock()
@@ -980,14 +1012,23 @@ class TestReverseSyncHardening(unittest.TestCase):
         mock_ra_client.push_rentout.assert_not_called()
         self.assertGreaterEqual(stats["skipped"], 1)
 
-    def test_reverse_sync_backfill_patches_null_settings_before_pushing_items(self):
+    def test_reverse_sync_backfill_retries_a_transient_push_failure_without_blocking(self):
         """
         A rentout created before 'settings' was included on create (or created directly
-        via this reverse-sync path some other way) still has a null settings column —
-        RentAsst's own RentItemsService::updateRentDeposit() reads
+        via this reverse-sync path some other way) can still have a null settings
+        column — RentAsst's own RentItemsService::updateRentDeposit() reads
         $rent->settings->refund_type unconditionally, and a null settings crashes that
-        whole DB transaction, rolling back the item insert too. The backfill path must
-        patch settings first whenever it's missing.
+        whole DB transaction, rolling back the item insert too.
+
+        A prior version of this code reactively patched settings via update_rentout()
+        (update-rent-details/{id}) and retried — but confirmed live against this exact
+        RentAsst deployment that update-rent-details unconditionally re-reads the
+        rentout's OWN existing customer relation before applying anything from the
+        payload, and crashes for any rentout whose customer link is already broken,
+        regardless of what's sent. Retrying it was not just ineffective, it added a
+        second guaranteed 500 on top of the first failure. The backfill path must not
+        call update_rentout at all here; a single failed attempt is logged and counted
+        toward a 3-strike limit (see the next test) rather than retried inline.
         """
         self.store.save_mapping(
             entity_type="equipment",
@@ -1010,11 +1051,8 @@ class TestReverseSyncHardening(unittest.TestCase):
 
         mock_ra_client = MagicMock()
         mock_ra_client.get_rent_items.return_value = []
-        # get_rentout()'s own endpoint ('get-rent-details/{id}') is confirmed to 404 in
-        # production, so the settings-null state can no longer be checked proactively —
-        # the first push_rentout_items() attempt simulates RentAsst's real crash on a
-        # null-settings rentout, then succeeds once retried after the settings patch.
-        mock_ra_client.push_rentout_items.side_effect = [Exception("Attempt to read property 'refund_type' on null"), {"id": 1}]
+        mock_ra_client.check_exists_in_rentasst.return_value = True
+        mock_ra_client.push_rentout_items.side_effect = Exception("Attempt to read property 'refund_type' on null")
         mock_ext_client = MagicMock()
         mock_ext_client.cfg = MagicMock()
 
@@ -1034,23 +1072,84 @@ class TestReverseSyncHardening(unittest.TestCase):
             mock_fetcher.fetch_vouchers.return_value = [voucher]
             mock_fetcher_cls.return_value = mock_fetcher
 
-            sync_tally_to_rentasst(
+            stats = sync_tally_to_rentasst(
                 ra_client=mock_ra_client,
                 ext_client=mock_ext_client,
                 store=self.store,
                 force_full_sync=True,
             )
 
-        mock_ra_client.update_rentout.assert_called_once()
-        patched_id, patched_payload = mock_ra_client.update_rentout.call_args[0]
-        self.assertEqual(patched_id, "17")
-        self.assertTrue(patched_payload["settings"])
-        # The failed push, the settings patch, and the retried push must happen in that
-        # order — the patch is only ever attempted reactively, after a first attempt
-        # fails, and the retry is what actually delivers the items.
+        mock_ra_client.update_rentout.assert_not_called()
+        self.assertEqual(mock_ra_client.push_rentout_items.call_count, 1)
+        self.assertEqual(stats["failed"], 1)
+        tracker = self.store.find_mapping("rentout_backfill_failures", tally_guid)
+        self.assertIsNotNone(tracker)
+        self.assertNotEqual(tracker.get("status"), "blocked")
+
+    def test_reverse_sync_backfill_stops_retrying_after_three_consecutive_failures(self):
+        """A rentout whose item push keeps failing cycle after cycle must eventually
+        stop being retried (and stop logging a fresh error every cycle) instead of
+        hammering RentAsst forever — but only after several failures, not the first,
+        since a single failure could still be a transient blip."""
+        tally_guid = "GUID-PERSISTENTLY-BROKEN-ORD"
+        rev_key = generate_integration_key("default", "rental_order", tally_guid, "reverse")
+        self.store.save_mapping(
+            entity_type="rental_order",
+            source_id=tally_guid,
+            target_id="4",
+            source_system="tally",
+            target_system="rentasst",
+            integration_key=rev_key,
+            status="synced",
+        )
+        self.store.save_mapping(
+            entity_type="equipment",
+            source_id="Earphone",
+            target_id="4",
+            source_system="tally",
+            target_system="rentasst",
+        )
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.get_rent_items.return_value = []
+        mock_ra_client.check_exists_in_rentasst.return_value = True
+        mock_ra_client.push_rentout_items.side_effect = Exception("Attempt to read property 'refund_type' on null")
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        voucher = {
+            "tally_guid": tally_guid,
+            "alter_id": 44,
+            "voucher_type": "Sales Order",
+            "voucher_number": "ORD-PERSISTENTLY-BROKEN",
+            "party_name": "Acme Corp",
+            "date": "2026-08-20",
+            "amount": 50.0,
+            "items": [{"name": "Earphone", "quantity": "1 Piece", "rate": "50.00/Piece", "amount": "50.00"}],
+        }
+
+        def run_one_cycle():
+            with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+                mock_fetcher = MagicMock()
+                mock_fetcher.fetch_vouchers.return_value = [voucher]
+                mock_fetcher_cls.return_value = mock_fetcher
+                return sync_tally_to_rentasst(
+                    ra_client=mock_ra_client, ext_client=mock_ext_client, store=self.store, force_full_sync=True,
+                )
+
+        run_one_cycle()
+        run_one_cycle()
         self.assertEqual(mock_ra_client.push_rentout_items.call_count, 2)
-        call_names = [c[0] for c in mock_ra_client.method_calls if c[0] in ("push_rentout_items", "update_rentout")]
-        self.assertEqual(call_names, ["push_rentout_items", "update_rentout", "push_rentout_items"])
+
+        run_one_cycle()
+        self.assertEqual(mock_ra_client.push_rentout_items.call_count, 3)
+        tracker = self.store.find_mapping("rentout_backfill_failures", tally_guid)
+        self.assertEqual(tracker.get("status"), "blocked")
+
+        # A 4th cycle must skip instantly — no further push attempt, no further growth.
+        stats4 = run_one_cycle()
+        self.assertEqual(mock_ra_client.push_rentout_items.call_count, 3)
+        self.assertGreaterEqual(stats4["skipped"], 1)
 
     def test_reverse_sync_backfill_skips_settings_patch_when_first_push_succeeds(self):
         """The mirror case: a rentout whose settings are already populated succeeds on

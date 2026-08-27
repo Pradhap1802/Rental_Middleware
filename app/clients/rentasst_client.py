@@ -350,8 +350,20 @@ class RentAsstClient:
 
         ent = (entity_type or "").lower().strip()
         endpoints = []
-        if ent in ("rental_orders", "rental_order", "rent", "invoices", "invoice"):
-            endpoints = [f"invoices/{rid}", f"invoice/{rid}", f"get-rent-details/{rid}", f"rent/{rid}"]
+        if ent in ("rental_orders", "rental_order", "rent"):
+            # 'rent/{id}' is confirmed live as the real single-rentout GET route —
+            # 'get-rent-details/{id}' 404s (not a registered route at all; see
+            # get_rent_items()'s own confirmed-working 'get-rent-items/{id}' sibling
+            # for the naming convention that IS real). Deliberately excludes any
+            # invoices/invoice endpoint: invoice ids and rent ids are independent
+            # sequences in RentAsst — confirmed live that invoice #4 exists while
+            # rent #4 does not, so checking invoices/{id} here produced a false
+            # "still exists" positive for a genuinely deleted rentout, which blocked
+            # is_tally_voucher_duplicate()'s self-heal (drop stale mapping, recreate)
+            # from ever running for it.
+            endpoints = [f"rent/{rid}"]
+        elif ent in ("invoices", "invoice"):
+            endpoints = [f"invoices/{rid}"]
         elif ent in ("payments", "payment"):
             endpoints = [f"payment/{rid}", f"payments/{rid}"]
         elif ent in ("customer", "customers"):
