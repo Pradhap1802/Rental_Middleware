@@ -299,18 +299,28 @@ def _resolve_equipment_rentasst_id(item_name: str, store: MappingStore, ra_clien
     directly into RentAsst's own UI. Every voucher referencing a RentAsst-native item
     (e.g. 'Bag', created directly in RentAsst before ever existing in Tally) hit this
     exact gap, producing a genuine duplicate asset with none of the real GST/HSN/
-    category/quantity data every single time. Falls back to the watch mapping, then to
-    a live name match against RentAsst's own equipment list as a last resort (covers
-    an item this cycle's own equipment reverse-sync hasn't reached yet) — a genuinely
-    unmatched item is the only case that still resolves to None.
+    category/quantity data every single time.
+
+    A locally cached id can itself be stale (the asset was deleted in RentAsst after
+    the mapping was saved — confirmed live: a mapping table entry for 'Dell Laptop'
+    still pointed at an id the user had since deleted) and sending a stale, no-longer-
+    existent asset_id is exactly as unsafe as sending null — RentAsst's own asset
+    lookup for that id finds nothing, and the same silent quick-create path spawns a
+    duplicate anyway. So a locally cached hit is verified against
+    check_exists_in_rentasst() before being trusted. Falls back to the watch mapping,
+    then (if neither cached id is confirmed live) to a live name match against
+    RentAsst's own equipment list as a last resort — a genuinely unmatched item is the
+    only case that still resolves to None.
     """
-    if not item_name:
+    if not item_name or not ra_client:
         return None
-    rid = store.get_external_id("equipment", item_name) or store.get_external_id(EQUIPMENT_REVERSE_WATCH_ENTITY, item_name)
-    if rid:
-        return rid
-    if not ra_client:
-        return None
+    for rid in (store.get_external_id("equipment", item_name), store.get_external_id(EQUIPMENT_REVERSE_WATCH_ENTITY, item_name)):
+        if rid:
+            try:
+                if ra_client.check_exists_in_rentasst("equipment", rid):
+                    return rid
+            except Exception:
+                return rid  # fail open — see check_exists_in_rentasst's own docstring
     try:
         cloud_assets = ra_client.fetch_equipment()
         if isinstance(cloud_assets, list):

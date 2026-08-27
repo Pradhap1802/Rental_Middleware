@@ -994,6 +994,7 @@ class TestReverseSyncHardening(unittest.TestCase):
         mock_ra_client.fetch_customers.return_value = []
         mock_ra_client.push_customer.return_value = {"id": 9}
         mock_ra_client.push_rentout.return_value = {"id": "CLOUD-ORD-NATIVE"}
+        mock_ra_client.check_exists_in_rentasst.return_value = True
         mock_ext_client = MagicMock()
         mock_ext_client.cfg = MagicMock()
 
@@ -1023,6 +1024,58 @@ class TestReverseSyncHardening(unittest.TestCase):
         pushed_items = mock_ra_client.push_rentout_items.call_args[0][1]
         self.assertEqual(pushed_items[0]["asset_id"], 24)
         mock_ra_client.fetch_equipment.assert_not_called()  # resolved via the watch mapping, no live lookup needed
+
+    def test_reverse_sync_falls_back_to_live_lookup_when_the_cached_asset_id_is_stale(self):
+        """
+        Confirmed live: a watch mapping for 'Dell Laptop' still pointed at an asset id
+        the user had since deleted in RentAsst. Trusting that stale id blindly is
+        exactly as unsafe as sending null — RentAsst's own lookup finds nothing for a
+        deleted id, and the same silent quick-create path spawns a duplicate anyway.
+        The cached id must be verified against check_exists_in_rentasst() before being
+        trusted, falling back to a live name match when it's confirmed gone.
+        """
+        self.store.save_mapping(
+            entity_type="equipment_reverse_watch",
+            source_id="Dell Laptop",
+            target_id="1",
+            source_system="tally",
+            target_system="rentasst",
+        )
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_customers.return_value = []
+        mock_ra_client.push_customer.return_value = {"id": 9}
+        mock_ra_client.push_rentout.return_value = {"id": "CLOUD-ORD-STALE"}
+        mock_ra_client.check_exists_in_rentasst.return_value = False  # id "1" was deleted
+        mock_ra_client.fetch_equipment.return_value = [{"id": 40, "name": "Dell Laptop"}]  # re-created under a new id
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        voucher = {
+            "tally_guid": "GUID-SALES-ORDER-STALE",
+            "alter_id": 34,
+            "voucher_type": "Sales Order",
+            "voucher_number": "ORD-STALE",
+            "party_name": "Acme Corp",
+            "date": "2026-08-20",
+            "amount": 150.0,
+            "items": [{"name": "Dell Laptop", "quantity": "1 Piece", "rate": "150.00/Piece", "amount": "150.00"}],
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_vouchers.return_value = [voucher]
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            sync_tally_to_rentasst(
+                ra_client=mock_ra_client,
+                ext_client=mock_ext_client,
+                store=self.store,
+                force_full_sync=True,
+            )
+
+        pushed_items = mock_ra_client.push_rentout_items.call_args[0][1]
+        self.assertEqual(pushed_items[0]["asset_id"], 40)
 
     def test_reverse_sync_falls_back_to_a_live_equipment_lookup_when_no_mapping_exists_yet(self):
         """The last-resort case: an item with no local mapping at all (this cycle's
