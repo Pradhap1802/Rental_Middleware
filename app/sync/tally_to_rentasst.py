@@ -666,6 +666,7 @@ def sync_tally_to_rentasst(
             # Tally item's name, as opposed to one this loop's own create/update path
             # actually produced.
             forward_owned = False
+            existence_check_failed = False
 
             if not ra_id:
                 try:
@@ -675,10 +676,27 @@ def sync_tally_to_rentasst(
                             if (a.get("name") or "").strip().lower() == item_name.lower():
                                 ra_id = str(a.get("id"))
                                 break
-                except Exception:
-                    pass
+                    else:
+                        existence_check_failed = True
+                except Exception as e:
+                    # Confirmed live: RentAsst's local API is not always reachable
+                    # (transient timeouts/connection resets). A failed existence check
+                    # must NEVER silently fall through to the create path below — that
+                    # created real duplicate assets in RentAsst (e.g. "Dell Laptop"
+                    # ended up as both id=1 and a newer id=18) every time this call
+                    # happened to fail while the asset genuinely already existed.
+                    existence_check_failed = True
+                    log_event(
+                        "ReverseSync",
+                        f"Could not verify whether '{item_name}' already exists in RentAsst "
+                        f"({e}) — skipping this cycle instead of risking a duplicate create.",
+                    )
                 if ra_id:
                     forward_owned = True
+
+            if not ra_id and existence_check_failed:
+                stats["skipped"] += 1
+                continue
 
             # A mapped RentAsst id can go stale (record deleted / DB reset on the
             # RentAsst side) — same reused-id collision confirmed live for customers. Runs
@@ -846,7 +864,7 @@ def sync_tally_to_rentasst(
                 "unit_id": unit_id,
                 "category_id": category_id,
                 "category_ids": json.dumps([category_id]) if category_id else None,
-                "skip_inventory": True,
+                "skip_inventory": False,
                 "enabled_for_rent": True,
                 "description": description,
                 "available_quantity": qty_int,
