@@ -551,6 +551,7 @@ def sync_tally_to_rentasst(
             existing_mapping = store.find_mapping("customer", cust_name)
             ra_id = (existing_mapping or {}).get("target_id") or (existing_mapping or {}).get("external_id")
 
+            customer_existence_check_failed = False
             if not ra_id:
                 try:
                     cloud_custs = ra_client.fetch_customers()
@@ -559,8 +560,25 @@ def sync_tally_to_rentasst(
                             if (c.get("name") or "").strip().lower() == cust_name.lower():
                                 ra_id = str(c.get("id"))
                                 break
-                except Exception:
-                    pass
+                    else:
+                        customer_existence_check_failed = True
+                except Exception as e:
+                    # Same class of bug already fixed for equipment (confirmed live:
+                    # transient RentAsst API failures produced real duplicate assets) —
+                    # a failed existence check here must NOT fall through to create,
+                    # since the customer may already exist in RentAsst under this exact
+                    # name. Skip this cycle instead; it's retried next cycle once the
+                    # API is reachable again.
+                    customer_existence_check_failed = True
+                    log_event(
+                        "ReverseSync",
+                        f"Could not verify whether customer '{cust_name}' already exists in "
+                        f"RentAsst (will retry next cycle instead of risking a duplicate create): {e}",
+                    )
+
+            if not ra_id and customer_existence_check_failed:
+                stats["skipped"] += 1
+                continue
 
             # A mapped RentAsst id can go stale (record deleted / DB reset on the RentAsst
             # side) — confirmed live: PUT /customer/{id} against a deleted id 404s forever
@@ -1303,11 +1321,27 @@ def sync_tally_to_rentasst(
                         try:
                             inv_list = ra_client.fetch_invoices()
                             if isinstance(inv_list, list):
+                                # Invoice numbers alone aren't unique across customers —
+                                # GST invoice numbering commonly resets per financial year,
+                                # so the same number can legitimately belong to a different
+                                # customer's (often older) invoice. Matching on number alone
+                                # silently misfiled a payment against the wrong customer's
+                                # invoice/outstanding balance whenever numbers collided.
+                                # Require the invoice's own customer name to match this
+                                # receipt's Tally party too.
+                                candidates = []
                                 for inv in inv_list:
                                     inv_num = str(inv.get("number") or "").strip()
                                     if inv_num and inv_num.lower() == bill_ref.lower() and inv.get("id"):
-                                        invoice_id = int(inv["id"])
-                                        break
+                                        candidates.append(inv)
+                                if len(candidates) == 1:
+                                    invoice_id = int(candidates[0]["id"])
+                                elif len(candidates) > 1 and party_name:
+                                    for inv in candidates:
+                                        inv_cust = ((inv.get("customer") or {}).get("name") or "").strip()
+                                        if inv_cust and inv_cust.lower() == party_name.strip().lower():
+                                            invoice_id = int(inv["id"])
+                                            break
                         except Exception as e:
                             log_event("ReverseSync", f"Invoice lookup by bill reference '{bill_ref}' failed: {e}")
 

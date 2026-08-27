@@ -114,8 +114,17 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
         # fix, rather than silently dropping it and leaving party != Sales Account.
         tax_amount = round(amount - item_subtotal, 2)
         if tax_amount < 0:
+            # The order's own amount field is smaller than the real sum of the item
+            # lines this voucher already rendered into inventory_allocations above.
+            # Trust the item lines — they're what INVENTORYALLOCATIONS.LIST actually
+            # sums to — rather than reassigning item_subtotal to the (inconsistent)
+            # order amount, which would desync the Sales Account ledger's own AMOUNT
+            # from its nested inventory lines and get the whole voucher rejected by
+            # Tally (ledger AMOUNT must equal the nested sum — see module docstring).
+            # Correct `amount` to match instead, so the party ledger entry (which
+            # posts -amount) still balances against Sales Account + tax.
             tax_amount = 0.0
-            item_subtotal = amount
+            amount = item_subtotal
     else:
         # A header-only order with no items to apply a percentage to.
         tax_amount = 0.0

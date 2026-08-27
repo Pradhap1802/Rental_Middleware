@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import MagicMock
 
+import requests
+
 from app.models.domain import AppConfig
 from app.connectors.tally.xml_builder import sanitize_tally_xml, escape_xml, format_tally_date
 from app.connectors.tally.parser import validate_tally_accounting_success
@@ -265,6 +267,24 @@ class TestTallyConnectorAndValidation(unittest.TestCase):
         # Same identifier, different case — must hit the cache, not Tally again.
         self.assertTrue(client.check_exists("unit", "nos"))
         self.assertEqual(mock_session.post.call_count, 1)
+
+    def test_check_exists_fails_open_on_connectivity_error(self):
+        """
+        check_exists() drives Create-vs-Alter for real financial vouchers
+        (sync_rental_order/sync_invoice/sync_payment). It used to fail CLOSED (return
+        False = "doesn't exist") on any connection error, which would default a
+        genuinely-existing voucher to ACTION="Create" on a transient Tally connectivity
+        blip — a real duplicate-voucher risk. It must now fail OPEN (assume it exists,
+        i.e. ACTION="Alter"): if the record truly doesn't exist yet, Tally rejects an
+        Alter cleanly as a business error (dead-lettered, retried next cycle) instead of
+        silently creating a duplicate.
+        """
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        mock_session = MagicMock()
+        mock_session.post.side_effect = requests.exceptions.ConnectionError("refused")
+        client = TallyClient(cfg, session=mock_session)
+
+        self.assertTrue(client.check_exists("rental_orders", "RENTAL-ORD-5"))
 
     def test_stock_item_prerequisites_are_not_recreated_within_the_same_batch(self):
         """
@@ -742,6 +762,41 @@ class TestSalesOrderVoucherInventoryShape(unittest.TestCase):
         self.assertIn("<LEDGERNAME>CGST</LEDGERNAME>", xml)
         self.assertIn("<LEDGERNAME>SGST</LEDGERNAME>", xml)
         self.assertIn("<AMOUNT>18.00</AMOUNT>", xml)
+
+    def test_amount_understated_vs_items_keeps_ledger_balanced_with_nested_sum(self):
+        """
+        When the order's own amount/grand_total field is SMALLER than the real sum of
+        its item lines (a data-entry inconsistency: no gst% given, and grand_total is
+        missing/understated relative to items), the code used to reassign
+        item_subtotal = amount without rebuilding the already-rendered
+        INVENTORYALLOCATIONS.LIST lines (which still summed to the original, larger
+        item total) — desyncing the Sales Account ledger's own AMOUNT from its nested
+        inventory sum, which Tally rejects the whole voucher for. The item lines are
+        the source of truth (they're what INVENTORYALLOCATIONS.LIST actually sums to);
+        the ledger AMOUNT and party amount must be corrected to match them instead.
+        """
+        xml = build_sales_order_voucher_xml({
+            "id": 9, "number": "R100005", "customer_name": "Test", "grand_total": 50,
+            "items": [
+                {"name": "Dell Laptop", "quantity": 1, "price": 150, "total_price": 150, "unit": "Piece"},
+                {"name": "Dell Mouse", "quantity": 1, "price": 50, "total_price": 50, "unit": "Piece"},
+            ],
+        })
+        # Sales Account ledger AMOUNT must equal the real item subtotal (200), matching
+        # what the nested INVENTORYALLOCATIONS.LIST lines actually sum to (150 + 50).
+        ledger_idx = xml.index("<LEDGERNAME>Sales Account</LEDGERNAME>")
+        close_idx = xml.index("</ALLLEDGERENTRIES.LIST>", ledger_idx)
+        sales_block = xml[ledger_idx:close_idx]
+        # The ledger's own AMOUNT (immediately after ISDEEMEDPOSITIVE, before the
+        # nested per-item INVENTORYALLOCATIONS.LIST lines) must be 200.00 — the real
+        # item subtotal — not the understated grand_total of 50.
+        ledger_amount_line = sales_block.split("<INVENTORYALLOCATIONS.LIST>")[0]
+        self.assertIn("<AMOUNT>200.00</AMOUNT>", ledger_amount_line)
+        # No tax booked (no gst% given, and there's no positive leftover to book).
+        self.assertNotIn("<LEDGERNAME>CGST</LEDGERNAME>", xml)
+        # Party ledger entry must balance against the corrected total (200), not the
+        # original understated grand_total (50).
+        self.assertIn("<AMOUNT>-200.00</AMOUNT>", xml)
 
     def test_gst_computed_from_real_percentage_field_not_derived_from_total(self):
         """

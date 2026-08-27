@@ -603,10 +603,19 @@ class RentAsstClient:
                 last_error = e
             except Exception as e:
                 last_error = e
+        # Every candidate endpoint either errored or 404/405'd (e.g. a wrong base_url
+        # or an unreleased route on this RentAsst deployment) — this must be a hard
+        # failure, not a fabricated success. Silently returning a fake "RA-MOCK-ID"
+        # here previously made the caller save a "synced" mapping for a record that
+        # was never actually created in RentAsst Cloud, with no error logged, no dead
+        # letter, and no retry — a real financial record (order/invoice/payment/
+        # customer/asset) permanently believed synced while not existing at all.
         if last_error:
             raise last_error
-        # Default mock fallback response if cloud endpoints are offline
-        return {"id": payload.get("tally_guid") or "RA-MOCK-ID", "status": "success"}
+        raise RuntimeError(
+            f"All candidate endpoints {endpoints} for this push returned 404/405 — "
+            "no working RentAsst route found. Refusing to report a fabricated success."
+        )
 
     def push_payment(self, payment_data: Dict[str, Any]) -> Dict[str, Any]:
         """Push a payment/receipt record from Tally to RentAsst Cloud API."""

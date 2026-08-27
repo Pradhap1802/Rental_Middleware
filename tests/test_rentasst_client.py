@@ -51,6 +51,40 @@ class TestPushRentout(unittest.TestCase):
         self.assertTrue(called_url.endswith("/create-rent-details"), called_url)
 
 
+class TestPostWithFallbackAllEndpointsFail(unittest.TestCase):
+    """
+    _post_with_fallback previously fell through to a fabricated {"id": "RA-MOCK-ID",
+    "status": "success"} response when every candidate endpoint 404/405'd (e.g. a wrong
+    base_url, or a route not yet released on this RentAsst deployment) — the caller then
+    saved a "synced" mapping for a record that was never actually created in RentAsst,
+    with no error, no dead letter, and no retry. It must now raise instead.
+    """
+
+    def setUp(self):
+        self.cfg = AppConfig(rentasst_url="http://localhost:8000/api", rentasst_api_key="test-key")
+        self.client = RentAsstClient(self.cfg)
+
+    def test_all_endpoints_404_raises_instead_of_fabricating_success(self):
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        self.client.session.post = MagicMock(return_value=mock_response)
+
+        with self.assertRaises(Exception):
+            self.client.push_customer({"name": "Test Customer", "mobile": "9000000000"})
+
+        self.assertEqual(self.client.session.post.call_count, 2)  # "customer", "customers"
+
+    def test_mixed_exception_then_404_raises_the_real_exception(self):
+        mock_404 = MagicMock()
+        mock_404.status_code = 404
+        self.client.session.post = MagicMock(
+            side_effect=[requests.exceptions.ConnectionError("refused"), mock_404]
+        )
+
+        with self.assertRaises(requests.exceptions.ConnectionError):
+            self.client.push_customer({"name": "Test Customer", "mobile": "9000000000"})
+
+
 class TestFetchBusinesses(unittest.TestCase):
     """
     fetch_businesses previously only tried ['user/businesses', 'business', 'tenants',

@@ -269,9 +269,17 @@ class TallyClient:
                 self._exists_cache[cache_key] = result
                 return result
         except Exception:
-            # Not cached — a transient timeout/connection error shouldn't stick as a
-            # false "doesn't exist" for the rest of this batch.
-            pass
+            # Not cached — a transient timeout/connection error must NOT be treated as
+            # "doesn't exist": this result drives Create-vs-Alter for real financial
+            # vouchers (sync_rental_order/sync_invoice/sync_payment) and ledger/master
+            # existence gates. Failing closed here would default a genuinely-existing
+            # record to ACTION="Create" on a connectivity blip, risking a duplicate
+            # voucher in Tally. Failing open instead defaults to ACTION="Alter" (or
+            # "skip creating this master"), which — if the record actually doesn't
+            # exist yet — Tally rejects cleanly as a business error, dead-lettered and
+            # retried next cycle, never silently duplicated. Same fail-open rationale
+            # already applied to RentAsst's check_exists_in_rentasst().
+            return True
         return False
 
     def list_units(self) -> List[Dict[str, str]]:
