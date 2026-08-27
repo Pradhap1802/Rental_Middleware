@@ -143,6 +143,41 @@ class TestRentalOrdersForwardSync(unittest.TestCase):
         pushed_order = mock_ext_client.sync_rental_order.call_args[0][0]
         self.assertEqual(pushed_order["items"][0]["name"], "Dell Mouse")
 
+    def test_rent_item_prefers_live_asset_name_over_a_stale_asset_name_snapshot(self):
+        """
+        Confirmed live: a rent item's asset_name snapshot ("Bag - Dell") had gone stale
+        relative to the asset's actual current name ("Bag") — the exact name equipment
+        forward sync used to create the Tally STOCKITEM master. Sending the stale
+        snapshot made Tally reject the whole Sales Order voucher outright ("Stock Item
+        'Bag - Dell' does not exist!"). The live nested 'asset' relation must win over
+        the snapshot whenever both are present, not just when asset_name is null.
+        """
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_rental_orders.return_value = [
+            {"id": 5, "number": "R100003", "status": 1, "amount": 118.0, "customer_name": "Walk-in Customer", "rent_items_count": 1},
+        ]
+        mock_ra_client.get_rent_items.return_value = [
+            {
+                "id": 7, "asset_id": 24, "asset_name": "Bag - Dell",
+                "rented_quantity": 10, "price": 10, "total_price": 100,
+                "asset": {"id": 24, "name": "Bag", "asset_unit": {"name": "Piece"}},
+            }
+        ]
+        mock_ext_client = MagicMock()
+        mock_ext_client.check_exists_in_tally.return_value = False
+        mock_ext_client.sync_rental_order.return_value = "RENTAL-ORD-5"
+
+        self.store.save_mapping("equipment", "24", "TALLY-ID-24", status="synced")
+
+        sync_rental_orders(
+            rentasst_client=mock_ra_client,
+            external_client=mock_ext_client,
+            store=self.store,
+        )
+
+        pushed_order = mock_ext_client.sync_rental_order.call_args[0][0]
+        self.assertEqual(pushed_order["items"][0]["name"], "Bag")
+
     def test_rent_items_not_fetched_when_order_has_none(self):
         """No wasted GET when rent_items_count is 0/absent."""
         mock_ra_client = MagicMock()

@@ -38,13 +38,19 @@ def _attach_rent_items(rentasst_client: RentAsstClient, orders: List[Dict[str, A
             continue
         order["items"] = [
             {
-                # asset_name isn't enforced non-null by RentAsst (confirmed live: a rent
-                # item created without it comes back with asset_name=None) — falling
-                # through straight to build_sales_order_voucher_xml's "Equipment" default
-                # then gets rejected by Tally outright ("Stock Item 'Equipment' does not
-                # exist"). get_rent_items() already embeds the real asset via its own
-                # nested 'asset' relation, so prefer that before giving up.
-                "name": it.get("asset_name") or (it.get("asset") or {}).get("name"),
+                # asset_name is a snapshot taken when the rent item was added to the
+                # order and can go stale relative to the asset's current name (confirmed
+                # live: a rent item's asset_name was "Bag - Dell" while the live asset —
+                # and the Tally STOCKITEM equipment sync actually created — was just
+                # "Bag"; sending the stale name made Tally reject the whole voucher with
+                # "Stock Item 'Bag - Dell' does not exist!"). get_rent_items()'s nested
+                # 'asset' relation is always the current name, matching what equipment
+                # forward sync used to create the Tally stock item, so prefer that; only
+                # fall back to asset_name when the asset relation itself is missing
+                # (a genuinely orphaned/deleted asset reference) rather than giving up
+                # entirely and defaulting to build_sales_order_voucher_xml's "Equipment"
+                # placeholder, which Tally rejects outright the same way.
+                "name": (it.get("asset") or {}).get("name") or it.get("asset_name"),
                 "asset_id": it.get("asset_id"),
                 "quantity": it.get("rented_quantity"),
                 "price": it.get("price"),
