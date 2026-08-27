@@ -1009,7 +1009,12 @@ class TestReverseSyncHardening(unittest.TestCase):
         )
 
         mock_ra_client = MagicMock()
-        mock_ra_client.get_rentout.return_value = {"id": "17", "rent_items_count": 0, "settings": None, "status": 1}
+        mock_ra_client.get_rent_items.return_value = []
+        # get_rentout()'s own endpoint ('get-rent-details/{id}') is confirmed to 404 in
+        # production, so the settings-null state can no longer be checked proactively —
+        # the first push_rentout_items() attempt simulates RentAsst's real crash on a
+        # null-settings rentout, then succeeds once retried after the settings patch.
+        mock_ra_client.push_rentout_items.side_effect = [Exception("Attempt to read property 'refund_type' on null"), {"id": 1}]
         mock_ext_client = MagicMock()
         mock_ext_client.cfg = MagicMock()
 
@@ -1040,17 +1045,17 @@ class TestReverseSyncHardening(unittest.TestCase):
         patched_id, patched_payload = mock_ra_client.update_rentout.call_args[0]
         self.assertEqual(patched_id, "17")
         self.assertTrue(patched_payload["settings"])
-        # The settings patch must happen BEFORE the items push, not after — otherwise the
-        # DB transaction the item insert runs inside would still crash on the old null
-        # settings.
-        self.assertLess(
-            mock_ra_client.method_calls.index(unittest.mock.call.update_rentout(patched_id, patched_payload)),
-            mock_ra_client.method_calls.index(unittest.mock.call.push_rentout_items("17", mock_ra_client.push_rentout_items.call_args[0][1])),
-        )
+        # The failed push, the settings patch, and the retried push must happen in that
+        # order — the patch is only ever attempted reactively, after a first attempt
+        # fails, and the retry is what actually delivers the items.
+        self.assertEqual(mock_ra_client.push_rentout_items.call_count, 2)
+        call_names = [c[0] for c in mock_ra_client.method_calls if c[0] in ("push_rentout_items", "update_rentout")]
+        self.assertEqual(call_names, ["push_rentout_items", "update_rentout", "push_rentout_items"])
 
-    def test_reverse_sync_backfill_skips_settings_patch_when_already_present(self):
-        """The mirror case: a rentout that already has a non-null settings object must
-        not get a needless extra update_rentout call on every sync."""
+    def test_reverse_sync_backfill_skips_settings_patch_when_first_push_succeeds(self):
+        """The mirror case: a rentout whose settings are already populated succeeds on
+        the very first push_rentout_items() attempt and must not get a needless extra
+        update_rentout call on every sync."""
         self.store.save_mapping(
             entity_type="equipment",
             source_id="Earphone",
@@ -1071,7 +1076,7 @@ class TestReverseSyncHardening(unittest.TestCase):
         )
 
         mock_ra_client = MagicMock()
-        mock_ra_client.get_rentout.return_value = {"id": "18", "rent_items_count": 0, "settings": {"refund_type": 1}, "status": 1}
+        mock_ra_client.get_rent_items.return_value = []
         mock_ext_client = MagicMock()
         mock_ext_client.cfg = MagicMock()
 
@@ -1229,7 +1234,7 @@ class TestReverseSyncHardening(unittest.TestCase):
         )
 
         mock_ra_client = MagicMock()
-        mock_ra_client.get_rentout.return_value = {"id": "CLOUD-ORD-BACKFILL", "rent_items_count": 0}
+        mock_ra_client.get_rent_items.return_value = []
         mock_ext_client = MagicMock()
         mock_ext_client.cfg = MagicMock()
 
@@ -1257,7 +1262,7 @@ class TestReverseSyncHardening(unittest.TestCase):
             )
 
         mock_ra_client.push_rentout.assert_not_called()
-        mock_ra_client.get_rentout.assert_called_once_with("CLOUD-ORD-BACKFILL")
+        mock_ra_client.get_rent_items.assert_called_once_with("CLOUD-ORD-BACKFILL")
         mock_ra_client.push_rentout_items.assert_called_once()
         pushed_items = mock_ra_client.push_rentout_items.call_args[0][1]
         self.assertEqual(pushed_items[0]["asset_id"], 17)
@@ -1279,7 +1284,7 @@ class TestReverseSyncHardening(unittest.TestCase):
         )
 
         mock_ra_client = MagicMock()
-        mock_ra_client.get_rentout.return_value = {"id": "CLOUD-ORD-HAS-ITEMS", "rent_items_count": 2}
+        mock_ra_client.get_rent_items.return_value = [{"id": 1}, {"id": 2}]
         mock_ext_client = MagicMock()
         mock_ext_client.cfg = MagicMock()
 

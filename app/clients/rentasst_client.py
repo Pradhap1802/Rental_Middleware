@@ -518,11 +518,6 @@ class RentAsstClient:
         detect an already-synced invoice that's still missing its line items."""
         return self._request_with_fallback([f"invoices/{invoice_id}", f"invoice/{invoice_id}"])
 
-    def get_rentout(self, rent_id: str) -> Dict[str, Any]:
-        """Fetches a single rentout's full detail, including 'rent_items_count' — used to
-        detect an already-synced rentout that's still missing its asset/quantity/price lines."""
-        return self._request_with_fallback([f"get-rent-details/{rent_id}"])
-
     def get_rent_items(self, rent_id: str) -> List[Dict[str, Any]]:
         """
         Fetches the actual rent_items rows (asset_name, rented_quantity, price,

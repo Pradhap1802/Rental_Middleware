@@ -1164,23 +1164,47 @@ def sync_tally_to_rentasst(
                         # and never duplicates them.
                         if existing_ra_id and resolved_items:
                             try:
-                                current = ra_client.get_rentout(existing_ra_id)
-                                current_count = (current.get("rent_items_count") or 0) if isinstance(current, dict) else 0
+                                # get_rentout() hits 'get-rent-details/{id}' — confirmed live
+                                # to 404 on this RentAsst deployment, unlike the sibling
+                                # create-rent-details/update-rent-details endpoints which are
+                                # verified real routes. Relying on it here made every single
+                                # backfill attempt fail permanently (this exact rentout kept
+                                # failing on every sync cycle, never actually backfilling),
+                                # which is what surfaced as reverse-synced Sales Orders never
+                                # getting their rent items into RentAsst. get_rent_items() —
+                                # 'get-rent-items/{id}' — is a separately confirmed-working
+                                # endpoint, so use its result length as the "already has
+                                # items" signal instead of rent_items_count from the broken
+                                # endpoint.
+                                try:
+                                    current_items = ra_client.get_rent_items(existing_ra_id)
+                                except Exception:
+                                    current_items = []
+                                current_count = len(current_items) if isinstance(current_items, list) else 0
                                 if not current_count:
-                                    # A rentout created before 'settings' was included on
-                                    # create (below) still has a null settings column, which
-                                    # crashes RentAsst's own item-creation transaction (see
-                                    # DEFAULT_RENTOUT_SETTINGS) — patch it first so the
-                                    # backfill below doesn't get silently rolled back.
-                                    if isinstance(current, dict) and not current.get("settings"):
+                                    try:
+                                        ra_client.push_rentout_items(existing_ra_id, resolved_items)
+                                    except Exception:
+                                        # A rentout created before 'settings' was included on
+                                        # create (below) still has a null settings column,
+                                        # which crashes RentAsst's own item-creation
+                                        # transaction (see DEFAULT_RENTOUT_SETTINGS) and rolls
+                                        # back the item insert — the first push_rentout_items
+                                        # attempt above fails in exactly that case. Since the
+                                        # rentout's current settings can no longer be checked
+                                        # proactively (get_rentout is broken), patch it
+                                        # unconditionally and retry once; a rentout that
+                                        # already has non-default settings would already have
+                                        # succeeded on the first attempt above and never reach
+                                        # here.
                                         ra_client.update_rentout(existing_ra_id, {
                                             "settings": DEFAULT_RENTOUT_SETTINGS,
-                                            "status": current.get("status") or 1,
+                                            "status": 1,
                                             "customer_id": cust_id,
                                             "rent_from": iso_datetime,
                                             "rent_to": iso_datetime,
                                         })
-                                    ra_client.push_rentout_items(existing_ra_id, resolved_items)
+                                        ra_client.push_rentout_items(existing_ra_id, resolved_items)
                                     store.add_history("rental_order", existing_ra_id, "synced", external_id=tally_guid, details="Tally Sales Order Reverse Sync — backfilled missing rent items")
                                     stats["updated"] += 1
                                 else:
