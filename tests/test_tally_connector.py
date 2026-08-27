@@ -10,7 +10,7 @@ from app.connectors.tally.client import TallyClient
 from app.connectors.tally.ledger import build_customer_ledger_xml
 from app.connectors.tally.sales_voucher import build_sales_invoice_voucher_xml, build_sales_order_voucher_xml
 from app.connectors.tally.receipt_voucher import build_receipt_voucher_xml
-from app.connectors.tally.stock_item import build_physical_stock_voucher_xml
+from app.connectors.tally.stock_item import build_physical_stock_voucher_xml, build_stock_item_xml
 from app.connectors.tally.unit_match import resolve_existing_unit_name
 
 
@@ -627,6 +627,48 @@ class TestTallyClientUnitResolution(unittest.TestCase):
         unit_check_calls = [b for b in sent_bodies if "<ID>CheckExistence</ID>" in b and "<TYPE>UNIT</TYPE>" in b]
         self.assertEqual(len(unit_check_calls), 0, "a matched existing unit must skip the CheckExistence round-trip entirely")
 
+    def test_sync_equipment_includes_symbol_when_creating_a_brand_new_unit(self):
+        """
+        unit_override is passed for every equipment sync, even when nothing existing
+        matched (it just carries the RentAsst unit name through unchanged) — the
+        <SYMBOL> tag on a freshly created UNIT master must key off whether an existing
+        Tally unit was actually reused (unit_matched_existing), not off whether
+        unit_override happened to be truthy, or every newly created unit master loses
+        its symbol.
+        """
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        mock_session = MagicMock()
+
+        empty_resp = MagicMock()
+        empty_resp.status_code = 200
+        empty_resp.content = b"<ENVELOPE><BODY><DATA><COLLECTION></COLLECTION></DATA></BODY></ENVELOPE>"
+
+        import_resp = MagicMock()
+        import_resp.status_code = 200
+        import_resp.content = b"<ENVELOPE><HEADER><VERSION>1</VERSION></HEADER><BODY><IMPORTRESULT><CREATED>1</CREATED></IMPORTRESULT></BODY></ENVELOPE>"
+
+        sent_bodies = []
+
+        def fake_post(url, data=None, headers=None, timeout=None):
+            body = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+            sent_bodies.append(body)
+            if "<TALLYREQUEST>Import Data</TALLYREQUEST>" in body:
+                return import_resp
+            return empty_resp
+
+        mock_session.post.side_effect = fake_post
+        client = TallyClient(cfg, session=mock_session)
+
+        client.sync_equipment({
+            "id": 9, "name": "Measuring Tape 2",
+            "asset_unit": {"name": "Meter", "symbol": "m"},
+        })
+
+        import_calls = [b for b in sent_bodies if "<TALLYREQUEST>Import Data</TALLYREQUEST>" in b]
+        self.assertEqual(len(import_calls), 1)
+        self.assertIn("<SYMBOL>m</SYMBOL>", import_calls[0])
+        self.assertIn("<BASEUNITS>Meter</BASEUNITS>", import_calls[0])
+
     def test_sync_unit_skips_creating_a_duplicate_when_an_equivalent_unit_exists(self):
         cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
         mock_session = MagicMock()
@@ -679,6 +721,39 @@ class TestTallyClientUnitResolution(unittest.TestCase):
         voucher_calls = [b for b in sent_bodies if "Physical Stock" in b]
         self.assertEqual(len(voucher_calls), 1)
         self.assertIn("25 MTR", voucher_calls[0])
+
+
+class TestStockItemXmlZeroValueFields(unittest.TestCase):
+    """
+    build_stock_item_xml used `data.get("x") or data.get("y") or 0` fallback chains for
+    gst_rate/gst_percentage and available_quantity/original_quantity. Since 0 is falsy
+    in Python, a legitimate explicit 0 in the primary field (a GST-exempt item, or an
+    asset that's fully rented out) was silently discarded in favor of a stale/unrelated
+    value in the fallback field. Only an absent (None) primary field should fall back.
+    """
+
+    def test_explicit_zero_gst_rate_is_not_overridden_by_gst_percentage(self):
+        data = {
+            "id": 101, "name": "Exempt Item",
+            "gst_rate": 0, "gst_percentage": 18,
+            "hsn_code": "8471",
+        }
+        xml = build_stock_item_xml(data, action="Create", unit_exists=True, group_exists=True, category_exists=True)
+        self.assertIn("<GSTRATE>0", xml)
+        self.assertNotIn("<GSTRATE>18", xml)
+
+    def test_explicit_zero_available_quantity_is_not_overridden_by_original_quantity(self):
+        data = {
+            "id": 102, "name": "Fully Rented Item",
+            "available_quantity": 0, "original_quantity": 5,
+        }
+        xml = build_stock_item_xml(data, action="Create", unit_exists=True, group_exists=True, category_exists=True)
+        self.assertNotIn("<OPENINGBALANCE>", xml)
+
+    def test_missing_gst_rate_still_falls_back_to_gst_percentage(self):
+        data = {"id": 103, "name": "Legacy Item", "gst_percentage": 12, "hsn_code": "8471"}
+        xml = build_stock_item_xml(data, action="Create", unit_exists=True, group_exists=True, category_exists=True)
+        self.assertIn("<GSTRATE>12", xml)
 
 
 class TestSalesOrderVoucherInventoryShape(unittest.TestCase):

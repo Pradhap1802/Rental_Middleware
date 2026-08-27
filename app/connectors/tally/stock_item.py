@@ -31,17 +31,23 @@ def build_stock_item_xml(
     category_exists: bool = True,
     company_name: Optional[str] = None,
     unit_override: Optional[str] = None,
+    unit_matched_existing: bool = False,
 ) -> str:
     """
     Builds full Tally STOCKITEM XML including prerequisites (Unit, StockGroup, StockCategory).
 
-    unit_override, when given, is the name of a Tally UNIT master that already
-    represents this item's RentAsst unit under a different name/symbol spelling (see
-    TallyClient.resolve_unit_name) — e.g. RentAsst "Meter" resolved to an existing
-    Tally unit "MTR". BASEUNITS and every rate/opening-balance field then reference
-    that existing unit directly instead of RentAsst's raw name, and no fresh <UNIT
-    ACTION="Create"> block is emitted for it (callers pass unit_exists=True alongside
-    an override for exactly this reason — there is nothing new to create).
+    unit_override, when given, is the name of a Tally UNIT master that should be used
+    as BASEUNITS — either an existing Tally unit representing this item's RentAsst
+    unit under a different name/symbol spelling (see TallyClient.resolve_unit_name),
+    e.g. RentAsst "Meter" resolved to an existing Tally unit "MTR", or simply the
+    RentAsst unit's own name/symbol-resolved value when nothing existing matched.
+    unit_matched_existing distinguishes those two cases — True only when
+    unit_override names a *different*, already-existing Tally unit master. It's used
+    to decide whether to emit a <SYMBOL> for a freshly created UNIT master: when
+    reusing an existing unit, Tally already has its own symbol and none should be
+    sent; when creating a brand-new unit (unit_exists=False), RentAsst's symbol must
+    still be included, or every newly created Tally unit master ends up missing its
+    symbol.
     """
     name = (data.get("name") or f"Item-{data.get('id')}").strip()
 
@@ -58,7 +64,7 @@ def build_stock_item_xml(
             unit_symbol = raw_u.split("(")[1].split(")")[0].strip()
 
     unit = (unit_override or unit_name or unit_symbol or "Nos").strip()
-    symbol_tag = f"\n            <SYMBOL>{escape_xml(unit_symbol)}</SYMBOL>" if (unit_symbol and not unit_override) else ""
+    symbol_tag = f"\n            <SYMBOL>{escape_xml(unit_symbol)}</SYMBOL>" if (unit_symbol and not unit_matched_existing) else ""
 
     # Stock Group
     group = "Primary"
@@ -87,11 +93,28 @@ def build_stock_item_xml(
         desc_parts.append(raw_desc)
     full_description = " | ".join(desc_parts)
 
+    # `or`-chained fallbacks (`data.get("x") or data.get("y") or 0`) silently discard a
+    # legitimate explicit 0 in favor of a stale/unrelated value in the fallback field —
+    # confirmed live: a GST-exempt item (gst_rate=0) still carrying an old nonzero
+    # gst_percentage got pushed to Tally at that old rate instead of 0, and a fully
+    # rented-out item (available_quantity=0) got its OPENINGBALANCE set from
+    # original_quantity instead of 0. Only fall back to the alternate field when the
+    # primary key is genuinely absent (None), never when it's present but zero.
     purchase_price = float(data.get("purchase_price") or 0)
-    rent_price = float(data.get("rent_price") or data.get("day_based_rent_price") or 0)
-    available_qty = data.get("available_quantity") or data.get("original_quantity") or 0
 
-    gst_rate = float(data.get("gst_rate") or data.get("gst_percentage") or 0)
+    rent_price_raw = data.get("rent_price")
+    if rent_price_raw is None:
+        rent_price_raw = data.get("day_based_rent_price")
+    rent_price = float(rent_price_raw or 0)
+
+    available_qty = data.get("available_quantity")
+    if available_qty is None:
+        available_qty = data.get("original_quantity") or 0
+
+    gst_rate_raw = data.get("gst_rate")
+    if gst_rate_raw is None:
+        gst_rate_raw = data.get("gst_percentage")
+    gst_rate = float(gst_rate_raw or 0)
     cgst_rate = round(gst_rate / 2.0, 2) if gst_rate else 0
     sgst_rate = cgst_rate
     hsn_code = (data.get("hsn_code") or data.get("hsn_sac_code") or data.get("hsn") or "").strip()

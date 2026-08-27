@@ -412,6 +412,7 @@ class TallyClient:
             category_exists=category_exists,
             company_name=company_name,
             unit_override=resolved_unit_name,
+            unit_matched_existing=matched_existing_unit,
         )
         result = self.send_xml(xml)
 
