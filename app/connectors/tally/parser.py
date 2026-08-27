@@ -52,15 +52,26 @@ def extract_tally_errors(xml_or_root: Union[str, bytes, ET.Element]) -> List[str
     return errors
 
 
-def validate_tally_accounting_success(xml_content: Union[str, bytes]) -> Tuple[bool, Optional[str], Optional[str]]:
+def validate_tally_accounting_success(
+    xml_content: Union[str, bytes], require_voucher: bool = False
+) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Strictly validates whether Tally Prime successfully processed and committed the accounting transaction.
-    
+
     IMPORTANT: Tally Prime returns HTTP 200 even when transaction import fails!
     This function parses the XML body to confirm that:
-    1. No <LINEERROR> or business exception tags exist.
-    2. At least 1 record was CREATED (>0) or ALTERED (>0), or a valid LASTVOUCHERID was assigned.
-    
+    1. No <LINEERROR> or business exception tags exist, and <EXCEPTIONS> count is 0 —
+       confirmed live that a failed voucher import can still report ALTERED>0 (from
+       prerequisite ledgers that already existed) while EXCEPTIONS>0 signals the
+       voucher itself was rejected.
+    2. At least 1 record was CREATED (>0) or ALTERED (>0), or a valid LASTVCHID was assigned.
+       (Note: Tally's real field is LASTVCHID, not LASTVOUCHERID.)
+
+    When require_voucher=True (voucher syncs — Rent Out/Invoice/Payment), success requires
+    LASTVCHID > 0 specifically — CREATED/ALTERED alone is not enough, since those counts
+    include prerequisite ledger/stock-item master upserts that can succeed independently
+    of whether the voucher itself was actually created or altered.
+
     Returns:
         (is_success: bool, error_message: Optional[str], tally_id: Optional[str])
     """
@@ -74,16 +85,39 @@ def validate_tally_accounting_success(xml_content: Union[str, bytes]) -> Tuple[b
         err_msg = "Tally Business Error: " + "; ".join(errors)
         return False, err_msg, None
 
-    # Parse creation and alteration counts
+    # Parse creation, alteration, and exception counts
     created_text = root.findtext(".//CREATED")
     altered_text = root.findtext(".//ALTERED")
-    last_v_id = root.findtext(".//LASTVOUCHERID")
+    exceptions_text = root.findtext(".//EXCEPTIONS")
+    last_vch_text = root.findtext(".//LASTVCHID") or root.findtext(".//LASTVOUCHERID")
 
     created = int(created_text) if created_text and created_text.isdigit() else 0
     altered = int(altered_text) if altered_text and altered_text.isdigit() else 0
+    exceptions = int(exceptions_text) if exceptions_text and exceptions_text.isdigit() else 0
+    last_vch_id = int(last_vch_text) if last_vch_text and last_vch_text.isdigit() else 0
 
-    if created > 0 or altered > 0 or last_v_id:
-        tally_id = f"TALLY-ID-{last_v_id or created or altered}"
+    if exceptions > 0:
+        return (
+            False,
+            f"Tally import failed: {exceptions} exception(s) reported by Tally "
+            f"(created={created}, altered={altered}, voucher touched={last_vch_id > 0}). "
+            f"This usually means the voucher type is not usable in the current Tally "
+            f"company configuration (e.g. a required feature like Order Processing is disabled).",
+            None,
+        )
+
+    if require_voucher:
+        if last_vch_id > 0:
+            return True, None, f"TALLY-ID-{last_vch_id}"
+        return (
+            False,
+            "Tally import failed: no voucher was created or altered — only prerequisite "
+            "ledgers/stock items (if any) were touched.",
+            None,
+        )
+
+    if created > 0 or altered > 0 or last_vch_id > 0:
+        tally_id = f"TALLY-ID-{last_vch_id or created or altered}"
         return True, None, tally_id
 
     # Check for generic success <RESPONSE> or <IMPORTRESULT>

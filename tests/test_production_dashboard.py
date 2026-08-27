@@ -39,7 +39,7 @@ class TestProductionDashboard(unittest.TestCase):
         mock_sched.is_paused = False
         app.state.scheduler = mock_sched
 
-        self.client = TestClient(app)
+        self.client = TestClient(app, headers={"X-Middleware-Key": app.state.api_key})
 
     def tearDown(self):
         if hasattr(self, "store") and self.store:

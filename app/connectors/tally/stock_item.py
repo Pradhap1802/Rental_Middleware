@@ -1,5 +1,5 @@
 from typing import Dict, Any, Optional
-from .xml_builder import escape_xml, build_import_envelope
+from .xml_builder import escape_xml, build_import_envelope, format_tally_date
 
 
 def build_stock_item_xml(
@@ -9,8 +9,19 @@ def build_stock_item_xml(
     group_exists: bool = True,
     category_exists: bool = True,
     company_name: Optional[str] = None,
+    unit_override: Optional[str] = None,
 ) -> str:
-    """Builds full Tally STOCKITEM XML including prerequisites (Unit, StockGroup, StockCategory)."""
+    """
+    Builds full Tally STOCKITEM XML including prerequisites (Unit, StockGroup, StockCategory).
+
+    unit_override, when given, is the name of a Tally UNIT master that already
+    represents this item's RentAsst unit under a different name/symbol spelling (see
+    TallyClient.resolve_unit_name) — e.g. RentAsst "Meter" resolved to an existing
+    Tally unit "MTR". BASEUNITS and every rate/opening-balance field then reference
+    that existing unit directly instead of RentAsst's raw name, and no fresh <UNIT
+    ACTION="Create"> block is emitted for it (callers pass unit_exists=True alongside
+    an override for exactly this reason — there is nothing new to create).
+    """
     name = (data.get("name") or f"Item-{data.get('id')}").strip()
 
     # Unit of Measure & Symbol
@@ -25,8 +36,8 @@ def build_stock_item_xml(
         if "(" in raw_u and ")" in raw_u:
             unit_symbol = raw_u.split("(")[1].split(")")[0].strip()
 
-    unit = unit_name if unit_name else (unit_symbol or "Nos")
-    symbol_tag = f"\n            <SYMBOL>{escape_xml(unit_symbol)}</SYMBOL>" if unit_symbol else ""
+    unit = (unit_override or unit_name or unit_symbol or "Nos").strip()
+    symbol_tag = f"\n            <SYMBOL>{escape_xml(unit_symbol)}</SYMBOL>" if (unit_symbol and not unit_override) else ""
 
     # Stock Group
     group = "Primary"
@@ -116,7 +127,7 @@ def build_stock_item_xml(
         unit_xml = f"""          <UNIT NAME="{escape_xml(unit)}" ACTION="Create">\n            <NAME>{escape_xml(unit)}</NAME>{symbol_tag}\n            <ISSIMPLEUNIT>YES</ISSIMPLEUNIT>\n          </UNIT>\n"""
 
     group_xml = ""
-    if group and group != "Primary" and not group_exists:
+    if group and not group_exists:
         group_xml = f"""          <STOCKGROUP NAME="{escape_xml(group)}" ACTION="Create">\n            <NAME>{escape_xml(group)}</NAME>\n          </STOCKGROUP>\n"""
 
     category_master_xml = ""
@@ -134,3 +145,40 @@ def build_stock_item_xml(
           </STOCKITEM>"""
 
     return build_import_envelope(item_xml, report_name="All Masters", company_name=company_name)
+
+
+def build_physical_stock_voucher_xml(
+    item_name: str,
+    quantity: float,
+    unit: str = "Nos",
+    company_name: Optional[str] = None,
+    edu_mode: bool = False,
+) -> str:
+    """
+    Builds a Tally "Physical Stock" voucher — the correct mechanism for reconciling a
+    stock item's actual quantity, unlike re-sending OPENINGBALANCE on the STOCKITEM
+    master itself. OPENINGBALANCE is a fixed baseline as of the books' start date, not a
+    live "current stock" field: every Sales voucher pushed afterward keeps consuming
+    against that same fixed baseline, so simply re-sending RentAsst's current
+    available_quantity as OPENINGBALANCE every equipment-sync cycle does NOT correct
+    drift — confirmed live, "Dell Laptop 3440" ended up with a CLOSINGBALANCE of -4 in
+    Tally despite OPENINGBALANCE being resent as 11 (its real RentAsst quantity) on every
+    cycle, because ~15 units had already been consumed by prior Sales vouchers against
+    that one fixed baseline. A Physical Stock voucher instead records a dated inventory
+    count that Tally treats as the new "actual truth" for that date, correctly resetting
+    CLOSINGBALANCE going forward regardless of the voucher history that preceded it.
+    """
+    date_str = format_tally_date(None, edu_mode=edu_mode)
+    msg = f"""          <VOUCHER VCHTYPE="Physical Stock" ACTION="Create">
+            <DATE>{date_str}</DATE>
+            <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
+            <VOUCHERTYPENAME>Physical Stock</VOUCHERTYPENAME>
+            <NARRATION>RentAsst stock reconciliation for {escape_xml(item_name)}</NARRATION>
+            <ALLINVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>{escape_xml(item_name)}</STOCKITEMNAME>
+              <ACTUALQTY>{quantity} {escape_xml(unit)}</ACTUALQTY>
+              <BILLEDQTY>{quantity} {escape_xml(unit)}</BILLEDQTY>
+            </ALLINVENTORYENTRIES.LIST>
+          </VOUCHER>"""
+
+    return build_import_envelope(msg, report_name="Vouchers", company_name=company_name)

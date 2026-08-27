@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 
 from app.sync.ownership import filter_payload_by_ownership, get_field_owner
 from app.sync.conflicts import ConflictDetector
@@ -26,6 +27,23 @@ class TestOwnershipAndConflicts(unittest.TestCase):
         self.assertEqual(get_field_owner("customer", "closing_balance"), "tally")
         self.assertEqual(get_field_owner("equipment", "rent_price"), "rentasst")
         self.assertEqual(get_field_owner("equipment", "opening_stock"), "tally")
+
+    def test_unclassified_field_defaults_to_both_and_is_logged_once(self):
+        """
+        A field with no explicit rule in FIELD_OWNERSHIP_POLICY must still default to
+        'both' (unrestricted) rather than being silently blocked — the policy table only
+        lists genuinely contested fields, and most real payload fields are legitimately
+        uncontested. The gap this closes is observability: the fallback must be logged
+        (once per field, not once per call) so a genuinely new contested field gets
+        noticed instead of riding through silently forever.
+        """
+        from app.sync import ownership as ownership_module
+
+        ownership_module._unclassified_fields_warned.clear()
+        with unittest.mock.patch.object(ownership_module, "log_event") as mock_log:
+            self.assertEqual(get_field_owner("customer", "some_brand_new_field"), "both")
+            self.assertEqual(get_field_owner("customer", "some_brand_new_field"), "both")
+            self.assertEqual(mock_log.call_count, 1)
 
     def test_filter_payload_by_ownership_forward(self):
         # Forward Sync: RentAsst -> Tally. Strips Tally-authoritative fields (e.g. closing_balance)

@@ -2,16 +2,14 @@ import os
 import shutil
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from app.models.domain import AppConfig
 from app.connectors.tally.unit import build_unit_xml, resolve_gstrepuom
-from app.validation.validator import validate_entity_payload, PayloadValidator
+from app.validation.validator import validate_entity_payload
 from app.sync.dependencies import DependencyResolver
 from app.mapping.store import MappingStore
 from app.clients.rentasst_client import RentAsstClient
-from app.clients.external_client import ExternalClient
-from app.sync.units import sync_units
 from app.services.sync_service import SyncService
 from app.configuration.store import ConfigStore
 

@@ -1,16 +1,24 @@
 import os
 import sys
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+
+if sys.platform == "win32":
+    import msvcrt
+from fastapi import FastAPI, Depends
 from fastapi.responses import JSONResponse
 
 from .configuration.store import ConfigStore
 from .scheduler.manager import SyncScheduler
 from .queue.worker import QueueWorker
 from .services.sync_service import SyncService
-from .logging.logger import log_event
+from .mapping.store import MappingStore
+from .clients.rentasst_client import RentAsstClient
+from .clients.external_client import ExternalClient
 from .dashboard import dashboard_router
 from .api import all_routers
+from .api.health_routes import health_router
+from .security.api_key import get_or_create_api_key
+from .security.auth import require_api_key
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -19,45 +27,95 @@ else:
 
 DATA_DIR = os.path.join(BASE_DIR, ".data")
 os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "state.db")
 
 
 # Shared instance singletons
 sync_service = SyncService(DATA_DIR)
 scheduler = SyncScheduler(DATA_DIR)
 worker = QueueWorker(DATA_DIR, sync_executor=sync_service.execute_sync, max_workers=4)
+mapping_store = MappingStore(DB_PATH)
+
+INSTANCE_LOCK_PATH = os.path.join(DATA_DIR, "middleware.lock")
+
+
+def _acquire_single_instance_lock(path: str):
+    """
+    Refuses to start a second live middleware process against the same Tally company.
+
+    The Tally client's pacing/serialization lock (_TALLY_HTTP_LOCK in
+    connectors/tally/client.py) is an in-process threading.Lock — it only
+    serializes requests made by ONE Python process. Two middleware processes
+    running at once (confirmed live during development: two separate `python
+    run.py` instances left running simultaneously) each hold their own
+    independent copy of that lock, so it does nothing to stop both processes
+    from sending Tally genuinely concurrent, unserialized XML imports — the
+    exact scenario this codebase already documents as capable of corrupting
+    Tally's current-company context or crashing its process outright with a
+    native memory access violation. On win32 only (this app is Windows-only:
+    Tally Prime, the Windows Service packaging, NSSM).
+
+    Held for the entire process lifetime via the returned file handle — the OS
+    releases the lock automatically on any exit, including a crash or a hard
+    kill, so a dead prior instance never blocks a fresh one from starting.
+    """
+    if sys.platform != "win32":
+        return None
+    fh = open(path, "a+")
+    try:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        fh.close()
+        raise RuntimeError(
+            f"Another RentalMiddleware process already holds the lock at '{path}'. "
+            "Refusing to start a second instance against the same Tally company — "
+            "running two at once lets them send concurrent, unserialized requests "
+            "to Tally, which is known to corrupt or crash it. Stop the other "
+            "instance first."
+        )
+    return fh
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Application startup
+    app.state.instance_lock = _acquire_single_instance_lock(INSTANCE_LOCK_PATH)
     app.state.data_dir = DATA_DIR
     app.state.scheduler = scheduler
     app.state.worker = worker
+    app.state.db_path = DB_PATH
+    app.state.mapping_store = mapping_store
+    app.state.db = mapping_store.db
 
     # Start background Queue Worker
     worker.start()
 
-    # Load configuration and determine sync interval
+    # Load configuration, wire up connectivity-check clients, and start the
+    # background scheduler if auto-sync is enabled
     cfg_store = ConfigStore(DATA_DIR)
     cfg = cfg_store.load_safe()
-    interval = cfg.sync_interval_minutes if cfg and cfg.sync_interval_minutes else 10
-
-    # Always start the polling scheduler (10-minute default)
-    scheduler.start(interval)
-    log_event("Startup", f"Auto-sync polling started: syncing Customers, Equipment, Rental Orders, Invoices, Payments every {interval} minutes.")
-
-    # Fire an immediate first sync so data syncs right away on boot
-    try:
-        scheduler.trigger_manual_sync()
-        log_event("Startup", "Immediate first forward sync triggered on startup.")
-    except Exception as e:
-        log_event("Startup", f"Initial sync trigger warning: {e}")
+    if cfg:
+        app.state.ra_client = RentAsstClient(cfg)
+        app.state.ext_client = ExternalClient(cfg)
+        if cfg.auto_sync_enabled:
+            scheduler.start(cfg.sync_interval_minutes)
 
     yield
 
     # Application shutdown
     scheduler.stop()
     worker.stop()
+    for attr in ("ra_client", "ext_client"):
+        client = getattr(app.state, attr, None)
+        if client:
+            client.close()
+    lock_handle = getattr(app.state, "instance_lock", None)
+    if lock_handle:
+        try:
+            lock_handle.close()
+        except Exception:
+            pass
 
 
 app = FastAPI(
@@ -67,15 +125,30 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Every /api/* route requires this key (see security/auth.py). This deployment binds
+# 127.0.0.1 (see run.py/service.py), but the key still matters as defense in depth —
+# without it, any other process or user on the same machine could read/write RentAsst
+# and Tally credentials, trigger syncs, or restore a backup. If a future deployment
+# needs LAN-wide access (host="0.0.0.0"), this key becomes the only thing standing
+# between the network and those same actions.
+app.state.api_key = get_or_create_api_key(DATA_DIR)
+
 
 @app.exception_handler(ValueError)
 def value_error_handler(request, exc: ValueError):
     return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})
 
 
-# Mount Dashboard UI Router
+# Mount Dashboard UI Router — deliberately unauthenticated, since it's what serves
+# the browser the API key in the first place (see dashboard/routes.py).
 app.include_router(dashboard_router)
 
-# Mount Modular API Routers
+# Mount Modular API Routers, all behind the local API key — except health_router,
+# which sets its own per-route dependency (its /health/live and /health/ready probes
+# stay open for orchestration tooling like k8s, matching the standard liveness/
+# readiness pattern; its other routes leak operational detail and stay protected).
 for r in all_routers:
-    app.include_router(r)
+    if r is health_router:
+        app.include_router(r)
+    else:
+        app.include_router(r, dependencies=[Depends(require_api_key)])

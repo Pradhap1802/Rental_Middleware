@@ -1,6 +1,5 @@
-import xml.etree.ElementTree as ET
-from typing import List, Dict, Any, Optional
-from .xml_builder import build_export_collection_envelope, sanitize_tally_xml
+from typing import List, Dict
+from .xml_builder import build_export_collection_envelope
 from .parser import parse_tally_xml
 
 

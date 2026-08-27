@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from ..mapping.store import MappingStore
-from .ownership import get_field_owner
 
 
 class ConflictDetector:

@@ -5,13 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>RentAsst ↔ Tally Middleware Portal</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.ico">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg: #0b0f19;
+      --bg-glow-1: #1e2246;
+      --bg-glow-2: #0d2a3a;
       --card-bg: #151c2c;
+      --card-bg-soft: #131a29;
       --card-border: #232d42;
       --accent: #6366f1;
+      --accent-2: #22d3ee;
       --accent-hover: #4f46e5;
       --text: #f8fafc;
       --text-muted: #94a3b8;
@@ -20,71 +24,192 @@
       --error: #ef4444;
       --warning: #f59e0b;
       --info: #3b82f6;
+      --radius-lg: 16px;
+      --radius-md: 12px;
+      --radius-sm: 8px;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }
-    body { background: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 1.5rem; }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; }
+    html { scrollbar-color: #3b4255 transparent; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #2c3550; border-radius: 8px; border: 2px solid var(--bg); }
+    ::-webkit-scrollbar-thumb:hover { background: #3b4568; }
+
+    body {
+      background:
+        radial-gradient(circle at 12% 8%, rgba(99, 102, 241, 0.16), transparent 40%),
+        radial-gradient(circle at 88% 88%, rgba(34, 211, 238, 0.10), transparent 45%),
+        var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex; flex-direction: column; justify-content: center; align-items: center;
+      padding: 1.5rem;
+    }
     .container { width: 100%; max-width: 1200px; margin: 0 auto; }
-    
+
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes ringPulse {
+      0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.55); }
+      100% { box-shadow: 0 0 0 9px rgba(52, 211, 153, 0); }
+    }
+    @keyframes toastIn {
+      from { opacity: 0; transform: translateY(12px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
     /* Login Gate Screen */
     #login_screen { display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; min-height: 80vh; }
-    .login-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 2.5rem; width: 100%; max-width: 440px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.4); text-align: center; }
-    .login-logo { font-size: 2.5rem; margin-bottom: 0.5rem; display: block; }
-    .login-title { font-size: 1.6rem; font-weight: 700; background: linear-gradient(135deg, #a5b4fc, #6366f1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.4rem; }
-    .login-subtitle { font-size: 0.88rem; color: var(--text-muted); margin-bottom: 1.8rem; line-height: 1.4; }
-    
+    .login-card {
+      background: linear-gradient(180deg, var(--card-bg) 0%, var(--card-bg-soft) 100%);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius-lg);
+      padding: 2.75rem 2.5rem;
+      width: 100%; max-width: 440px;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(99, 102, 241, 0.06);
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+      animation: fadeInUp 0.5s ease both;
+    }
+    .login-card::before {
+      content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    }
+    .login-icon-badge {
+      width: 68px; height: 68px; border-radius: 20px; margin: 0 auto 1.1rem;
+      display: flex; align-items: center; justify-content: center;
+      background: linear-gradient(135deg, rgba(99, 102, 241, 0.22), rgba(34, 211, 238, 0.14));
+      border: 1px solid rgba(99, 102, 241, 0.35);
+      box-shadow: 0 8px 24px -8px rgba(99, 102, 241, 0.5);
+    }
+    .login-logo { font-size: 2rem; display: block; }
+    .login-title { font-size: 1.65rem; font-weight: 800; background: linear-gradient(135deg, #c7d2fe, #6366f1 60%, #22d3ee); background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.45rem; letter-spacing: -0.02em; }
+    .login-subtitle { font-size: 0.88rem; color: var(--text-muted); margin-bottom: 1.9rem; line-height: 1.5; }
+
     .form-group { margin-bottom: 1.2rem; text-align: left; }
-    label { display: block; font-size: 0.82rem; font-weight: 500; color: var(--text-muted); margin-bottom: 0.45rem; }
-    .input-with-prefix { display: flex; align-items: center; background: #0b0f19; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; transition: border-color 0.2s; }
-    .input-with-prefix:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2); }
+    label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-muted); margin-bottom: 0.45rem; letter-spacing: 0.01em; }
+    .input-with-prefix { display: flex; align-items: center; background: #0b0f19; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; transition: border-color 0.2s, box-shadow 0.2s; }
+    .input-with-prefix:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18); }
     .prefix { padding: 0.75rem 0.85rem; background: #111827; color: var(--text-muted); font-weight: 600; font-size: 0.9rem; border-right: 1px solid var(--border); }
     .input-with-prefix input { border: none; background: transparent; padding: 0.75rem 0.85rem; color: var(--text); width: 100%; font-size: 0.95rem; outline: none; }
-    
-    input, select { width: 100%; background: #0b0f19; border: 1px solid var(--border); color: var(--text); padding: 0.75rem 0.85rem; border-radius: 8px; font-size: 0.9rem; transition: border-color 0.2s; }
-    input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2); }
-    
-    .btn-primary { width: 100%; background: linear-gradient(135deg, #6366f1, #4f46e5); color: white; border: none; padding: 0.85rem 1.2rem; border-radius: 8px; font-size: 0.95rem; font-weight: 600; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
-    .btn-primary:hover { background: linear-gradient(135deg, #4f46e5, #4338ca); transform: translateY(-1px); }
-    .btn-primary:disabled { background: #334155; cursor: not-allowed; box-shadow: none; opacity: 0.6; }
-    
-    .btn-secondary { background: #334155; color: white; border: none; padding: 0.6rem 1rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: all 0.2s; }
-    .btn-secondary:hover { background: #475569; }
 
-    .status-msg { margin-top: 1rem; padding: 0.75rem 1rem; border-radius: 8px; font-size: 0.85rem; text-align: left; display: none; line-height: 1.4; }
-    .status-msg.error { background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; }
-    .status-msg.success { background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); color: #6ee7b7; }
-    .status-msg.info { background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.3); color: #93c5fd; }
+    input, select { width: 100%; background: #0b0f19; border: 1px solid var(--border); color: var(--text); padding: 0.75rem 0.85rem; border-radius: var(--radius-sm); font-size: 0.9rem; transition: border-color 0.2s, box-shadow 0.2s; }
+    input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18); }
+    input[type="date"] { color-scheme: dark; }
+    select { cursor: pointer; }
+
+    .btn-primary {
+      width: 100%; background: linear-gradient(135deg, #6366f1, #4f46e5);
+      color: white; border: none; padding: 0.9rem 1.2rem; border-radius: var(--radius-sm);
+      font-size: 0.95rem; font-weight: 600; cursor: pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+      box-shadow: 0 8px 20px -6px rgba(99, 102, 241, 0.55);
+      display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem;
+    }
+    .btn-primary:hover { background: linear-gradient(135deg, #4f46e5, #4338ca); transform: translateY(-2px); box-shadow: 0 12px 24px -6px rgba(99, 102, 241, 0.65); }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-primary:disabled { background: #334155; cursor: not-allowed; box-shadow: none; opacity: 0.6; transform: none; }
+
+    .btn-secondary {
+      background: #1c2438; color: var(--text); border: 1px solid var(--border);
+      padding: 0.65rem 1.05rem; border-radius: var(--radius-sm); font-size: 0.85rem; font-weight: 600;
+      cursor: pointer; transition: all 0.15s ease; display: inline-flex; align-items: center; gap: 0.4rem;
+    }
+    .btn-secondary:hover { background: #29314a; border-color: #475569; transform: translateY(-1px); }
+    .btn-secondary:active { transform: translateY(0); }
+
+    .status-msg { margin-top: 1rem; padding: 0.8rem 1rem; border-radius: var(--radius-sm); font-size: 0.85rem; text-align: left; display: none; line-height: 1.45; animation: fadeInUp 0.25s ease both; }
+    .status-msg.error { background: rgba(239, 68, 68, 0.14); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; }
+    .status-msg.success { background: rgba(16, 185, 129, 0.14); border: 1px solid rgba(16, 185, 129, 0.3); color: #6ee7b7; }
+    .status-msg.info { background: rgba(59, 130, 246, 0.14); border: 1px solid rgba(59, 130, 246, 0.3); color: #93c5fd; }
 
     /* Dashboard Layout */
     #dashboard_screen { display: none; width: 100%; }
-    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
-    h1 { font-size: 1.6rem; font-weight: 700; background: linear-gradient(135deg, #a5b4fc, #6366f1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-    .header-actions { display: flex; align-items: center; gap: 1rem; }
-    .status-badge { background: #064e3b; color: #34d399; padding: 0.35rem 0.85rem; border-radius: 9999px; font-size: 0.85rem; font-weight: 600; display: inline-flex; align-items: center; gap: 0.5rem; }
-    .pulse { width: 8px; height: 8px; background: #34d399; border-radius: 50%; box-shadow: 0 0 8px #34d399; }
-    
-    .section-title { font-size: 0.95rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; }
+    header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 1.75rem; padding-bottom: 1.25rem; border-bottom: 1px solid var(--border);
+    }
+    .brand { display: flex; align-items: center; gap: 0.75rem; }
+    .brand-icon {
+      width: 42px; height: 42px; border-radius: 12px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center; font-size: 1.3rem;
+      background: linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(34, 211, 238, 0.16));
+      border: 1px solid rgba(99, 102, 241, 0.35);
+    }
+    h1 { font-size: 1.5rem; font-weight: 800; background: linear-gradient(135deg, #c7d2fe, #6366f1 60%, #22d3ee); background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent; letter-spacing: -0.02em; }
+    .brand-subtitle { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.15rem; }
+    .header-actions { display: flex; align-items: center; gap: 0.85rem; }
+    .status-badge {
+      background: rgba(16, 185, 129, 0.12); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.35);
+      padding: 0.4rem 0.9rem; border-radius: 9999px; font-size: 0.82rem; font-weight: 600;
+      display: inline-flex; align-items: center; gap: 0.55rem;
+    }
+    .pulse { width: 8px; height: 8px; background: #34d399; border-radius: 50%; animation: ringPulse 1.8s infinite; }
+    .btn-danger { background: rgba(239, 68, 68, 0.14) !important; border-color: rgba(239, 68, 68, 0.35) !important; color: #fca5a5 !important; }
+    .btn-danger:hover { background: rgba(239, 68, 68, 0.22) !important; }
 
-    .entity-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0.75rem; margin-bottom: 1.5rem; }
-    .entity-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 0.85rem; text-align: center; }
-    .entity-card .ent-name { font-size: 0.8rem; font-weight: 600; color: #a5b4fc; text-transform: capitalize; }
-    .entity-card .ent-count { font-size: 1.4rem; font-weight: 700; margin: 0.3rem 0; color: var(--text); }
-    .entity-card .ent-time { font-size: 0.65rem; color: var(--text-muted); }
+    .section-title { font-size: 0.85rem; font-weight: 700; color: var(--text-muted); margin-bottom: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; }
 
-    .recon-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
-    .recon-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 1rem; text-align: center; }
-    .recon-card .lbl { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.3rem; }
-    .recon-card .val { font-size: 1.3rem; font-weight: 700; }
+    .sync-last {
+      font-size: 0.68rem; color: var(--text-muted); margin-top: 0.55rem;
+      background: rgba(148, 163, 184, 0.08); border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 9999px; padding: 0.25rem 0.6rem; display: inline-block;
+    }
+    .sync-range-row { display: flex; gap: 1rem; margin-bottom: 1.4rem; }
+    .sync-range-row .form-group { flex: 1; margin-bottom: 0; }
 
     .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
-    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 1.5rem; }
-    .card h2 { font-size: 1.1rem; margin-bottom: 1rem; color: var(--text); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
-    .sync-actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem; }
-    .sync-btn { background: #111827; border: 1px solid var(--border); padding: 0.85rem; text-align: center; border-radius: 8px; cursor: pointer; transition: all 0.2s; font-size: 0.9rem; font-weight: 500; }
-    .sync-btn:hover { border-color: var(--accent); background: #1e1e24; }
-    .fetch-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
-    .fetch-btn { background: #334155; color: #a5b4fc; padding: 0.25rem 0.6rem; font-size: 0.75rem; border-radius: 4px; border: none; cursor: pointer; }
-    .fetch-btn:hover { background: #475569; color: #fff; }
-    .auth-badge { display: flex; align-items: center; justify-content: space-between; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 8px; padding: 0.75rem 1rem; color: #34d399; font-size: 0.85rem; font-weight: 500; margin-bottom: 1rem; }
+    .card {
+      background: linear-gradient(180deg, var(--card-bg) 0%, var(--card-bg-soft) 100%);
+      border: 1px solid var(--card-border); border-radius: var(--radius-md); padding: 1.6rem;
+      position: relative; overflow: hidden; transition: border-color 0.2s ease, transform 0.2s ease;
+      animation: fadeInUp 0.5s ease both;
+    }
+    .card::before {
+      content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2)); opacity: 0.7;
+    }
+    .card:hover { border-color: #384463; }
+    .card h2 { font-size: 1.05rem; margin-bottom: 1.15rem; color: var(--text); font-weight: 700; display: flex; justify-content: space-between; align-items: center; letter-spacing: -0.01em; }
+
+    .sync-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.9rem; }
+    .sync-btn {
+      background: #10151f; border: 1px solid var(--border); padding: 1.1rem 0.85rem;
+      text-align: center; border-radius: var(--radius-md); cursor: pointer;
+      transition: all 0.18s ease; display: flex; flex-direction: column; align-items: center; gap: 0.5rem;
+    }
+    .sync-btn:hover { border-color: var(--accent); background: #161d2c; transform: translateY(-3px); box-shadow: 0 10px 22px -10px rgba(99, 102, 241, 0.45); }
+    .sync-btn:active { transform: translateY(-1px); }
+    .sync-icon {
+      width: 42px; height: 42px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+      font-size: 1.25rem; background: linear-gradient(135deg, rgba(99, 102, 241, 0.22), rgba(34, 211, 238, 0.14));
+      border: 1px solid rgba(99, 102, 241, 0.3);
+    }
+    .sync-label { font-size: 0.88rem; font-weight: 600; color: var(--text); }
+
+    .fetch-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.45rem; }
+    .fetch-btn { background: #1c2438; color: #a5b4fc; padding: 0.3rem 0.65rem; font-size: 0.74rem; font-weight: 600; border-radius: 6px; border: 1px solid var(--border); cursor: pointer; transition: all 0.15s ease; }
+    .fetch-btn:hover { background: #29314a; color: #fff; border-color: #475569; }
+    .auth-badge {
+      display: flex; align-items: center; justify-content: space-between;
+      background: rgba(16, 185, 129, 0.09); border: 1px solid rgba(16, 185, 129, 0.28);
+      border-radius: var(--radius-sm); padding: 0.75rem 1rem; color: #34d399; font-size: 0.83rem; font-weight: 500;
+      margin-bottom: 1.15rem;
+    }
+
+    @media (max-width: 780px) {
+      .grid-2 { grid-template-columns: 1fr; }
+      .sync-actions { grid-template-columns: repeat(2, 1fr); }
+      .sync-range-row { flex-direction: column; }
+      header { flex-direction: column; align-items: flex-start; gap: 1rem; }
+      .header-actions { width: 100%; justify-content: space-between; }
+    }
+    @media (max-width: 420px) {
+      .sync-actions { grid-template-columns: 1fr 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -92,10 +217,10 @@
   <!-- ==================== 1. LOGIN GATE SCREEN ==================== -->
   <div id="login_screen">
     <div class="login-card">
-      <span class="login-logo">🚜</span>
+      <div class="login-icon-badge"><span class="login-logo">🔌</span></div>
       <h1 class="login-title">RentAsst Middleware</h1>
       <p class="login-subtitle">Enter your registered RentAsst Mobile Number to receive an OTP and connect the middleware.</p>
-      
+
       <!-- Step 1: Request OTP -->
       <div id="step_mobile">
         <div class="form-group">
@@ -116,7 +241,7 @@
           <input type="hidden" id="login_request_id">
         </div>
         <button class="btn-primary" id="btn_verify_otp" onclick="verifyLoginOTP()">✅ Verify OTP & Login</button>
-        <div style="margin-top: 0.8rem; font-size: 0.8rem;">
+        <div style="margin-top: 0.9rem; font-size: 0.8rem;">
           <a href="#" style="color: #a5b4fc; text-decoration: none;" onclick="resetToStepMobile(); return false;">← Change Mobile Number</a>
         </div>
       </div>
@@ -130,76 +255,24 @@
   <!-- ==================== 2. MAIN DASHBOARD SCREEN ==================== -->
   <div id="dashboard_screen" class="container">
     <header>
-      <div>
-        <h1>RentAsst ↔ Tally Gateway</h1>
+      <div class="brand">
+        <div class="brand-icon">🔌</div>
+        <div>
+          <h1>RentAsst ↔ Tally Gateway</h1>
+          <div class="brand-subtitle">Bidirectional sync middleware</div>
+        </div>
       </div>
       <div class="header-actions">
         <div class="status-badge" id="service_status"><span class="pulse"></span> Service Active</div>
-        <button class="btn-secondary" style="padding: 0.4rem 0.8rem; font-size: 0.8rem; background: #991b1b;" onclick="logoutMiddleware()">🚪 Logout</button>
+        <button class="btn-secondary btn-danger" onclick="logoutMiddleware()">🚪 Logout</button>
       </div>
     </header>
-
-    <!-- 1. Entity Synchronization Status -->
-    <div class="section-title">Entity Synchronization Status</div>
-    <div class="entity-grid">
-      <div class="entity-card">
-        <div class="ent-name">👥 Customers</div>
-        <div class="ent-count" id="ent_customers_cnt">0</div>
-        <div class="ent-time" id="ent_customers_time">No sync</div>
-      </div>
-      <div class="entity-card">
-        <div class="ent-name">🚜 Equipment</div>
-        <div class="ent-count" id="ent_equipment_cnt">0</div>
-        <div class="ent-time" id="ent_equipment_time">No sync</div>
-      </div>
-      <div class="entity-card">
-        <div class="ent-name">📋 Orders</div>
-        <div class="ent-count" id="ent_orders_cnt">0</div>
-        <div class="ent-time" id="ent_orders_time">No sync</div>
-      </div>
-      <div class="entity-card">
-        <div class="ent-name">🧾 Invoices</div>
-        <div class="ent-count" id="ent_invoices_cnt">0</div>
-        <div class="ent-time" id="ent_invoices_time">No sync</div>
-      </div>
-      <div class="entity-card">
-        <div class="ent-name">💳 Payments</div>
-        <div class="ent-count" id="ent_payments_cnt">0</div>
-        <div class="ent-time" id="ent_payments_time">No sync</div>
-      </div>
-      <div class="entity-card">
-        <div class="ent-name">🔄 Reverse Sync</div>
-        <div class="ent-count" id="ent_reverse_cnt">0</div>
-        <div class="ent-time" id="ent_reverse_time">No sync</div>
-      </div>
-    </div>
-
-    <!-- 2. Reconciliation & Conflict Audit -->
-    <div class="section-title">Reconciliation & Conflict Audit</div>
-    <div class="recon-grid">
-      <div class="recon-card">
-        <div class="lbl">Matched Records</div>
-        <div class="val" id="recon_matched" style="color: var(--success);">0</div>
-      </div>
-      <div class="recon-card">
-        <div class="lbl">Missing Records</div>
-        <div class="val" id="recon_missing" style="color: var(--warning);">0</div>
-      </div>
-      <div class="recon-card">
-        <div class="lbl">Mismatched Records</div>
-        <div class="val" id="recon_mismatched" style="color: var(--error);">0</div>
-      </div>
-      <div class="recon-card">
-        <div class="lbl">Unresolved Conflicts</div>
-        <div class="val" id="recon_conflicts" style="color: var(--error);">0</div>
-      </div>
-    </div>
 
     <!-- Settings & Sync Trigger Grid -->
     <div class="grid-2">
       <div class="card">
         <h2>RentAsst Connection Settings</h2>
-        
+
         <!-- Authenticated Status Badge -->
         <div class="auth-badge">
           <span>🔒 RentAsst Session Active</span>
@@ -215,7 +288,7 @@
           <datalist id="rentasst_tenant_list"></datalist>
         </div>
 
-        <div class="btn-group" style="margin-top: 1rem; display: flex; gap: 0.5rem;">
+        <div class="btn-group" style="margin-top: 1.1rem; display: flex; gap: 0.6rem;">
           <button class="btn-secondary" onclick="testConnection('rentasst')">⚡ Test RentAsst Connection</button>
           <button class="btn-secondary" onclick="saveConfig()">💾 Save Settings</button>
         </div>
@@ -236,9 +309,9 @@
             <option value="">-- Select or Open Tally Company --</option>
           </select>
         </div>
-        <div class="btn-group" style="margin-top: 1rem; display: flex; gap: 0.5rem;">
+        <div class="btn-group" style="margin-top: 1.1rem; display: flex; gap: 0.6rem;">
           <button class="btn-secondary" onclick="testConnection('external')">⚡ Test Tally</button>
-          <button class="btn-primary" style="width:auto; padding:0.6rem 1rem;" onclick="saveConfig()">💾 Save Config</button>
+          <button class="btn-primary" style="width:auto; padding:0.65rem 1.1rem;" onclick="saveConfig()">💾 Save Config</button>
         </div>
       </div>
     </div>
@@ -246,18 +319,65 @@
     <!-- Manual Entity Synchronization -->
     <div class="card" style="margin-bottom: 2rem;">
       <h2>Manual Entity Synchronization</h2>
+      <div class="sync-range-row">
+        <div class="form-group">
+          <label for="sync_from_date">From Date (optional — leave blank to sync the full backlog)</label>
+          <input type="date" id="sync_from_date">
+        </div>
+        <div class="form-group">
+          <label for="sync_to_date">To Date (optional)</label>
+          <input type="date" id="sync_to_date">
+        </div>
+      </div>
       <div class="sync-actions">
-        <div class="sync-btn" onclick="triggerSync('customers')">👥 Customers</div>
-        <div class="sync-btn" onclick="triggerSync('equipment')">🚜 Assets</div>
-        <div class="sync-btn" onclick="triggerSync('rental_orders')">📋 Rental Orders</div>
-        <div class="sync-btn" onclick="triggerSync('invoices')">🧾 Invoices</div>
-        <div class="sync-btn" onclick="triggerSync('payments')">💳 Payments</div>
-        <div class="sync-btn" onclick="triggerSync('tally_to_rentasst')">🔄 Sync Tally ➔ RentAsst</div>
+        <div class="sync-btn" onclick="triggerSync('customers')">
+          <div class="sync-icon">👥</div>
+          <div class="sync-label">Customers</div>
+          <div class="sync-last" id="last_customers">Last synced: —</div>
+        </div>
+        <div class="sync-btn" onclick="triggerSync('equipment')">
+          <div class="sync-icon">📦</div>
+          <div class="sync-label">Assets</div>
+          <div class="sync-last" id="last_equipment">Last synced: —</div>
+        </div>
+        <div class="sync-btn" onclick="triggerSync('rental_orders')">
+          <div class="sync-icon">📋</div>
+          <div class="sync-label">Rental Orders</div>
+          <div class="sync-last" id="last_rental_orders">Last synced: —</div>
+        </div>
+        <div class="sync-btn" onclick="triggerSync('invoices')">
+          <div class="sync-icon">🧾</div>
+          <div class="sync-label">Invoices</div>
+          <div class="sync-last" id="last_invoices">Last synced: —</div>
+        </div>
+        <div class="sync-btn" onclick="triggerSync('payments')">
+          <div class="sync-icon">💳</div>
+          <div class="sync-label">Payments</div>
+          <div class="sync-last" id="last_payments">Last synced: —</div>
+        </div>
+        <div class="sync-btn" onclick="triggerSync('tally_to_rentasst')">
+          <div class="sync-icon">🔃</div>
+          <div class="sync-label">Tally ➔ RentAsst</div>
+          <div class="sync-last" id="last_tally_to_rentasst">Last synced: —</div>
+        </div>
       </div>
     </div>
   </div>
 
   <script>
+    // Every /api/* route requires the X-Middleware-Key header (see app/security/auth.py).
+    // The server injects the current key as window.MW_API_KEY when it serves this page,
+    // so wrapping fetch here attaches it to every existing call below automatically —
+    // no need to touch each call site individually.
+    (function () {
+      const originalFetch = window.fetch;
+      window.fetch = function (url, options) {
+        options = options || {};
+        options.headers = Object.assign({}, options.headers, { 'X-Middleware-Key': window.MW_API_KEY || '' });
+        return originalFetch(url, options);
+      };
+    })();
+
     // Tracks whether the RentAsst connection check has completed at least once:
     // 'pending' (in-flight/not yet run), 'success', or 'error'. Config save is
     // gated on this so it can't fire while the connection status is still unknown.
@@ -387,13 +507,40 @@
     }
 
     async function logoutMiddleware() {
+      showToast('⏳ Logging out...', 'info');
       try {
         await fetch('/api/auth/logout', { method: 'POST' });
-        resetToStepMobile();
-        checkAuthStatus();
       } catch (e) {
-        console.error('Logout error:', e);
+        console.error('Logout API error:', e);
       }
+      // Directly swap screens — don't rely on checkAuthStatus which can silently fail
+      document.getElementById('dashboard_screen').style.display = 'none';
+      document.getElementById('login_screen').style.display = 'flex';
+      // Reset login form back to step 1
+      resetToStepMobile();
+      document.getElementById('login_mobile').value = '';
+      document.getElementById('login_otp').value = '';
+      document.getElementById('login_request_id').value = '';
+      showStatusMsg('👋 Logged out successfully. Please re-authenticate.', 'info');
+    }
+
+    // Maps each manual-sync button to its entity_sync_status key and stores the raw
+    // last-synced timestamp shown in the "Last synced" label under each button.
+    const lastSyncedMap = {};
+    const entityStatusKey = {
+      customers: 'customers', equipment: 'equipment', rental_orders: 'rental_orders',
+      invoices: 'invoices', payments: 'payments', tally_to_rentasst: 'reverse_sync'
+    };
+
+    function formatLastSynced(raw) {
+      // Backend stores SQLite CURRENT_TIMESTAMP as "YYYY-MM-DD HH:MM:SS" in 24-hour time.
+      const match = String(raw).match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})/);
+      if (!match) return raw;
+      const [, datePart, h, mi] = match;
+      let hour = parseInt(h, 10);
+      const ampm = hour >= 12 ? 'PM' : 'AM';
+      hour = hour % 12 || 12;
+      return `${datePart} ${hour}:${mi} ${ampm}`;
     }
 
     let statusRequestInFlight = false;
@@ -410,36 +557,12 @@
         const data = await res.json();
 
         const es = data.entity_sync_status || {};
-        if (es.customers) {
-          setText('ent_customers_cnt', es.customers.synced_count);
-          setText('ent_customers_time', es.customers.last_sync ? es.customers.last_sync.split(' ')[0] : 'No sync');
+        for (const [entity, statusKey] of Object.entries(entityStatusKey)) {
+          const info = es[statusKey];
+          const lastSync = info ? info.last_sync : null;
+          lastSyncedMap[entity] = lastSync || null;
+          setText(`last_${entity}`, lastSync ? `Last synced: ${formatLastSynced(lastSync)}` : 'Last synced: —');
         }
-        if (es.equipment) {
-          setText('ent_equipment_cnt', es.equipment.synced_count);
-          setText('ent_equipment_time', es.equipment.last_sync ? es.equipment.last_sync.split(' ')[0] : 'No sync');
-        }
-        if (es.rental_orders) {
-          setText('ent_orders_cnt', es.rental_orders.synced_count);
-          setText('ent_orders_time', es.rental_orders.last_sync ? es.rental_orders.last_sync.split(' ')[0] : 'No sync');
-        }
-        if (es.invoices) {
-          setText('ent_invoices_cnt', es.invoices.synced_count);
-          setText('ent_invoices_time', es.invoices.last_sync ? es.invoices.last_sync.split(' ')[0] : 'No sync');
-        }
-        if (es.payments) {
-          setText('ent_payments_cnt', es.payments.synced_count);
-          setText('ent_payments_time', es.payments.last_sync ? es.payments.last_sync.split(' ')[0] : 'No sync');
-        }
-        if (es.reverse_sync) {
-          setText('ent_reverse_cnt', es.reverse_sync.synced_count);
-          setText('ent_reverse_time', es.reverse_sync.last_sync ? es.reverse_sync.last_sync.split(' ')[0] : 'No sync');
-        }
-
-        const rm = data.reconciliation_metrics || {};
-        setText('recon_matched', rm.matched || 0);
-        setText('recon_missing', rm.missing || 0);
-        setText('recon_mismatched', rm.mismatched || 0);
-        setText('recon_conflicts', rm.unresolved_conflicts || 0);
       } catch(e) {
         console.error('Error loading status:', e);
       } finally {
@@ -518,6 +641,11 @@
       if (!toast) return;
       toast.innerHTML = msg;
       toast.style.display = 'block';
+      toast.style.animation = 'none';
+      // Force reflow so the entrance animation replays on repeated toasts.
+      void toast.offsetWidth;
+      toast.style.animation = 'toastIn 0.25s ease both';
+      toast.style.opacity = '1';
       if (type === 'success') {
         toast.style.background = '#064e3b';
         toast.style.color = '#34d399';
@@ -526,10 +654,15 @@
         toast.style.background = '#7f1d1d';
         toast.style.color = '#fca5a5';
         toast.style.border = '1px solid #dc2626';
+      } else if (type === 'warning') {
+        toast.style.background = '#78350f';
+        toast.style.color = '#fcd34d';
+        toast.style.border = '1px solid #d97706';
       } else {
-        toast.style.background = '#1e293b';
-        toast.style.color = '#f8fafc';
-        toast.style.border = '1px solid #334155';
+        // info / default
+        toast.style.background = '#1e3a5f';
+        toast.style.color = '#93c5fd';
+        toast.style.border = '1px solid #3b82f6';
       }
       clearTimeout(toastTimer);
       toastTimer = setTimeout(() => {
@@ -587,11 +720,43 @@
       loadStatus();
     }
 
+    const entityLabels = {
+      customers: '👥 Customers', equipment: '📦 Assets', rental_orders: '📋 Rental Orders',
+      invoices: '🧾 Invoices', payments: '💳 Payments', tally_to_rentasst: '🔃 Tally → RentAsst'
+    };
     async function triggerSync(entity) {
+      const label = entityLabels[entity] || entity;
+
+      // From Date is left blank unless the user explicitly types one — it must NOT
+      // default to this entity's last-synced date. mark_synced() stamps last_sync to
+      // "now" on every scheduler cycle regardless of whether anything actually
+      // changed, so with the scheduler running continuously that default was
+      // effectively always "today" — silently filtering out any never-yet-synced
+      // record whose RentAsst created_at/updated_at predates today (confirmed live: a
+      // manual sync with no visible date input still resolved from_date=today and
+      // reported "processed: 0-1" for entities with a real multi-record backlog).
+      // Records already synced and unchanged are correctly skipped by the pipeline's
+      // own mapping/hash idempotency check regardless of this field, so there's no
+      // need for a client-side date default to avoid reprocessing everything.
+      const fromInput = document.getElementById('sync_from_date').value;
+      const toInput = document.getElementById('sync_to_date').value;
+
+      const params = new URLSearchParams();
+      if (fromInput) params.set('from_date', fromInput);
+      if (toInput) params.set('to_date', toInput);
+      const qs = params.toString() ? `?${params.toString()}` : '';
+
+      showToast(`⏳ ${label} sync queued…`, 'info');
       try {
-        await fetch(`/api/sync/${entity}`, { method: 'POST' });
+        const res = await fetch(`/api/sync/${entity}${qs}`, { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          showToast(`✅ ${label} sync job enqueued successfully.`, 'success');
+        } else {
+          showToast(`❌ ${label} sync failed: ${data.message || 'Unknown error'}`, 'error');
+        }
       } catch (e) {
-        console.error(`Sync error for ${entity}:`, e);
+        showToast(`❌ ${label} sync error: ${e.message}`, 'error');
       }
       loadStatus();
     }
@@ -601,6 +766,6 @@
     setInterval(loadStatus, 4000);
   </script>
   <!-- Floating non-intrusive toast notification -->
-  <div id="toast" style="position: fixed; bottom: 24px; right: 24px; z-index: 99999; display: none; padding: 0.75rem 1.25rem; border-radius: 8px; font-size: 0.85rem; font-weight: 500; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.6); pointer-events: none; transition: opacity 0.3s ease;"></div>
+  <div id="toast" style="position: fixed; bottom: 24px; right: 24px; z-index: 99999; display: none; padding: 0.8rem 1.3rem; border-radius: 10px; font-size: 0.85rem; font-weight: 500; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.6); pointer-events: none; transition: opacity 0.3s ease;"></div>
 </body>
 </html>

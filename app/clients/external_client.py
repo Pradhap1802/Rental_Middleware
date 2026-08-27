@@ -1,14 +1,8 @@
 import requests
 from requests.adapters import HTTPAdapter
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from ..models.domain import AppConfig
-from ..connectors.tally import (
-    TallyClient,
-    sanitize_tally_xml,
-    escape_xml,
-    format_tally_date,
-    normalize_state_name,
-)
+from ..connectors.tally import TallyClient
 
 
 class ExternalClient:
@@ -33,6 +27,10 @@ class ExternalClient:
 
         # Modular Tally Client Engine
         self.tally = TallyClient(cfg, session=self.session)
+
+    @property
+    def config(self) -> AppConfig:
+        return self.cfg
 
     def close(self) -> None:
         try:
@@ -89,6 +87,13 @@ class ExternalClient:
             r.raise_for_status()
             res = r.json()
             return str(res.get("id") or data.get("id"))
+
+    def reconcile_equipment_stock(self, name: str, quantity: Any, unit: str = "Nos") -> None:
+        """No-op for non-Tally external systems — stock drift reconciliation is a
+        Tally-specific concept (OPENINGBALANCE vs. live quantity), not applicable to a
+        generic REST target."""
+        if self.cfg.external_system_type == "tally":
+            self.tally.reconcile_stock_quantity(name, quantity, unit=unit)
 
     def sync_rental_order(self, data: Dict[str, Any]) -> str:
         if self.cfg.external_system_type == "tally":

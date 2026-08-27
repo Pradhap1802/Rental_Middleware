@@ -1,4 +1,5 @@
-from typing import Dict, Any, List, Set, Tuple, Optional
+from typing import Dict, Any
+from ..logging.logger import log_event
 
 # Source of Truth Definitions:
 # 'rentasst' = RentAsst is authoritative
@@ -84,6 +85,16 @@ FIELD_OWNERSHIP_POLICY: Dict[str, Dict[str, str]] = {
 }
 
 
+# Fields never explicitly classified in FIELD_OWNERSHIP_POLICY default to "both" (freely
+# shared) rather than being blocked — the policy table only lists fields with genuinely
+# contested ownership, and most real payload fields (addresses, line-item details, etc.)
+# are legitimately uncontested. Defaulting new/unrecognized fields to "restricted" instead
+# would silently drop them from every sync instead, which is worse. This set just makes
+# that fallback visible (logged once per field) instead of silent, so a genuinely new
+# contested field gets noticed and classified rather than quietly riding through forever.
+_unclassified_fields_warned: set = set()
+
+
 def get_field_owner(entity_type: str, field_name: str) -> str:
     """Returns the authoritative system ('rentasst', 'tally', or 'both') for a given entity field."""
     ent = (entity_type or "").strip().lower()
@@ -94,7 +105,16 @@ def get_field_owner(entity_type: str, field_name: str) -> str:
                "payment" if ent in ("payment", "payments") else ent
 
     ent_policy = FIELD_OWNERSHIP_POLICY.get(norm_ent, {})
-    return ent_policy.get(field_name.lower(), "both")
+    field_key = field_name.lower()
+    if field_key not in ent_policy:
+        cache_key = (norm_ent, field_key)
+        if cache_key not in _unclassified_fields_warned:
+            _unclassified_fields_warned.add(cache_key)
+            log_event(
+                "Ownership",
+                f"Field '{field_key}' on entity '{norm_ent}' has no explicit ownership rule — defaulting to 'both' (unrestricted).",
+            )
+    return ent_policy.get(field_key, "both")
 
 
 def filter_payload_by_ownership(

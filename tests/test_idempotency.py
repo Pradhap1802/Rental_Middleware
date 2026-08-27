@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 from concurrent.futures import ThreadPoolExecutor
 
 from app.mapping.store import MappingStore
-from app.sync.idempotency import generate_integration_key, check_target_system_record_exists
+from app.sync.idempotency import generate_integration_key
 from app.sync.base import run_sync_pipeline
 
 
@@ -85,6 +85,55 @@ class TestIdempotencyMechanism(unittest.TestCase):
         )
         self.assertEqual(creation_call_count, 1)  # Creation count remains 1!
         self.assertEqual(stats2["skipped"], 1)
+
+    def test_rental_order_second_pass_skips_instead_of_repushing(self):
+        """
+        Confirmed live: extract_identifier() used to build a rental_order's identifier
+        from RentAsst's own display 'number' (e.g. 'R100016'), but Tally never echoes
+        that value back anywhere in its export (it auto-assigns its own VOUCHERNUMBER),
+        so check_target_system_record_exists()'s substring search against Tally's
+        NARRATION/VOUCHERNUMBER fields always failed to find an already-synced order —
+        every single sync cycle concluded "no longer exists in target system" and
+        needlessly re-pushed it as an Alter, forever, on two consecutive full runs.
+        The identifier must be the deterministic RENTAL-ORD-{id} marker instead, which
+        Tally actually stores in NARRATION and the check can reliably find.
+        """
+        mock_ext_client = MagicMock()
+        mock_ext_client.ping.return_value = True
+        # Doesn't exist yet on the first pass; simulates Tally's real check_exists() only
+        # ever matching the deterministic marker, never RentAsst's own display number
+        # ('R100016' would never be found in Tally's export).
+        mock_ext_client.check_exists_in_tally.return_value = False
+
+        def mock_sync(item):
+            mock_ext_client.check_exists_in_tally.side_effect = (
+                lambda ent, identifier: identifier == "RENTAL-ORD-20"
+            )
+            return "RENTAL-ORD-20"
+
+        mock_ext_client.sync_rental_order.side_effect = mock_sync
+
+        items = [{"id": 20, "number": "R100016", "status": 1, "amount": 118.0, "customer_name": "Test"}]
+
+        stats1 = run_sync_pipeline(
+            entity_type="rental_order",
+            fetch_func=lambda: items,
+            sync_func=mock_ext_client.sync_rental_order,
+            store=self.store,
+            external_client=mock_ext_client,
+        )
+        self.assertEqual(stats1["created"], 1)
+        mock_ext_client.sync_rental_order.assert_called_once()
+
+        stats2 = run_sync_pipeline(
+            entity_type="rental_order",
+            fetch_func=lambda: items,
+            sync_func=mock_ext_client.sync_rental_order,
+            store=self.store,
+            external_client=mock_ext_client,
+        )
+        self.assertEqual(stats2["skipped"], 1)
+        mock_ext_client.sync_rental_order.assert_called_once()  # still just the one call
 
     def test_timeout_scenario_recovery(self):
         """
@@ -170,6 +219,125 @@ class TestIdempotencyMechanism(unittest.TestCase):
         mapping = self.store.find_by_integration_key(key)
         self.assertIsNotNone(mapping)
         self.assertEqual(mapping["target_id"], "TALLY-CONC-303")
+
+    def test_forward_sync_never_repushes_a_record_reverse_sync_created(self):
+        """
+        A RentAsst rental_order/invoice/payment created by reverse sync (Tally -> RentAsst)
+        must never be forward-synced back to Tally. Confirmed live: RentAsst never persists
+        our tally_guid on the Rent/Invoice model (not a fillable column), so a Tally-native
+        voucher forward-synced again looks like a brand-new record to sync_rental_order's
+        REMOTEID-based existence check — Tally then rejects the duplicate-creation attempt
+        with an opaque "EXCEPTIONS>0" business error every single scheduled sync.
+        """
+        self.store.save_mapping(
+            entity_type="rental_order",
+            source_id="TALLY-GUID-ABC",
+            target_id="17",
+            source_system="tally",
+            target_system="rentasst",
+            status="synced",
+        )
+
+        mock_ext_client = MagicMock()
+        mock_ext_client.ping.return_value = True
+
+        sync_call_count = 0
+
+        def mock_sync_func(item):
+            nonlocal sync_call_count
+            sync_call_count += 1
+            return f"RENTAL-ORD-{item['id']}"
+
+        items = [{"id": "17", "number": "R100013", "customer_id": 4, "amount": 50.0}]
+
+        stats = run_sync_pipeline(
+            entity_type="rental_order",
+            fetch_func=lambda: items,
+            sync_func=mock_sync_func,
+            store=self.store,
+            external_client=mock_ext_client,
+        )
+
+        self.assertEqual(sync_call_count, 0)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(stats["failed"], 0)
+
+    def test_forward_sync_recovers_when_reverse_mapping_id_was_reused_after_a_reset(self):
+        """
+        The reverse-owned-record guard above is keyed purely on RentAsst's numeric id
+        matching a stale mapping's target_id — confirmed live: after RentAsst's own DB was
+        reset, id 1 (previously a reverse-synced Tally item, 'Moto G45', long since deleted
+        from Tally) got reused for a brand-new, RentAsst-native equipment item ('Dell
+        Laptop'). The old guard treated that id collision as "this came from Tally, never
+        forward-sync it" and permanently blocked the new item — 'Assets sync' stayed stuck
+        at skipped=1 forever. The guard must verify the stale mapping's own Tally-side
+        record still exists before trusting it, and forward-sync normally once it doesn't.
+        """
+        self.store.save_mapping(
+            entity_type="equipment",
+            source_id="Moto G45",
+            target_id="1",
+            source_system="tally",
+            target_system="rentasst",
+            status="synced",
+        )
+
+        mock_ext_client = MagicMock()
+        mock_ext_client.ping.return_value = True
+        # The stale mapping's own source ('Moto G45') is gone from Tally — this is the
+        # reused-id collision, not a genuine reverse-synced record.
+        mock_ext_client.check_exists_in_tally.return_value = False
+
+        sync_call_count = 0
+
+        def mock_sync_func(item):
+            nonlocal sync_call_count
+            sync_call_count += 1
+            return "TALLY-ID-NEW"
+
+        items = [{"id": "1", "name": "Dell Laptop"}]
+
+        stats = run_sync_pipeline(
+            entity_type="equipment",
+            fetch_func=lambda: items,
+            sync_func=mock_sync_func,
+            store=self.store,
+            external_client=mock_ext_client,
+        )
+
+        self.assertEqual(sync_call_count, 1)
+        self.assertEqual(stats["created"], 1)
+        self.assertEqual(stats["skipped"], 0)
+
+        # The stale mapping must be gone, not just bypassed once.
+        self.assertIsNone(self.store.find_mapping("equipment", "Moto G45", source_system="tally"))
+
+    def test_forward_sync_still_pushes_a_rentasst_native_record(self):
+        """The mirror case: a record with no reverse-sync mapping (genuinely created in
+        RentAsst, never touched by reverse sync) must still forward-sync normally."""
+        mock_ext_client = MagicMock()
+        mock_ext_client.ping.return_value = True
+        mock_ext_client.check_exists_in_tally.return_value = False
+
+        sync_call_count = 0
+
+        def mock_sync_func(item):
+            nonlocal sync_call_count
+            sync_call_count += 1
+            return f"RENTAL-ORD-{item['id']}"
+
+        items = [{"id": "18", "number": "R100014", "customer_name": "New Customer", "amount": 100.0}]
+
+        stats = run_sync_pipeline(
+            entity_type="rental_order",
+            fetch_func=lambda: items,
+            sync_func=mock_sync_func,
+            store=self.store,
+            external_client=mock_ext_client,
+        )
+
+        self.assertEqual(sync_call_count, 1)
+        self.assertEqual(stats["created"], 1)
 
 
 if __name__ == "__main__":

@@ -43,7 +43,7 @@ class TestHealthMonitoring(unittest.TestCase):
         mock_sched.interval_minutes = 10
         app.state.scheduler = mock_sched
 
-        self.client = TestClient(app)
+        self.client = TestClient(app, headers={"X-Middleware-Key": app.state.api_key})
 
     def tearDown(self):
         if hasattr(self, "store") and self.store:

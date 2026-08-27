@@ -1,8 +1,14 @@
-fastapi==0.115.0
-uvicorn==0.30.6
-requests==2.32.3
-pydantic==2.9.2
-tenacity==9.0.0
-cryptography==43.0.1
+fastapi==0.141.1
+uvicorn==0.52.1
+requests==2.34.2
+pydantic==2.13.4
+cryptography==50.0.0
 python-multipart==0.0.9
-APScheduler==3.10.4
+APScheduler==3.11.3
+
+# Required to run service.py as a Windows Service from source (not needed when
+# running the compiled exe, which bundles it via PyInstaller's hidden imports).
+pywin32==312; sys_platform == "win32"
+
+# Test dependencies
+pytest==9.1.1

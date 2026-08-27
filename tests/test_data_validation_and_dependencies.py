@@ -2,9 +2,8 @@ import os
 import shutil
 import tempfile
 import unittest
-from unittest.mock import MagicMock
 
-from app.validation.validator import validate_entity_payload, PayloadValidator
+from app.validation.validator import PayloadValidator
 from app.sync.dependencies import DependencyResolver, MissingDependencyException
 from app.mapping.store import MappingStore
 from app.queue.queue_store import QueueStore
@@ -118,6 +117,94 @@ class TestDataValidationAndDependencies(unittest.TestCase):
             source_company_id="default",
         )
         self.assertTrue(has_deps_now)
+
+    def test_missing_equipment_dependency_for_rental_order(self):
+        """
+        Confirmed live: the scheduler enqueues equipment and rental_orders sync jobs
+        concurrently (SyncScheduler._sync_job), so a rental order can be forward-synced
+        before its rent item's own equipment has finished syncing to Tally, producing a
+        permanent "Stock Item does not exist!" dead-letter for what is really just a
+        timing race. The dependency check must catch this before sync_func runs.
+        """
+        self.store.save_mapping("customer", "14", "Felix", status="synced")
+        order_data = {
+            "id": 22,
+            "customer_id": 14,
+            "items": [{"name": "Dell Mouse", "asset_id": 16, "quantity": 20}],
+        }
+
+        has_deps, reason, missing_ent, missing_id = DependencyResolver.check_dependencies(
+            entity_type="rental_order",
+            data=order_data,
+            store=self.store,
+            source_company_id="default",
+        )
+        self.assertFalse(has_deps)
+        self.assertEqual(missing_ent, "equipment")
+        self.assertEqual(missing_id, "16")
+
+        self.store.save_mapping("equipment", "16", "TALLY-ID-16", status="synced")
+
+        has_deps_now, _, _, _ = DependencyResolver.check_dependencies(
+            entity_type="rental_order",
+            data=order_data,
+            store=self.store,
+            source_company_id="default",
+        )
+        self.assertTrue(has_deps_now)
+
+    def test_missing_equipment_dependency_for_invoice(self):
+        self.store.save_mapping("customer", "14", "Felix", status="synced")
+        invoice_data = {
+            "id": 34,
+            "customer_id": 14,
+            "items": [{"name": "Dell Mouse", "asset_id": 16, "quantity": 20}],
+        }
+
+        has_deps, reason, missing_ent, missing_id = DependencyResolver.check_dependencies(
+            entity_type="invoice",
+            data=invoice_data,
+            store=self.store,
+            source_company_id="default",
+        )
+        self.assertFalse(has_deps)
+        self.assertEqual(missing_ent, "equipment")
+        self.assertEqual(missing_id, "16")
+
+    def test_missing_dependency_skips_only_that_item_not_the_whole_batch(self):
+        """
+        run_sync_pipeline used to re-raise MissingDependencyException straight out of the
+        batch loop, aborting the ENTIRE sync for every remaining item the moment ONE item
+        hit a missing dependency — confirmed live: one rental order referencing an
+        equipment item that hadn't synced yet (equipment and rental_orders sync run
+        concurrently every cycle, so this is a routine, self-resolving race) caused every
+        OTHER rental order in that same fetch to be silently skipped too, cycle after
+        cycle. A missing dependency for one item must only skip that item.
+        """
+        self.store.save_mapping("customer", "1", "Acme", status="synced")
+        # No equipment mapping for asset_id 99 -> order #1 is blocked.
+        # Order #2 has no items at all, so nothing should block it.
+        orders = [
+            {"id": 1, "customer_id": "1", "amount": 100.0, "items": [{"name": "Ghost Item", "asset_id": 99}]},
+            {"id": 2, "customer_id": "1", "amount": 200.0},
+        ]
+        synced_ids = []
+
+        def fake_sync(item):
+            synced_ids.append(item["id"])
+            return f"RENTAL-ORD-{item['id']}"
+
+        stats = run_sync_pipeline(
+            entity_type="rental_order",
+            fetch_func=lambda: orders,
+            sync_func=fake_sync,
+            store=self.store,
+        )
+
+        self.assertEqual(synced_ids, [2])
+        self.assertEqual(stats["created"], 1)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(stats["failed"], 0)
 
     def test_worker_transitions_missing_dependency_to_waiting_state(self):
         """

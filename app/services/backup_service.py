@@ -2,7 +2,7 @@ import os
 import shutil
 import sqlite3
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from ..models.domain import BackupModel
 from ..logging.logger import log_event
 
@@ -51,11 +51,9 @@ class BackupService:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         db_path = os.path.join(self.data_dir, "state.db")
         cfg_path = os.path.join(self.data_dir, "config.json.enc")
-        key_path = os.path.join(self.data_dir, "secret.key")
 
         db_backup_path = os.path.join(self.backup_dir, f"state_backup_{timestamp}.db")
         cfg_backup_path = os.path.join(self.backup_dir, f"config_backup_{timestamp}.json.enc")
-        key_backup_path = os.path.join(self.backup_dir, f"key_backup_{timestamp}.key")
 
         # Atomic online SQLite backup
         if os.path.exists(db_path):
@@ -67,8 +65,12 @@ class BackupService:
 
         if os.path.exists(cfg_path):
             shutil.copy2(cfg_path, cfg_backup_path)
-        if os.path.exists(key_path):
-            shutil.copy2(key_path, key_backup_path)
+
+        # Deliberately NOT backing up secret.key here: copying the decryption key into
+        # the same directory as the encrypted config it decrypts defeats encryption at
+        # rest for anyone who gains access to the backup folder. Recover the key from
+        # its original provisioning source (the live .data/secret.key file, or the
+        # RENTAL_MIDDLEWARE_SECRET_KEY env var) instead of from a backup snapshot.
 
         # Integrity Verification
         verified = self.verify_backup(db_backup_path)

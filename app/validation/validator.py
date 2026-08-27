@@ -74,9 +74,11 @@ class PayloadValidator:
         if not cust:
             return False, "Rental Order is missing required customer reference ('customer_id' or 'customer_name')"
 
-        amount = float(data.get("amount") or data.get("total_amount") or 0)
+        amount = float(data.get("amount") or data.get("total_amount") or data.get("grand_total") or data.get("rent_amount") or 0)
         if amount < 0:
             return False, f"Rental Order amount cannot be negative (amount: {amount})"
+        if amount <= 0:
+            return False, f"Rental Order has no amount to sync yet (amount: {amount}) — likely an incomplete/draft order in RentAsst"
 
         return True, None
 
@@ -151,10 +153,14 @@ class PayloadValidator:
         if tax == 0 and grand_total > (subtotal + charges - discount):
             tax = round(grand_total - (subtotal + charges - discount), 2)
 
-        # Invoice Math Validation: subtotal + tax + charges - discount = grand_total (±0.05 tolerance)
+        # Invoice Math Validation: subtotal + tax + charges - discount = grand_total.
+        # Tolerance is 1 rupee, not a few paise — RentAsst commonly rounds the final payable
+        # amount to the nearest whole rupee (e.g. grand_total=409 for a 409.46 subtotal), a
+        # standard "round off" convention, not a data error. Anything past that is a real
+        # mismatch worth blocking on.
         calculated_total = round(subtotal + tax + charges - discount, 2)
         diff = abs(calculated_total - round(grand_total, 2))
-        if diff > 0.05:
+        if diff > 1.00:
             return (
                 False,
                 f"Invoice math validation failure: subtotal ({subtotal:.2f}) + tax ({tax:.2f}) + charges ({charges:.2f}) - discount ({discount:.2f}) = {calculated_total:.2f}, but grand_total is {grand_total:.2f} (diff: {diff:.2f})",
@@ -177,19 +183,6 @@ class PayloadValidator:
         amount = float(data.get("amount") or data.get("paid_amount") or data.get("total_amount") or 0)
         if amount <= 0:
             return False, f"Payment amount must be greater than zero (amount: {amount})"
-
-        ref = (
-            data.get("invoice_id") or data.get("customer_id") or data.get("paid_by")
-            or data.get("customer_name") or data.get("party_name") or data.get("ledger_name")
-            or data.get("invoice_number") or data.get("rental_order_id") or data.get("order_id")
-            or (data.get("customer") or {}).get("name") or (data.get("customer") or {}).get("id")
-            or (data.get("invoice") or {}).get("number") or (data.get("invoice") or {}).get("id")
-            or data.get("payment_method") or data.get("mode") or data.get("reference")
-            or data.get("notes") or data.get("description")
-        )
-        if not ref:
-            # Fallback to payment ID if explicit reference link is not provided in payload
-            ref = str(pid)
 
         return True, None
 

@@ -1,6 +1,6 @@
 import json
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List
 from ..mapping.store import MappingStore
 from ..logging.logger import log_event
 
@@ -180,6 +180,138 @@ class ReconciliationEngine:
 
         return discrepancies
 
+    def reconcile_payments(
+        self,
+        ra_payments: List[Dict[str, Any]],
+        tally_payments: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        discrepancies = []
+        tally_map = {
+            self._clean_str(v.get("voucher_number") or v.get("number")).lower(): v
+            for v in tally_payments if (v.get("voucher_number") or v.get("number"))
+        }
+        ra_map = {
+            self._clean_str(p.get("reference_id") or p.get("number") or p.get("receipt_number")).lower(): p
+            for p in ra_payments if (p.get("reference_id") or p.get("number") or p.get("receipt_number"))
+        }
+
+        for ref_lower, ra_p in ra_map.items():
+            pid = str(ra_p.get("id"))
+            ref_no = ra_p.get("reference_id") or ra_p.get("number") or ra_p.get("receipt_number")
+            if ref_lower not in tally_map:
+                discrepancies.append({
+                    "entity_type": "payment",
+                    "entity_id": pid,
+                    "mismatch_type": "MISSING_IN_TALLY",
+                    "rentasst_value": f"Payment #{ref_no}",
+                    "tally_value": None,
+                    "details": f"Payment #{ref_no} exists in RentAsst but not in Tally",
+                })
+            else:
+                t_p = tally_map[ref_lower]
+                ra_amt = self._clean_float(ra_p.get("amount") or ra_p.get("paid_amount"))
+                t_amt = self._clean_float(t_p.get("amount"))
+                if abs(ra_amt - t_amt) > 0.05:
+                    discrepancies.append({
+                        "entity_type": "payment",
+                        "entity_id": pid,
+                        "mismatch_type": "AMOUNT_MISMATCH",
+                        "rentasst_value": f"{ra_amt:.2f}",
+                        "tally_value": f"{t_amt:.2f}",
+                        "details": f"Payment #{ref_no} amount mismatch: RentAsst {ra_amt:.2f} vs Tally {t_amt:.2f}",
+                    })
+
+        for ref_lower, t_p in tally_map.items():
+            if ref_lower not in ra_map:
+                v_no = t_p.get("voucher_number") or t_p.get("number")
+                discrepancies.append({
+                    "entity_type": "payment",
+                    "entity_id": str(v_no),
+                    "mismatch_type": "MISSING_IN_RENTASST",
+                    "rentasst_value": None,
+                    "tally_value": f"Tally Receipt #{v_no}",
+                    "details": f"Receipt Voucher #{v_no} exists in Tally but not in RentAsst",
+                })
+
+        return discrepancies
+
+    def reconcile_equipment(
+        self,
+        ra_equipment: List[Dict[str, Any]],
+        tally_equipment: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        discrepancies = []
+        tally_map = {self._clean_str(e.get("name")).lower(): e for e in tally_equipment if e.get("name")}
+        ra_map = {self._clean_str(e.get("name")).lower(): e for e in ra_equipment if e.get("name")}
+
+        for name_lower, ra_e in ra_map.items():
+            eid = str(ra_e.get("id"))
+            if name_lower not in tally_map:
+                discrepancies.append({
+                    "entity_type": "equipment",
+                    "entity_id": eid,
+                    "mismatch_type": "MISSING_IN_TALLY",
+                    "rentasst_value": ra_e.get("name"),
+                    "tally_value": None,
+                    "details": f"Equipment '{ra_e.get('name')}' exists in RentAsst but not in Tally",
+                })
+
+        for name_lower, t_e in tally_map.items():
+            t_name = t_e.get("name")
+            if name_lower not in ra_map:
+                discrepancies.append({
+                    "entity_type": "equipment",
+                    "entity_id": t_name,
+                    "mismatch_type": "MISSING_IN_RENTASST",
+                    "rentasst_value": None,
+                    "tally_value": t_name,
+                    "details": f"Stock item '{t_name}' exists in Tally but not in RentAsst",
+                })
+
+        return discrepancies
+
+    def reconcile_rental_orders(
+        self,
+        ra_rental_orders: List[Dict[str, Any]],
+        tally_rental_orders: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        discrepancies = []
+        tally_map = {
+            self._clean_str(v.get("voucher_number") or v.get("number")).lower(): v
+            for v in tally_rental_orders if (v.get("voucher_number") or v.get("number"))
+        }
+        ra_map = {
+            self._clean_str(o.get("number") or o.get("rent_code") or o.get("rent_number")).lower(): o
+            for o in ra_rental_orders if (o.get("number") or o.get("rent_code") or o.get("rent_number"))
+        }
+
+        for num_lower, ra_o in ra_map.items():
+            oid = str(ra_o.get("id"))
+            order_no = ra_o.get("number") or ra_o.get("rent_code") or ra_o.get("rent_number")
+            if num_lower not in tally_map:
+                discrepancies.append({
+                    "entity_type": "rental_order",
+                    "entity_id": oid,
+                    "mismatch_type": "MISSING_IN_TALLY",
+                    "rentasst_value": f"Rent Out #{order_no}",
+                    "tally_value": None,
+                    "details": f"Rent Out #{order_no} exists in RentAsst but not in Tally",
+                })
+
+        for num_lower, t_o in tally_map.items():
+            if num_lower not in ra_map:
+                v_no = t_o.get("voucher_number") or t_o.get("number")
+                discrepancies.append({
+                    "entity_type": "rental_order",
+                    "entity_id": str(v_no),
+                    "mismatch_type": "MISSING_IN_RENTASST",
+                    "rentasst_value": None,
+                    "tally_value": f"Tally Sales Order #{v_no}",
+                    "details": f"Sales Order #{v_no} exists in Tally but not in RentAsst",
+                })
+
+        return discrepancies
+
     def run_reconciliation(
         self,
         ra_customers: List[Dict[str, Any]] = None,
@@ -188,6 +320,10 @@ class ReconciliationEngine:
         tally_invoices: List[Dict[str, Any]] = None,
         ra_payments: List[Dict[str, Any]] = None,
         tally_payments: List[Dict[str, Any]] = None,
+        ra_equipment: List[Dict[str, Any]] = None,
+        tally_equipment: List[Dict[str, Any]] = None,
+        ra_rental_orders: List[Dict[str, Any]] = None,
+        tally_rental_orders: List[Dict[str, Any]] = None,
         company_id: str = "default",
     ) -> Dict[str, Any]:
         """
@@ -200,12 +336,21 @@ class ReconciliationEngine:
         t_inv = tally_invoices or []
         ra_pay = ra_payments or []
         t_pay = tally_payments or []
+        ra_equip = ra_equipment or []
+        t_equip = tally_equipment or []
+        ra_rental = ra_rental_orders or []
+        t_rental = tally_rental_orders or []
 
         macro_totals = self.compute_macro_totals(ra_inv, t_inv, ra_pay, t_pay)
         cust_discrepancies = self.reconcile_customers(ra_cust, t_cust)
         inv_discrepancies = self.reconcile_invoices(ra_inv, t_inv)
+        pay_discrepancies = self.reconcile_payments(ra_pay, t_pay)
+        equip_discrepancies = self.reconcile_equipment(ra_equip, t_equip)
+        rental_discrepancies = self.reconcile_rental_orders(ra_rental, t_rental)
 
-        all_discrepancies = cust_discrepancies + inv_discrepancies
+        all_discrepancies = (
+            cust_discrepancies + inv_discrepancies + pay_discrepancies + equip_discrepancies + rental_discrepancies
+        )
 
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 

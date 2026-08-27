@@ -20,6 +20,33 @@ class DependencyResolver:
     """
 
     @staticmethod
+    def _find_missing_equipment(
+        items: Any,
+        store: MappingStore,
+        source_company_id: str,
+    ) -> Optional[str]:
+        """
+        Rental Order and Invoice items reference equipment by asset_id, but the scheduler
+        enqueues customers/equipment/rental_orders/invoices/payments concurrently every
+        cycle (SyncScheduler._sync_job) with no ordering guarantee that an equipment
+        item's own forward-sync to Tally finishes before a voucher referencing it is
+        pushed. Confirmed live: rental_order and invoice forward-sync both dead-lettered
+        with "Tally Business Error: Stock Item '<name>' does not exist!" for assets whose
+        equipment mapping row simply hadn't been written yet by the equipment job running
+        in a parallel thread. Without this check, that race produces a permanent
+        dead-letter instead of a transient, self-healing wait.
+        """
+        for it in items or []:
+            asset_id = it.get("asset_id")
+            if not asset_id:
+                continue
+            asset_str = str(asset_id).strip()
+            has_equip = store.find_mapping("equipment", asset_str, source_company_id=source_company_id) or store.get_rentasst_id("equipment", asset_str)
+            if not has_equip:
+                return asset_str
+        return None
+
+    @staticmethod
     def check_dependencies(
         entity_type: str,
         data: Dict[str, Any],
@@ -46,6 +73,11 @@ class DependencyResolver:
                 if not has_cust:
                     reason = f"Missing Customer dependency mapping (Customer ID: '{cust_str}') for Invoice sync"
                     return False, reason, "customer", cust_str
+
+            missing_asset_id = DependencyResolver._find_missing_equipment(data.get("items"), store, source_company_id)
+            if missing_asset_id is not None:
+                reason = f"Missing Equipment dependency mapping (Asset ID: '{missing_asset_id}') for Invoice sync"
+                return False, reason, "equipment", missing_asset_id
 
         # 2. Payment Dependency Check (Requires Invoice or Customer mapping)
         elif ent in ("payment", "payments"):
@@ -85,6 +117,11 @@ class DependencyResolver:
                     reason = f"Missing Customer dependency mapping (Customer ID: '{cust_str}') for Rental Order sync"
                     return False, reason, "customer", cust_str
 
+            missing_asset_id = DependencyResolver._find_missing_equipment(data.get("items"), store, source_company_id)
+            if missing_asset_id is not None:
+                reason = f"Missing Equipment dependency mapping (Asset ID: '{missing_asset_id}') for Rental Order sync"
+                return False, reason, "equipment", missing_asset_id
+
         # 4. Equipment Dependency Check (Requires Asset Unit mapping if custom unit specified)
         elif ent in ("equipment", "product", "products", "asset", "assets"):
             unit_name = ""
@@ -108,7 +145,6 @@ class DependencyResolver:
                 if not has_unit:
                     reason = f"Missing Asset Unit dependency mapping (Unit: '{unit_name}') for Equipment sync"
                     return False, reason, "units", unit_name
-
 
         return True, None, None, None
 

@@ -6,7 +6,6 @@ from unittest.mock import MagicMock
 
 from app.mapping.store import MappingStore
 from app.queue.queue_store import QueueStore
-from app.queue.worker import QueueWorker
 from app.queue.lock_manager import LockManager
 from app.sync.base import run_sync_pipeline
 from app.sync.idempotency import generate_integration_key

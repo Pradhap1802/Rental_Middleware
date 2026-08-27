@@ -20,7 +20,7 @@ class BatchResolveConflictRequest(BaseModel):
 def get_detector(request: Request) -> ConflictDetector:
     store = getattr(request.app.state, "mapping_store", None)
     if not store:
-        db_path = getattr(request.app.state, "db_path", "data/state.db")
+        db_path = getattr(request.app.state, "db_path", ".data/state.db")
         store = MappingStore(db_path)
     return ConflictDetector(store)
 

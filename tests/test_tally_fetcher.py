@@ -1,0 +1,358 @@
+import unittest
+from unittest.mock import MagicMock, patch
+
+from app.connectors.tally_fetcher import TallyFetcher
+
+
+# Trimmed but structurally real fixture, captured live from Tally Prime's actual XML
+# collection export for a "Sales Order" voucher. The item line lives under
+# ALLINVENTORYENTRIES.LIST — there is no bare INVENTORYENTRIES.LIST tag anywhere in a
+# real Tally response, for any voucher type.
+REAL_SALES_ORDER_XML = """<ENVELOPE>
+  <VOUCHER REMOTEID="" VCHTYPE="Sales Order" OBJVIEW="Invoice Voucher View">
+    <DATE TYPE="Date">20260801</DATE>
+    <GUID>43cd646b-f7a5-4e9b-87dc-ae276a3ef875-0000002e</GUID>
+    <NARRATION TYPE="String"></NARRATION>
+    <VOUCHERTYPENAME>Sales Order</VOUCHERTYPENAME>
+    <PARTYNAME TYPE="String">Vishal Krishnan</PARTYNAME>
+    <PARTYLEDGERNAME TYPE="String">Vishal Krishnan</PARTYLEDGERNAME>
+    <VOUCHERNUMBER>9</VOUCHERNUMBER>
+    <REFERENCE TYPE="String">10</REFERENCE>
+    <ALTERID TYPE="Number"> 441</ALTERID>
+    <AMOUNT TYPE="Amount">-50.00</AMOUNT>
+    <ALLINVENTORYENTRIES.LIST>
+      <STOCKITEMNAME TYPE="String">Earphone</STOCKITEMNAME>
+      <ISDEEMEDPOSITIVE TYPE="Logical">No</ISDEEMEDPOSITIVE>
+      <RATE TYPE="Rate">50.00/Piece</RATE>
+      <AMOUNT TYPE="Amount">50.00</AMOUNT>
+      <ACTUALQTY TYPE="Quantity"> 1 Piece</ACTUALQTY>
+      <BILLEDQTY TYPE="Quantity"> 1 Piece</BILLEDQTY>
+    </ALLINVENTORYENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME TYPE="String">Vishal Krishnan</LEDGERNAME>
+      <ISDEEMEDPOSITIVE TYPE="Logical">Yes</ISDEEMEDPOSITIVE>
+      <AMOUNT TYPE="Amount">-50.00</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME TYPE="String">Rental Income</LEDGERNAME>
+      <ISDEEMEDPOSITIVE TYPE="Logical">No</ISDEEMEDPOSITIVE>
+      <AMOUNT TYPE="Amount">50.00</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+</ENVELOPE>"""
+
+
+class TestTallyFetcherSharedHttpLock(unittest.TestCase):
+    """
+    _post_xml() used to call bare requests.post() directly, completely bypassing
+    TallyClient's _tally_post()/_TALLY_HTTP_LOCK — QueueWorker runs up to 4 jobs
+    concurrently, and tally_to_rentasst (which uses this fetcher) is enqueued every
+    cycle alongside equipment/invoices/payments/rental_orders (which use TallyClient),
+    so this fetcher's requests could race against TallyClient's, unserialized, from
+    within a single process. Confirmed live: a burst of "Could not set
+    'SVCurrentCompany'" errors on equipment sync while reverse sync was also running —
+    the exact concurrency signature this codebase's own comments document as capable of
+    corrupting or crashing Tally. _post_xml must route through the same shared lock.
+    """
+
+    def test_post_xml_routes_through_the_shared_tally_post_lock(self):
+        from app.models.domain import AppConfig
+
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        fetcher = TallyFetcher(cfg)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b"<ENVELOPE>OK</ENVELOPE>"
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("app.connectors.tally_fetcher._tally_post", return_value=mock_resp) as mock_tally_post:
+            result = fetcher._post_xml("<ENVELOPE>test</ENVELOPE>")
+
+        mock_tally_post.assert_called_once()
+        called_session = mock_tally_post.call_args[0][0]
+        self.assertIs(called_session, fetcher.session)
+        self.assertIn("OK", result)
+
+
+class TestTallyFetcherInventoryParsing(unittest.TestCase):
+    """
+    fetch_vouchers()/​_parse_vouchers_xml() previously searched for a bare
+    "INVENTORYENTRIES.LIST" tag that does not exist in Tally's real XML — every voucher's
+    line items came back as an empty list regardless of voucher type, which silently
+    defeated push_invoice_items()/push_rentout_items() (they always received nothing to
+    push). Confirmed live against a real "Sales Order" voucher export.
+    """
+
+    def test_fetch_vouchers_extracts_items_from_real_tally_xml_shape(self):
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=REAL_SALES_ORDER_XML):
+            vouchers = fetcher.fetch_vouchers(last_alter_id=0)
+
+        self.assertEqual(len(vouchers), 1)
+        items = vouchers[0]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "Earphone")
+        self.assertEqual(items[0]["rate"], "50.00/Piece")
+        self.assertEqual(items[0]["amount"], "50.00")
+
+
+class TestTallyFetcherLedgerGstParsing(unittest.TestCase):
+    """
+    fetch_ledgers() previously only read PARTYGSTIN — Tally's flat legacy GSTIN field.
+    Confirmed live: a ledger whose GST was entered through Tally Prime's detailed
+    "Set/Alter GST Details" flow (multi-registration) leaves PARTYGSTIN completely
+    empty and writes the real value into LEDGSTREGDETAILS.LIST/GSTIN instead — reverse
+    sync silently pushed a blank GST number to RentAsst for every such customer.
+    """
+
+    def test_falls_back_to_ledgstregdetails_gstin_when_partygstin_is_empty(self):
+        xml = """<ENVELOPE>
+  <LEDGER NAME="Test-1">
+    <NAME>Test-1</NAME>
+    <PARENT>Sundry Debtors</PARENT>
+    <PARTYGSTIN></PARTYGSTIN>
+    <LEDGSTREGDETAILS.LIST>
+      <APPLICABLEFROM>20260401</APPLICABLEFROM>
+      <GSTREGISTRATIONTYPE>Regular</GSTREGISTRATIONTYPE>
+      <PLACEOFSUPPLY>Tamil Nadu</PLACEOFSUPPLY>
+      <GSTIN>33FJPPP77998K</GSTIN>
+    </LEDGSTREGDETAILS.LIST>
+  </LEDGER>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            ledgers = fetcher.fetch_ledgers(last_alter_id=0)
+
+        self.assertEqual(len(ledgers), 1)
+        self.assertEqual(ledgers[0]["gstin"], "33FJPPP77998K")
+
+    def test_partygstin_is_preferred_when_present(self):
+        xml = """<ENVELOPE>
+  <LEDGER NAME="Test">
+    <NAME>Test</NAME>
+    <PARENT>Sundry Debtors</PARENT>
+    <PARTYGSTIN>33FDJPP7799K</PARTYGSTIN>
+    <LEDGSTREGDETAILS.LIST>
+      <GSTIN>SHOULD-NOT-BE-USED</GSTIN>
+    </LEDGSTREGDETAILS.LIST>
+  </LEDGER>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            ledgers = fetcher.fetch_ledgers(last_alter_id=0)
+
+        self.assertEqual(ledgers[0]["gstin"], "33FDJPP7799K")
+
+    def test_last_ledgstregdetails_entry_wins_when_gst_changed_over_time(self):
+        """A ledger can carry multiple LEDGSTREGDETAILS.LIST entries (one per
+        APPLICABLEFROM change) — the LAST one is Tally's current registration."""
+        xml = """<ENVELOPE>
+  <LEDGER NAME="Test-1">
+    <NAME>Test-1</NAME>
+    <PARENT>Sundry Debtors</PARENT>
+    <PARTYGSTIN></PARTYGSTIN>
+    <LEDGSTREGDETAILS.LIST>
+      <APPLICABLEFROM>20240401</APPLICABLEFROM>
+      <GSTIN>OLD-GSTIN</GSTIN>
+    </LEDGSTREGDETAILS.LIST>
+    <LEDGSTREGDETAILS.LIST>
+      <APPLICABLEFROM>20260401</APPLICABLEFROM>
+      <GSTIN>NEW-GSTIN</GSTIN>
+    </LEDGSTREGDETAILS.LIST>
+  </LEDGER>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            ledgers = fetcher.fetch_ledgers(last_alter_id=0)
+
+        self.assertEqual(ledgers[0]["gstin"], "NEW-GSTIN")
+
+
+class TestTallyFetcherStockItemQuantityParsing(unittest.TestCase):
+    """
+    fetch_stock_items() fetched OPENINGBALANCE but never CLOSINGBALANCE, and never parsed
+    any quantity field into the returned item dict at all — confirmed live, every
+    reverse-synced stock item landed in RentAsst with available_quantity=0 regardless of
+    Tally's real stock level. CLOSINGBALANCE (not OPENINGBALANCE, which is fixed at item
+    creation and never reflects later stock movement) is Tally's actual current
+    stock-on-hand.
+    """
+
+    def test_parses_quantity_from_closing_balance(self):
+        xml = """<ENVELOPE>
+  <STOCKITEM NAME="Diag Reverse Asset">
+    <NAME>Diag Reverse Asset</NAME>
+    <CLOSINGBALANCE> 6 pc</CLOSINGBALANCE>
+    <OPENINGBALANCE> 6 pc</OPENINGBALANCE>
+  </STOCKITEM>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            items = fetcher.fetch_stock_items(last_alter_id=0)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["quantity"], 6.0)
+
+    def test_missing_closing_balance_defaults_to_zero_quantity(self):
+        xml = """<ENVELOPE>
+  <STOCKITEM NAME="No Stock Movement Item">
+    <NAME>No Stock Movement Item</NAME>
+  </STOCKITEM>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            items = fetcher.fetch_stock_items(last_alter_id=0)
+
+        self.assertEqual(items[0]["quantity"], 0.0)
+
+
+class TestTallyFetcherStockItemGstAndPriceParsing(unittest.TestCase):
+    """
+    fetch_stock_items() only ever read the nested GSTDETAILS.LIST/STATEWISEDETAILS.LIST/
+    RATEDETAILS.LIST/GSTRATE structure for GST rate, and never fetched
+    STANDARDPRICELIST.LIST (Tally's "Standard Selling Price", where this middleware's own
+    forward sync writes RentAsst's rent_price) at all. Confirmed live against a real
+    forward-synced stock item ('Dell Laptop'): its GST rate is stored as the flat
+    top-level RATEOFVAT (18), with GSTDETAILS.LIST/STATEWISEDETAILS.LIST present but
+    EMPTY — Tally normalized the detailed rate block down to RATEOFVAT-only on import in
+    this company's GST configuration — so reading only the nested structure silently
+    returned 0 for its real GST rate, and its real rental price (STANDARDPRICELIST.LIST
+    RATE "150.00/pc") was never read at all.
+    """
+
+    def test_prefers_rateofvat_when_present(self):
+        xml = """<ENVELOPE>
+  <STOCKITEM NAME="Dell Laptop">
+    <NAME>Dell Laptop</NAME>
+    <RATEOFVAT> 18</RATEOFVAT>
+    <GSTDETAILS.LIST>
+      <STATEWISEDETAILS.LIST></STATEWISEDETAILS.LIST>
+    </GSTDETAILS.LIST>
+    <STANDARDPRICELIST.LIST>
+      <DATE>20240401</DATE>
+      <RATE>150.00/pc</RATE>
+    </STANDARDPRICELIST.LIST>
+  </STOCKITEM>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            items = fetcher.fetch_stock_items(last_alter_id=0)
+
+        self.assertEqual(items[0]["gst_rate"], 18.0)
+        self.assertEqual(items[0]["rent_price"], 150.0)
+
+    def test_falls_back_to_nested_ratedetails_when_rateofvat_is_zero(self):
+        xml = """<ENVELOPE>
+  <STOCKITEM NAME="Diag Reverse Asset">
+    <NAME>Diag Reverse Asset</NAME>
+    <RATEOFVAT>0</RATEOFVAT>
+    <GSTDETAILS.LIST>
+      <STATEWISEDETAILS.LIST>
+        <RATEDETAILS.LIST>
+          <GSTRATEDUTYHEAD>IGST</GSTRATEDUTYHEAD>
+          <GSTRATE> 18</GSTRATE>
+        </RATEDETAILS.LIST>
+      </STATEWISEDETAILS.LIST>
+    </GSTDETAILS.LIST>
+  </STOCKITEM>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            items = fetcher.fetch_stock_items(last_alter_id=0)
+
+        self.assertEqual(items[0]["gst_rate"], 18.0)
+
+    def test_missing_price_list_defaults_to_zero_rent_price(self):
+        xml = """<ENVELOPE>
+  <STOCKITEM NAME="No Price Item">
+    <NAME>No Price Item</NAME>
+  </STOCKITEM>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            items = fetcher.fetch_stock_items(last_alter_id=0)
+
+        self.assertEqual(items[0]["rent_price"], 0.0)
+
+    def test_falls_back_to_opening_rate_when_price_list_is_empty(self):
+        """
+        Confirmed live against a real user screenshot of Tally's Stock Item Alteration
+        screen: a stock item entered through Tally's plain, everyday UI has its rate set
+        directly in the Opening Balance row (Quantity 5 pc / Rate 150.00 / Value 750.00)
+        — that Rate is OPENINGRATE, not STANDARDPRICELIST.LIST (a separate, rarely-used
+        "Standard Selling Price" feature nobody had touched). Reading only
+        STANDARDPRICELIST.LIST silently returned 0 for every item entered this ordinary
+        way, which is the common case, not the exception.
+        """
+        xml = """<ENVELOPE>
+  <STOCKITEM NAME="DiagAssetQty2">
+    <NAME>DiagAssetQty2</NAME>
+    <OPENINGBALANCE> 5 pc</OPENINGBALANCE>
+    <OPENINGVALUE>-750.00</OPENINGVALUE>
+    <OPENINGRATE>150.00/pc</OPENINGRATE>
+    <STANDARDPRICELIST.LIST></STANDARDPRICELIST.LIST>
+  </STOCKITEM>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            items = fetcher.fetch_stock_items(last_alter_id=0)
+
+        self.assertEqual(items[0]["rent_price"], 150.0)
+
+    def test_standard_price_list_is_preferred_over_opening_rate_when_both_present(self):
+        """A forward-synced item (build_stock_item_xml) writes rent_price into
+        STANDARDPRICELIST.LIST and purchase_price into OPENINGRATE — the two must never
+        be confused, so STANDARDPRICELIST.LIST wins when both are populated."""
+        xml = """<ENVELOPE>
+  <STOCKITEM NAME="Dell Laptop">
+    <NAME>Dell Laptop</NAME>
+    <OPENINGRATE>25.00/pc</OPENINGRATE>
+    <STANDARDPRICELIST.LIST>
+      <DATE>20240401</DATE>
+      <RATE>150.00/pc</RATE>
+    </STANDARDPRICELIST.LIST>
+  </STOCKITEM>
+</ENVELOPE>"""
+        cfg = MagicMock()
+        cfg.external_url = "http://localhost:9000"
+        fetcher = TallyFetcher(cfg)
+
+        with patch.object(fetcher, "_post_xml", return_value=xml):
+            items = fetcher.fetch_stock_items(last_alter_id=0)
+
+        self.assertEqual(items[0]["rent_price"], 150.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

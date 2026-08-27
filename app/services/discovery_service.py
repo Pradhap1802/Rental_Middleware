@@ -1,6 +1,5 @@
 import os
-import re
-from typing import Dict, Any, Optional
+from typing import Dict
 from ..models.domain import AppConfig
 from ..logging.logger import log_event
 
@@ -35,7 +34,7 @@ class DiscoveryService:
     @classmethod
     def auto_discover_rentasst(cls) -> AppConfig:
         discovered_url = "http://localhost:8000/api"
-        discovered_key = "5|Wgi41qImTrSp05Ohqz1OqLdb6QirrlMG5APXymAR75958752"
+        discovered_key = ""
         discovered_tenant = "B100001"
 
         if os.getenv("RENTASST_URL"):

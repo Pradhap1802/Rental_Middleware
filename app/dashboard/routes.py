@@ -1,6 +1,6 @@
 import os
 import sys
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, FileResponse, Response
 
 router = APIRouter(tags=["dashboard"])
@@ -15,11 +15,22 @@ else:
 @router.get("/login", response_class=HTMLResponse)
 @router.get("/dashboard", response_class=HTMLResponse)
 @router.get("/middleware", response_class=HTMLResponse)
-def index_page():
+def index_page(request: Request):
     index_file = os.path.join(UI_DIR, "index.html")
     if os.path.exists(index_file):
         with open(index_file, "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read())
+            html = f.read()
+        # Every /api/* route now requires X-Middleware-Key (see security/auth.py).
+        # Injecting the current key here — this route is the only unauthenticated
+        # one — lets the browser UI authenticate itself automatically; any other
+        # caller still needs to supply the header explicitly.
+        api_key = getattr(request.app.state, "api_key", "") or ""
+        key_script = f'<script>window.MW_API_KEY="{api_key}";</script>\n'
+        if "</head>" in html:
+            html = html.replace("</head>", key_script + "</head>", 1)
+        else:
+            html = key_script + html
+        return HTMLResponse(content=html)
     return HTMLResponse("<h1>RentAsst Middleware Service Running</h1>")
 
 

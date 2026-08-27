@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 from app.database.connection import DatabaseManager
 from app.clients.rentasst_client import RentAsstClient
-from app.models.domain import AppConfig, RentAsstLoginRequest
+from app.models.domain import AppConfig
 
 
 class TestBearerTokenDB(unittest.TestCase):
@@ -157,12 +157,6 @@ class TestBearerTokenDB(unittest.TestCase):
         db_record = self.db_mgr.get_bearer_token("9876543210")
         self.assertIsNotNone(db_record)
         self.assertEqual(db_record["token"], "mobile_token_123")
-
-    def test_rentasst_login_request_model(self):
-        req = RentAsstLoginRequest(email="test@rentasst.com")
-        self.assertEqual(req.email, "test@rentasst.com")
-
-
 
 if __name__ == "__main__":
     unittest.main()
