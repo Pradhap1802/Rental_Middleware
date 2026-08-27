@@ -189,6 +189,45 @@ class TestReverseSyncHardening(unittest.TestCase):
         lock_key = probe_lock_mgr.generate_lock_key("default", "customer", "forward", "501")
         self.assertTrue(probe_lock_mgr.acquire_lock(lock_key, "another-worker", lease_seconds=5))
 
+    def test_reverse_sync_skips_customer_already_being_processed_by_a_concurrent_reverse_sync_run(self):
+        """
+        Reverse sync itself had no protection against two overlapping runs (e.g. the
+        scheduler firing while a manual trigger is still in progress) both processing
+        the same Tally customer at once — both would independently see "no mapping
+        yet" and both call push_customer, creating a duplicate RentAsst customer. A
+        rival worker already holding this record's reverse-self lock must make this
+        run skip the customer entirely rather than racing it.
+        """
+        from app.queue.lock_manager import LockManager
+
+        rival_lock_mgr = LockManager(self.db_path)
+        lock_key = rival_lock_mgr.generate_lock_key("default", "customer", "reverse-self", "Test")
+        self.assertTrue(rival_lock_mgr.acquire_lock(lock_key, "rival-reverse-worker", lease_seconds=60))
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_customers.return_value = []
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        ledger = {
+            "name": "Test", "alter_id": 225, "phone": "", "mobile": "0987654321",
+            "email": "", "gstin": "", "address_lines": [], "pincode": "", "country": "", "state": "",
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_ledgers.return_value = [ledger]
+            mock_fetcher.fetch_stock_items.return_value = []
+            mock_fetcher.fetch_vouchers.return_value = []
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            stats = sync_tally_to_rentasst(
+                ra_client=mock_ra_client, ext_client=mock_ext_client, store=self.store, force_full_sync=True,
+            )
+
+        mock_ra_client.push_customer.assert_not_called()
+        self.assertGreaterEqual(stats["skipped"], 1)
+
     def test_reverse_sync_skips_new_customer_when_existence_check_fails_instead_of_creating_duplicate(self):
         """
         Same class of bug already fixed for equipment (confirmed live: a transient
@@ -898,6 +937,48 @@ class TestReverseSyncHardening(unittest.TestCase):
         pushed_rentout = mock_ra_client.push_rentout.call_args[0][0]
         self.assertTrue(pushed_rentout["settings"])
         self.assertIn("refund_type", pushed_rentout["settings"])
+
+    def test_reverse_sync_skips_voucher_already_being_processed_by_a_concurrent_reverse_sync_run(self):
+        """
+        Same reverse-sync-vs-reverse-sync guard as the customer/equipment loops, applied
+        to vouchers (rentouts/invoices/payments): a rival worker already holding this
+        exact Tally voucher's reverse-self lock (keyed by tally_guid, unique across
+        voucher types) must make this run skip it entirely instead of racing to create
+        a duplicate RentAsst rentout for the same Tally Sales Order.
+        """
+        from app.queue.lock_manager import LockManager
+
+        rival_lock_mgr = LockManager(self.db_path)
+        lock_key = rival_lock_mgr.generate_lock_key("default", "rental_order", "reverse-self", "GUID-SALES-ORDER-2")
+        self.assertTrue(rival_lock_mgr.acquire_lock(lock_key, "rival-reverse-worker", lease_seconds=60))
+
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_customers.return_value = []
+        mock_ext_client = MagicMock()
+        mock_ext_client.cfg = MagicMock()
+
+        voucher = {
+            "tally_guid": "GUID-SALES-ORDER-2",
+            "alter_id": 31,
+            "voucher_type": "Sales Order",
+            "voucher_number": "ORD-2",
+            "party_name": "Acme Corp",
+            "date": "2026-08-20",
+            "amount": 97.0,
+            "items": [{"name": "Moto G45", "quantity": "1 Piece", "rate": "97.00/Piece", "amount": "97.00"}],
+        }
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_vouchers.return_value = [voucher]
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            stats = sync_tally_to_rentasst(
+                ra_client=mock_ra_client, ext_client=mock_ext_client, store=self.store, force_full_sync=True,
+            )
+
+        mock_ra_client.push_rentout.assert_not_called()
+        self.assertGreaterEqual(stats["skipped"], 1)
 
     def test_reverse_sync_backfill_patches_null_settings_before_pushing_items(self):
         """

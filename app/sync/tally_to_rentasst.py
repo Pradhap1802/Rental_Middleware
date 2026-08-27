@@ -530,6 +530,22 @@ def sync_tally_to_rentasst(
             if not cust_name:
                 continue
 
+            # Reverse-sync-vs-reverse-sync guard: a second overlapping reverse sync run
+            # (e.g. the scheduler firing while a manual trigger is still in progress)
+            # could independently process this exact Tally customer at the same time —
+            # both reading "no mapping yet" and both deciding to create it, producing a
+            # duplicate RentAsst customer. Reserve this identifier for the whole of this
+            # customer's decision + action (not just the create call itself), since the
+            # create-vs-update decision reads mapping state that must not be read
+            # concurrently with another worker's write of it. A racing worker that loses
+            # the acquire skips this cycle; by the next cycle the winner's mapping
+            # already exists, so the loser's own lookup then correctly finds it and
+            # takes the update path instead of creating a duplicate.
+            record_lock_key = lock_mgr.generate_lock_key("default", "customer", "reverse-self", cust_name)
+            if not lock_mgr.acquire_lock(record_lock_key, worker_id, lease_seconds=120):
+                stats["skipped"] += 1
+                continue
+
             mobile_number = _extract_primary_mobile(l, cust_name)
             has_real_mobile = _has_real_tally_mobile(l)
             address_payload = _extract_address_payload(l)
@@ -581,6 +597,7 @@ def sync_tally_to_rentasst(
                     )
 
             if not ra_id and customer_existence_check_failed:
+                lock_mgr.release_lock(record_lock_key, worker_id)
                 stats["skipped"] += 1
                 continue
 
@@ -601,6 +618,7 @@ def sync_tally_to_rentasst(
             if ra_id:
                 stored_hash = (existing_mapping or {}).get("last_synced_hash") or (existing_mapping or {}).get("last_hash")
                 if stored_hash == current_hash:
+                    lock_mgr.release_lock(record_lock_key, worker_id)
                     stats["skipped"] += 1
                     continue
                 stats["processed"] += 1
@@ -649,6 +667,7 @@ def sync_tally_to_rentasst(
                 except Exception as e:
                     stats["failed"] += 1
                     log_event("ReverseSync", f"Failed to update Tally customer '{cust_name}' in RentAsst: {e}")
+                lock_mgr.release_lock(record_lock_key, worker_id)
                 continue
 
             stats["processed"] += 1
@@ -695,6 +714,8 @@ def sync_tally_to_rentasst(
             except Exception as e:
                 stats["failed"] += 1
                 log_event("ReverseSync", f"Failed to push Tally customer '{cust_name}': {e}")
+            finally:
+                lock_mgr.release_lock(record_lock_key, worker_id)
 
         # 2. Reverse sync new Assets / Equipment (Stock Items) from Tally to RentAsst
         stock_items = fetcher.fetch_stock_items(last_alter_id=last_alter_id)
@@ -712,6 +733,16 @@ def sync_tally_to_rentasst(
                 max_alter_id = s_alter_id
 
             if not item_name:
+                continue
+
+            # Reverse-sync-vs-reverse-sync guard: see the matching comment on the
+            # customer loop above — a second overlapping reverse sync run could
+            # independently process this exact Tally stock item at the same time and
+            # both decide to create it. Reserve this identifier for the whole of this
+            # item's decision + action, released at every exit point below.
+            record_lock_key = lock_mgr.generate_lock_key("default", "equipment", "reverse-self", item_name)
+            if not lock_mgr.acquire_lock(record_lock_key, worker_id, lease_seconds=120):
+                stats["skipped"] += 1
                 continue
 
             current_hash = _equipment_change_hash(
@@ -763,6 +794,7 @@ def sync_tally_to_rentasst(
                     forward_owned = True
 
             if not ra_id and existence_check_failed:
+                lock_mgr.release_lock(record_lock_key, worker_id)
                 stats["skipped"] += 1
                 continue
 
@@ -814,6 +846,7 @@ def sync_tally_to_rentasst(
                 watch_mapping = store.find_mapping(EQUIPMENT_REVERSE_WATCH_ENTITY, item_name)
                 stored_hash = (watch_mapping or {}).get("last_synced_hash")
                 if stored_hash == current_hash:
+                    lock_mgr.release_lock(record_lock_key, worker_id)
                     stats["skipped"] += 1
                     continue
                 stats["processed"] += 1
@@ -860,11 +893,13 @@ def sync_tally_to_rentasst(
                 except Exception as e:
                     stats["failed"] += 1
                     log_event("ReverseSync", f"Failed to update Tally stock item '{item_name}' in RentAsst: {e}")
+                lock_mgr.release_lock(record_lock_key, worker_id)
                 continue
 
             if ra_id:
                 stored_hash = (existing_mapping or {}).get("last_synced_hash") or (existing_mapping or {}).get("last_hash")
                 if stored_hash == current_hash:
+                    lock_mgr.release_lock(record_lock_key, worker_id)
                     stats["skipped"] += 1
                     continue
                 stats["processed"] += 1
@@ -918,6 +953,7 @@ def sync_tally_to_rentasst(
                 except Exception as e:
                     stats["failed"] += 1
                     log_event("ReverseSync", f"Failed to update Tally stock item '{item_name}' in RentAsst: {e}")
+                lock_mgr.release_lock(record_lock_key, worker_id)
                 continue
 
             stats["processed"] += 1
@@ -965,6 +1001,8 @@ def sync_tally_to_rentasst(
             except Exception as e:
                 stats["failed"] += 1
                 log_event("ReverseSync", f"Failed to push Tally stock item '{item_name}': {e}")
+            finally:
+                lock_mgr.release_lock(record_lock_key, worker_id)
 
         # 3. Reverse sync Vouchers (Sales Orders, Invoices, Receipts)
         vouchers = fetcher.fetch_vouchers(last_alter_id=last_alter_id, from_date=from_date, to_date=to_date)
@@ -997,6 +1035,32 @@ def sync_tally_to_rentasst(
             if not is_invoice_type and not is_rentout_type and is_tally_voucher_duplicate(v, store, ra_client):
                 stats["skipped"] += 1
                 continue
+
+            # Reverse-sync-vs-reverse-sync guard: see the matching comment on the
+            # customer create path above — a second overlapping reverse sync run (the
+            # scheduler firing while a manual trigger is still in progress, or two
+            # scheduler workers) could independently process this exact Tally voucher
+            # at the same time and both decide to create it, producing a duplicate
+            # RentAsst rentout/invoice/payment for the same Tally source. tally_guid is
+            # globally unique across voucher types, so one lock per voucher is enough —
+            # held for this voucher's entire processing (not just the create call)
+            # since the create-vs-update decision itself reads mapping state that must
+            # not be read concurrently with another worker's write of it. A racing
+            # worker that loses the acquire skips this cycle; by the next cycle the
+            # winner's mapping already exists, so the loser's own existing_ra_id lookup
+            # correctly finds it and takes the update/backfill path instead of create.
+            voucher_entity_type = (
+                "rental_order" if is_rentout_type
+                else "invoice" if is_invoice_type
+                else "payment" if v_type in ("receipt", "payment", "receipts", "payments")
+                else None
+            )
+            record_lock_key = None
+            if voucher_entity_type and tally_guid:
+                record_lock_key = lock_mgr.generate_lock_key("default", voucher_entity_type, "reverse-self", tally_guid)
+                if not lock_mgr.acquire_lock(record_lock_key, worker_id, lease_seconds=120):
+                    stats["skipped"] += 1
+                    continue
 
             try:
                 party_name = v.get("party_name") or "Customer"
@@ -1454,6 +1518,9 @@ def sync_tally_to_rentasst(
                 error_msg = str(ex)
                 log_event("ReverseSync", f"Failed to push Tally voucher {tally_guid} ({v_type}): {error_msg}")
                 store.add_dead_letter("voucher", tally_guid, error_msg, json.dumps(v))
+            finally:
+                if record_lock_key:
+                    lock_mgr.release_lock(record_lock_key, worker_id)
 
         if max_alter_id > last_alter_id:
             store.set_checkpoint("tally_alter_id", str(max_alter_id))
