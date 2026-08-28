@@ -486,12 +486,22 @@ class TallyClient:
         seen, so the order stops being permanently stuck instead of dead-lettering
         forever on every cycle. Deterministic (not random) so a mapping saved under
         the '-R2' id stays stable across future cycles instead of drifting.
+
+        "Bad Order Number in Voucher!" must also trigger this retry, not just the
+        generic "voucher touched=False" message — confirmed live (order #116) that it
+        recurred identically across multiple cycles with nothing ever created, the
+        same permanently-stuck symptom, just surfaced through extract_tally_errors'
+        LINEERROR-text path in validate_tally_accounting_success rather than the
+        exceptions-count fallback path, so it never contains "voucher touched=False"
+        as a substring. Checking for either avoids leaving this shape dead-lettered
+        forever the way the generic-only check did.
         """
         remote_id = f"RENTAL-ORD-{data.get('id')}"
         try:
             return self._attempt_sync_rental_order(data, remote_id)
         except ValueError as e:
-            if "voucher touched=False" not in str(e):
+            err_text = str(e)
+            if "voucher touched=False" not in err_text and "Bad Order Number" not in err_text:
                 raise
             retry_remote_id = f"{remote_id}-R2"
             log_event(

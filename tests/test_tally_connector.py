@@ -965,30 +965,41 @@ class TestRentalOrderNativeVsFallbackVoucherType(unittest.TestCase):
         resp.content = b"<ENVELOPE><BODY><IMPORTRESULT><CREATED>1</CREATED><LASTVCHID>9</LASTVCHID></IMPORTRESULT></BODY></ENVELOPE>"
         return resp
 
-    def test_unknown_mode_tries_native_first_and_never_double_attempts_the_same_order(self):
+    def test_unknown_mode_tries_native_first_then_recovers_via_the_learned_fallback(self):
         """
-        Confirmed live: a failed import under a given REMOTEID/bill-name can leave
-        Tally rejecting a SECOND attempt under that identical identifier too, even
-        with a totally different voucher type. So when Order Processing is unknown, a
-        rejected native attempt must raise (dead-lettering just this one order) rather
-        than immediately retrying the SAME order with the fallback shape.
+        "Bad Order Number in Voucher!" is the exact rejection text confirmed live for
+        a permanently-stuck identifier under the native Sales Order type (see
+        sync_rental_order's own docstring) — it must trigger the same '-R2' suffix
+        retry as the silent 'touched=False' signature, not dead-letter forever. Since
+        the first rejection also learns order_processing_available=False, the retry
+        goes out via the safe fallback shape (not native again) and succeeds.
         """
         cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
         self.assertIsNone(cfg.tally_order_processing_available)
         mock_session = MagicMock()
-        mock_session.post.side_effect = [self._check_exists_resp(), self._rejected_resp()]
+        mock_session.post.side_effect = [
+            self._check_exists_resp(),   # check_exists for RENTAL-ORD-2
+            self._rejected_resp(),       # native attempt -> "Bad Order Number in Voucher!"
+            self._check_exists_resp(),   # check_exists for RENTAL-ORD-2-R2
+            self._success_resp(),        # retry attempt, now via the learned-safe fallback shape
+        ]
         client = TallyClient(cfg, session=mock_session)
 
-        with self.assertRaises(ValueError):
-            client.sync_rental_order({"id": 2, "number": "R100001", "customer_name": "Test", "grand_total": 118})
+        result = client.sync_rental_order({"id": 2, "number": "R100001", "customer_name": "Test", "grand_total": 118})
 
-        self.assertEqual(mock_session.post.call_count, 2)  # check_exists + one rejected attempt, no retry
+        self.assertEqual(result, "RENTAL-ORD-2-R2")
+        self.assertEqual(mock_session.post.call_count, 4)
         self.assertFalse(cfg.tally_order_processing_available)
         self.assertTrue(client.order_processing_auto_detected)
 
         native_call_body = mock_session.post.call_args_list[1].kwargs.get("data")
         native_call_body = native_call_body.decode("utf-8") if isinstance(native_call_body, bytes) else native_call_body
         self.assertIn('VTYPE="Sales Order"', native_call_body)
+
+        retry_call_body = mock_session.post.call_args_list[3].kwargs.get("data")
+        retry_call_body = retry_call_body.decode("utf-8") if isinstance(retry_call_body, bytes) else retry_call_body
+        self.assertIn('VTYPE="RentAsst Sales"', retry_call_body)
+        self.assertIn('REMOTEID="RENTAL-ORD-2-R2"', retry_call_body)
 
     def test_known_unavailable_goes_straight_to_fallback(self):
         cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally", tally_order_processing_available=False)
@@ -1004,19 +1015,35 @@ class TestRentalOrderNativeVsFallbackVoucherType(unittest.TestCase):
         fallback_body = fallback_body.decode("utf-8") if isinstance(fallback_body, bytes) else fallback_body
         self.assertIn('VTYPE="RentAsst Sales"', fallback_body)
 
-    def test_known_available_uses_native_and_does_not_fall_back_on_a_real_error(self):
-        """Once confirmed working, a fresh rejection is a real data problem with THIS
-        order, not evidence Order Processing vanished — it must surface, not be masked."""
+    def test_known_available_does_not_relearn_the_flag_on_a_retried_real_error(self):
+        """Once confirmed working, a fresh 'Bad Order Number' rejection still gets the
+        same one-time '-R2' retry (it's the identifier that's suspect, not the
+        voucher type) — but must NOT re-learn/flip order_processing_available, since
+        a single order failing twice under a confirmed-working setup is real evidence
+        of a per-order problem, not that the feature vanished. Both attempts use the
+        native shape again since the flag never changes, so it must surface (not be
+        masked) once the retry is also exhausted."""
         cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally", tally_order_processing_available=True)
         mock_session = MagicMock()
-        mock_session.post.side_effect = [self._check_exists_resp(), self._rejected_resp()]
+        mock_session.post.side_effect = [
+            self._check_exists_resp(),   # check_exists for RENTAL-ORD-4
+            self._rejected_resp(),       # native attempt -> "Bad Order Number in Voucher!"
+            self._check_exists_resp(),   # check_exists for RENTAL-ORD-4-R2
+            self._rejected_resp(),       # retry attempt, still native (flag unchanged) -> rejected again
+        ]
         client = TallyClient(cfg, session=mock_session)
 
         with self.assertRaises(ValueError):
             client.sync_rental_order({"id": 4, "number": "R100003", "customer_name": "Test", "grand_total": 118})
 
+        self.assertEqual(mock_session.post.call_count, 4)
         self.assertTrue(cfg.tally_order_processing_available)  # unchanged
         self.assertFalse(client.order_processing_auto_detected)
+
+        retry_call_body = mock_session.post.call_args_list[3].kwargs.get("data")
+        retry_call_body = retry_call_body.decode("utf-8") if isinstance(retry_call_body, bytes) else retry_call_body
+        self.assertIn('VTYPE="Sales Order"', retry_call_body)
+        self.assertIn('REMOTEID="RENTAL-ORD-4-R2"', retry_call_body)
 
     def _exception_only_resp(self):
         # No LINEERROR/ERROR/EXCEPTION text at all — confirmed live this is a real
@@ -1056,13 +1083,27 @@ class TestRentalOrderNativeVsFallbackVoucherType(unittest.TestCase):
         retry_body = retry_body.decode("utf-8") if isinstance(retry_body, bytes) else retry_body
         self.assertIn('REMOTEID="RENTAL-ORD-5-R2"', retry_body)
 
-    def test_a_real_data_rejection_with_error_text_is_not_treated_as_permanently_stuck(self):
-        """The mirror case: a rejection that DOES carry real LINEERROR text (a
-        genuine data problem) must not trigger the suffix-retry — that's reserved
-        for the silent 'nothing created, no error text' signature specifically."""
+    def _missing_stock_item_resp(self):
+        # A genuine per-order data problem — the referenced item doesn't exist in
+        # Tally at all — as opposed to _rejected_resp()'s "Bad Order Number", which
+        # is specifically the identifier-poisoning signature. Retrying THIS under a
+        # fresh REMOTEID would be pointless: the same item is still missing either way.
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"""<ENVELOPE><BODY><IMPORTRESULT>
+            <CREATED>0</CREATED>
+            <LINEERROR>Stock Item 'Foo' does not exist!</LINEERROR>
+        </IMPORTRESULT></BODY></ENVELOPE>"""
+        return resp
+
+    def test_a_real_data_rejection_with_unrelated_error_text_is_not_treated_as_permanently_stuck(self):
+        """The mirror case: a rejection carrying LINEERROR text unrelated to identifier
+        poisoning (e.g. a missing stock item) must not trigger the suffix-retry —
+        that's reserved for the specific signatures known to mean 'this identifier
+        itself is stuck' ('voucher touched=False' / 'Bad Order Number in Voucher!')."""
         cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally", tally_order_processing_available=False)
         mock_session = MagicMock()
-        mock_session.post.side_effect = [self._check_exists_resp(), self._rejected_resp()]
+        mock_session.post.side_effect = [self._check_exists_resp(), self._missing_stock_item_resp()]
         client = TallyClient(cfg, session=mock_session)
 
         with self.assertRaises(ValueError):
