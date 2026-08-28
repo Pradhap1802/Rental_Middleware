@@ -245,7 +245,6 @@ from ..mapping.store import MappingStore
 from ..logging.logger import log_event
 from .idempotency import generate_integration_key
 from .ownership import filter_payload_by_ownership
-from ..validation.validator import validate_entity_payload
 from ..queue.lock_manager import LockManager
 
 
@@ -438,11 +437,16 @@ def is_own_forward_sync_voucher(v: Dict[str, Any], store: MappingStore) -> bool:
 
 
 def is_tally_voucher_duplicate(v: Dict[str, Any], store: MappingStore, ra_client: Optional[Any] = None) -> bool:
-    """Checks if a Tally voucher or master record already exists in RentAsst and SQLite mapping store."""
+    """
+    Checks if a Tally Sales Order voucher already exists in RentAsst and SQLite
+    mapping store. Only ever called for rental_order vouchers — reverse sync no
+    longer mirrors Invoices/Payments at all (see the skip at the top of the voucher
+    loop in sync_tally_to_rentasst), so this no longer needs to handle those types.
+    """
+    ent = "rental_order"
     tally_guid = (v.get("tally_guid") or "").strip()
     v_no = (v.get("voucher_number") or "").strip()
     rentasst_tag = (v.get("rentasst_id") or "").strip()
-    v_type = (v.get("voucher_type") or "").lower().strip()
 
     if rentasst_tag:
         return True
@@ -451,22 +455,22 @@ def is_tally_voucher_duplicate(v: Dict[str, Any], store: MappingStore, ra_client
         return True
 
     if tally_guid:
-        for ent in ("rental_orders", "rental_order", "invoice", "payment"):
-            # A matching integration_key used to return True immediately here, before
-            # ever reaching the check_exists_in_rentasst staleness check below — since
-            # save_mapping() always sets integration_key on create, that made this the
-            # path virtually every already-mapped voucher took, and the self-heal
-            # logic below effectively never ran in practice. Resolve ra_id from
-            # EITHER source first, then verify existence once, so a genuinely deleted
-            # RentAsst record still gets self-healed regardless of which lookup found
-            # its mapping (confirmed live: rentout 9's mapping was only found via
-            # integration_key, never get_rentasst_id, so it kept being treated as
-            # "still exists" forever with no self-heal).
-            rev_key = generate_integration_key("default", ent, tally_guid, "reverse")
-            key_match = store.find_by_integration_key(rev_key)
-            ra_id = store.get_rentasst_id(ent, tally_guid) or ((key_match or {}).get("target_id") if key_match else None)
-            if not ra_id:
-                continue
+        # store.get_rentasst_id(ent, tally_guid) looks by TARGET (find_by_target,
+        # default target_system="tally") — the wrong direction for what's being
+        # asked here. A reverse-created mapping (save_mapping(source_id=tally_guid,
+        # source_system="tally", target_id=ra_id, target_system="rentasst")) has
+        # the Tally GUID as its SOURCE, not its target, so get_rentasst_id can
+        # never find it — confirmed live: this exact mismatch let the same single
+        # Tally voucher get reverse-synced into RentAsst three separate times
+        # (rentouts #7, #8, #9 all traced back to one Tally GUID), since every
+        # cycle after the first genuinely found no evidence a mapping existed.
+        # find_mapping(entity_type, source_id, source_system) searches by SOURCE
+        # directly — the tally_guid IS the source_id reverse sync saved this
+        # under, so this is the correct, direct lookup instead of routing through
+        # target-side helpers and an integration_key guess as a workaround.
+        mapping = store.find_mapping(ent, tally_guid, source_system="tally")
+        ra_id = (mapping or {}).get("target_id")
+        if ra_id:
             if ra_client and not ra_client.check_exists_in_rentasst(ent, ra_id):
                 log_event("ReverseSync", f"Record Tally GUID {tally_guid} ('{v_no}') exists in middleware DB but was deleted in RentAsst. Resyncing...")
                 # store.delete() matches its own mapping table's rentasst_id/source_id
@@ -483,91 +487,50 @@ def is_tally_voucher_duplicate(v: Dict[str, Any], store: MappingStore, ra_client
             return True
 
     if v_no:
-        for ent in ("rental_orders", "rental_order", "invoice", "payment"):
-            ra_id = (
-                store.get_rentasst_id(ent, v_no)
-                or store.get_rentasst_id(ent, f"RENT-{v_no}")
-                or store.get_rentasst_id(ent, f"ORD-{v_no}")
-                or store.get_rentasst_id(ent, f"INV-{v_no}")
-                or store.get_rentasst_id(ent, f"PAY-{v_no}")
-            )
-            if ra_id:
-                if ra_client and not ra_client.check_exists_in_rentasst(ent, ra_id):
-                    log_event("ReverseSync", f"Record Tally Voucher #{v_no} exists in middleware DB but was deleted in RentAsst. Resyncing...")
-                    store.delete(ent, ra_id)
-                    return False
-                return True
+        ra_id = (
+            store.get_rentasst_id(ent, v_no)
+            or store.get_rentasst_id(ent, f"RENT-{v_no}")
+            or store.get_rentasst_id(ent, f"ORD-{v_no}")
+        )
+        if ra_id:
+            if ra_client and not ra_client.check_exists_in_rentasst(ent, ra_id):
+                log_event("ReverseSync", f"Record Tally Voucher #{v_no} exists in middleware DB but was deleted in RentAsst. Resyncing...")
+                store.delete(ent, ra_id)
+                return False
+            return True
 
     # Cloud Deduplication: Check if record already exists on RentAsst server
     if ra_client and (v_no or tally_guid):
-        if v_type in ("sales", "sales invoice", "invoice"):
-            try:
-                cloud_invoices = ra_client.fetch_invoices()
-                if isinstance(cloud_invoices, list):
-                    for inv in cloud_invoices:
-                        inv_num = str(inv.get("number") or "").strip()
-                        inv_notes = str(inv.get("notes") or "").strip()
-                        if inv_num == v_no or inv_num == f"INV-{v_no}" or f"Voucher #{v_no}" in inv_notes or (tally_guid and tally_guid in inv_notes):
-                            cloud_id = str(inv.get("id"))
-                            store.save_mapping(
-                                entity_type="invoice",
-                                source_id=tally_guid or v_no,
-                                target_id=cloud_id,
-                                source_system="tally",
-                                target_system="rentasst",
-                                integration_key=generate_integration_key("default", "invoice", tally_guid or v_no, "reverse"),
-                                status="synced",
-                            )
-                            log_event("ReverseSync", f"Invoice for Tally Voucher #{v_no} already exists in RentAsst Cloud DB (ID: {cloud_id}). Saved mapping and skipping duplicate creation.")
-                            return True
-            except Exception as e:
-                log_event("ReverseSync", f"Cloud invoice deduplication lookup note: {e}")
-
-        elif v_type in ("sales order", "sales orders", "order", "orders", "rental order", "rental orders", "rentasst sales"):
-            try:
-                cloud_orders = ra_client.fetch_rental_orders()
-                if isinstance(cloud_orders, list):
-                    for ord_item in cloud_orders:
-                        ord_num = str(ord_item.get("number") or ord_item.get("rent_code") or "").strip()
-                        ord_notes = str(ord_item.get("notes") or "").strip()
-                        if ord_num == v_no or ord_num == f"ORD-{v_no}" or f"Tally #{v_no}" in ord_notes or (tally_guid and tally_guid in ord_notes):
-                            cloud_id = str(ord_item.get("id"))
-                            store.save_mapping(
-                                entity_type="rental_order",
-                                source_id=tally_guid or v_no,
-                                target_id=cloud_id,
-                                source_system="tally",
-                                target_system="rentasst",
-                                integration_key=generate_integration_key("default", "rental_order", tally_guid or v_no, "reverse"),
-                                status="synced",
-                            )
-                            log_event("ReverseSync", f"Rental Order for Tally Voucher #{v_no} already exists in RentAsst Cloud DB (ID: {cloud_id}). Saved mapping and skipping duplicate creation.")
-                            return True
-            except Exception as e:
-                log_event("ReverseSync", f"Cloud rental order deduplication lookup note: {e}")
-
-        elif v_type in ("receipt", "payment", "receipts", "payments"):
-            try:
-                cloud_payments = ra_client.fetch_payments()
-                if isinstance(cloud_payments, list):
-                    for pay_item in cloud_payments:
-                        pay_ref = str(pay_item.get("reference_id") or pay_item.get("payment_number") or "").strip()
-                        pay_notes = str(pay_item.get("notes") or "").strip()
-                        if pay_ref == v_no or pay_ref == f"PAY-{v_no}" or f"Receipt #{v_no}" in pay_notes or (tally_guid and tally_guid in pay_notes):
-                            cloud_id = str(pay_item.get("id"))
-                            store.save_mapping(
-                                entity_type="payment",
-                                source_id=tally_guid or v_no,
-                                target_id=cloud_id,
-                                source_system="tally",
-                                target_system="rentasst",
-                                integration_key=generate_integration_key("default", "payment", tally_guid or v_no, "reverse"),
-                                status="synced",
-                            )
-                            log_event("ReverseSync", f"Payment for Tally Receipt #{v_no} already exists in RentAsst Cloud DB (ID: {cloud_id}). Saved mapping and skipping duplicate creation.")
-                            return True
-            except Exception as e:
-                log_event("ReverseSync", f"Cloud payment deduplication lookup note: {e}")
+        try:
+            cloud_orders = ra_client.fetch_rental_orders()
+            if isinstance(cloud_orders, list):
+                for ord_item in cloud_orders:
+                    ord_num = str(ord_item.get("number") or ord_item.get("rent_code") or "").strip()
+                    ord_notes = str(ord_item.get("notes") or "").strip()
+                    # The rentout create path (below) always stamps notes as
+                    # "Imported from Tally Sales Order #{voucher_number}" — never
+                    # "Tally #{voucher_number}" directly (that shape doesn't occur
+                    # anywhere: "Tally" is always followed by "Sales Order #", not
+                    # "#"). Confirmed live: this substring check never once matched
+                    # a real reverse-synced rentout's own notes, and the same single
+                    # Tally voucher got reverse-synced repeatedly as a result (this
+                    # cloud-dedup pass is the last-resort fallback for exactly the
+                    # case where the mapping row itself is missing/stale).
+                    if ord_num == v_no or ord_num == f"ORD-{v_no}" or ord_notes.endswith(f"#{v_no}") or (tally_guid and tally_guid in ord_notes):
+                        cloud_id = str(ord_item.get("id"))
+                        store.save_mapping(
+                            entity_type="rental_order",
+                            source_id=tally_guid or v_no,
+                            target_id=cloud_id,
+                            source_system="tally",
+                            target_system="rentasst",
+                            integration_key=generate_integration_key("default", "rental_order", tally_guid or v_no, "reverse"),
+                            status="synced",
+                        )
+                        log_event("ReverseSync", f"Rental Order for Tally Voucher #{v_no} already exists in RentAsst Cloud DB (ID: {cloud_id}). Saved mapping and skipping duplicate creation.")
+                        return True
+        except Exception as e:
+            log_event("ReverseSync", f"Cloud rental order deduplication lookup note: {e}")
 
     return False
 
@@ -1102,7 +1065,9 @@ def sync_tally_to_rentasst(
             finally:
                 lock_mgr.release_lock(record_lock_key, worker_id)
 
-        # 3. Reverse sync Vouchers (Sales Orders, Invoices, Receipts)
+        # 3. Reverse sync Vouchers (Sales Orders only — see the invoice/receipt skip
+        # just inside the loop below for why Invoices/Receipts are no longer mirrored
+        # here).
         vouchers = fetcher.fetch_vouchers(last_alter_id=last_alter_id, from_date=from_date, to_date=to_date)
         
         for v in vouchers:
@@ -1113,7 +1078,21 @@ def sync_tally_to_rentasst(
                 max_alter_id = alter_id
 
             v_type = (v.get("voucher_type") or "").lower().strip()
-            is_invoice_type = v_type in ("sales", "sales invoice", "invoice")
+
+            # Invoices and Payments are no longer mirrored by reverse sync — per
+            # explicit user decision, they're RentAsst-native going forward: created
+            # there against a rental order (whether that order originated in RentAsst
+            # or was itself reverse-synced from Tally), then picked up by forward
+            # sync's own sync_invoice/sync_payment, which already reference that
+            # order's Tally identity (see build_sales_invoice_voucher_xml's REFERENCE
+            # tag and build_receipt_voucher_xml's Agst Ref). Reverse-creating them
+            # here too was the source of a large, confirmed-live duplication problem
+            # (the same Tally voucher repeatedly producing new RentAsst records) that
+            # is simpler to eliminate than to keep hardening.
+            if v_type in ("sales", "sales invoice", "invoice", "receipt", "payment", "receipts", "payments"):
+                stats["skipped"] += 1
+                continue
+
             # "rentasst sales" is TallyClient.sync_rental_order's own dedicated voucher
             # type (build_sales_order_voucher_xml — see its docstring for why it's not
             # a real "Sales Order"). A forward-synced rentout is already excluded above
@@ -1121,16 +1100,14 @@ def sync_tally_to_rentasst(
             # human enters directly in Tally naturally lands under this same type too,
             # since it's the only Order-like option this company's Tally now has —
             # confirmed live: a real, non-forward-synced "RentAsst Sales" voucher fell
-            # through unclassified (matched neither is_invoice_type nor is_rentout_type)
-            # and was silently never reverse-synced at all.
+            # through unclassified and was silently never reverse-synced at all.
             is_rentout_type = v_type in ("sales order", "sales orders", "order", "orders", "rental order", "rental orders", "rentasst sales")
 
-            # Invoices and rentouts get their own create-vs-update-vs-skip handling further
-            # down (an already-synced record must still be checked for missing line items
-            # and backfilled — see the "backfill" comments below — not skipped forever) —
-            # payments keep the plain skip-on-duplicate behavior, since a receipt is never
-            # revised after creation.
-            if not is_invoice_type and not is_rentout_type and is_tally_voucher_duplicate(v, store, ra_client):
+            # Rentouts get their own create-vs-update-vs-skip handling further down (an
+            # already-synced one must still be checked for missing line items and
+            # backfilled — see the "backfill" comments below — not skipped forever);
+            # anything else falls through to the plain skip-on-duplicate check.
+            if not is_rentout_type and is_tally_voucher_duplicate(v, store, ra_client):
                 stats["skipped"] += 1
                 continue
 
@@ -1139,20 +1116,15 @@ def sync_tally_to_rentasst(
             # scheduler firing while a manual trigger is still in progress, or two
             # scheduler workers) could independently process this exact Tally voucher
             # at the same time and both decide to create it, producing a duplicate
-            # RentAsst rentout/invoice/payment for the same Tally source. tally_guid is
-            # globally unique across voucher types, so one lock per voucher is enough —
-            # held for this voucher's entire processing (not just the create call)
-            # since the create-vs-update decision itself reads mapping state that must
-            # not be read concurrently with another worker's write of it. A racing
-            # worker that loses the acquire skips this cycle; by the next cycle the
-            # winner's mapping already exists, so the loser's own existing_ra_id lookup
+            # RentAsst rentout for the same Tally source. tally_guid is globally unique
+            # across voucher types, so one lock per voucher is enough — held for this
+            # voucher's entire processing (not just the create call) since the
+            # create-vs-update decision itself reads mapping state that must not be
+            # read concurrently with another worker's write of it. A racing worker
+            # that loses the acquire skips this cycle; by the next cycle the winner's
+            # mapping already exists, so the loser's own existing_ra_id lookup
             # correctly finds it and takes the update/backfill path instead of create.
-            voucher_entity_type = (
-                "rental_order" if is_rentout_type
-                else "invoice" if is_invoice_type
-                else "payment" if v_type in ("receipt", "payment", "receipts", "payments")
-                else None
-            )
+            voucher_entity_type = "rental_order" if is_rentout_type else None
             record_lock_key = None
             if voucher_entity_type and tally_guid:
                 record_lock_key = lock_mgr.generate_lock_key("default", voucher_entity_type, "reverse-self", tally_guid)
@@ -1401,286 +1373,6 @@ def sync_tally_to_rentasst(
                     finally:
                         lock_mgr.release_lock(xdir_lock_key, worker_id)
 
-                elif v_type in ("sales", "sales invoice", "invoice"):
-                    cust_id = resolve_customer_id(party_name, ra_client, store)
-                    amount = float(v.get("amount") or 0.0)
-                    voucher_number = str(v.get("voucher_number") or "").strip()
-
-                    # RentAsst's paid_amount is computed live from linked RentPayment rows,
-                    # not a field we can set directly — but its persisted 'status' column
-                    # isn't, so derive it from any receipt in this same batch that settled
-                    # against this invoice's bill (bill_ref == this voucher's number).
-                    paid_so_far = 0.0
-                    for other in vouchers:
-                        other_type = (other.get("voucher_type") or "").lower().strip()
-                        if other_type not in ("receipt", "payment", "receipts", "payments"):
-                            continue
-                        other_bill_ref = (other.get("bill_ref") or "").strip()
-                        if voucher_number and other_bill_ref.lower() == voucher_number.lower():
-                            paid_so_far += float(other.get("amount") or 0.0)
-
-                    if paid_so_far <= 0:
-                        invoice_status = "confirmed"
-                    elif paid_so_far + 0.01 < amount:
-                        invoice_status = "partiallyPaid"
-                    else:
-                        invoice_status = "paid"
-
-                    invoice_payload = {
-                        "number": voucher_number or f"INV-{tally_guid[:8]}",
-                        "customer_id": cust_id,
-                        "invoice_date": iso_date,
-                        "due_date": iso_date,
-                        "bill_from": iso_date,
-                        "bill_to": iso_date,
-                        "subtotal": amount,
-                        "grand_total": amount,
-                        "total_amount": amount,
-                        "status": invoice_status,
-                        "notes": f"Imported from Tally Sales Register Voucher #{v.get('voucher_number')}",
-                        "tally_guid": tally_guid,
-                    }
-
-                    # Resolve each Tally inventory line to a RentAsst asset_id via the
-                    # equipment reverse-mapping populated in step 2 above, so product lines
-                    # carry a real link rather than just a free-text name. RentAsst's invoice
-                    # create/update endpoints silently drop an 'items' field on the invoice
-                    # payload itself (InvoiceItem is a separate resource) — these must be
-                    # pushed through push_invoice_items() after the invoice exists.
-                    resolved_items = []
-                    for it in (v.get("items") or []):
-                        item_name = str(it.get("name") or "").strip()
-                        if not item_name:
-                            continue
-                        qty = int(_parse_leading_number(it.get("quantity"))) or 1
-                        price, total_price = _resolve_price_and_total(it.get("rate"), it.get("amount"), qty)
-                        resolved_items.append({
-                            "name": item_name,
-                            "asset_id": _int_or_none(_resolve_equipment_rentasst_id(item_name, store, ra_client)),
-                            "quantity": qty,
-                            "price": price,
-                            "total_price": total_price,
-                            "product_type": "product",
-                        })
-
-                    # 1. Field Ownership Policy Filter (Reverse Direction: Tally -> RentAsst)
-                    filtered_payload = filter_payload_by_ownership("invoice", "reverse", invoice_payload)
-
-                    # 2. Pre-Flight Data Validation Check
-                    is_valid, val_err = validate_entity_payload("invoice", filtered_payload)
-                    if not is_valid:
-                        log_event("ReverseSync", f"Payload validation failed for Tally Invoice reverse sync (GUID {tally_guid}): {val_err}")
-                        store.add_dead_letter("invoice", tally_guid, f"Reverse Sync Validation Failure: {val_err}", json.dumps(v))
-                        stats["failed"] += 1
-                        continue
-
-                    # 3. Check whether THIS reverse sync already created this invoice before
-                    # (captured before is_tally_voucher_duplicate, which can itself write a
-                    # fresh mapping on a cloud-dedup match — that's a different, unrelated
-                    # invoice we didn't create, so it stays a plain skip, not an update target).
-                    existing_ra_id = store.get_external_id("invoice", tally_guid)
-
-                    if is_tally_voucher_duplicate(v, store, ra_client):
-                        if existing_ra_id:
-                            # Fetch current state once, up front, and use it to decide both
-                            # whether a status update is even needed and whether items still
-                            # need backfilling — avoids two separate GET calls and lets us skip
-                            # the update call entirely once status already matches.
-                            current = None
-                            try:
-                                current = ra_client.get_invoice(existing_ra_id)
-                            except Exception as e:
-                                log_event("ReverseSync", f"Failed to fetch RentAsst invoice {existing_ra_id} (Tally GUID {tally_guid}) for reverse sync: {e}")
-
-                            current_status = current.get("status") if isinstance(current, dict) else None
-
-                            # RentAsst's InvoiceService::canEditInvoice() permanently locks
-                            # header edits (including status) on any invoice that isn't
-                            # draft/confirmed-with-no-payments — confirmed live: once an
-                            # invoice reaches paid/partiallyPaid, PUT /invoices/{id} 422s with
-                            # "Invoice cannot be edited..." forever. Gating on "current_status
-                            # != invoice_status" alone isn't enough: invoice_status is
-                            # recomputed fresh each cycle from whichever receipt vouchers
-                            # happen to be in THIS run's fetch batch, so if the settling
-                            # receipt falls outside this run's date range it recomputes as
-                            # "confirmed" even though the invoice is actually "paid" — that
-                            # mismatch re-triggers the same doomed update, and 422, every
-                            # single cycle. The reliable signal is RentAsst's own edit-lock
-                            # rule, not our guess at the target status — gate on a "known
-                            # locked" denylist rather than an "editable" allowlist so an
-                            # unknown/failed status fetch still allows the update attempt
-                            # (previous behavior) instead of silently blocking it.
-                            LOCKED_INVOICE_STATUSES = (
-                                "partiallyPaid", "paid", "overdue", "cancelled",
-                                "refunded", "partiallyRefunded", "excessPaid", "excessRefunded",
-                            )
-                            if current_status not in LOCKED_INVOICE_STATUSES and current_status != invoice_status:
-                                try:
-                                    ra_client.update_invoice(existing_ra_id, {
-                                        "status": invoice_status,
-                                        "subtotal": amount,
-                                        "grand_total": amount,
-                                        "total_amount": amount,
-                                    })
-                                    store.add_history("invoice", existing_ra_id, "synced", external_id=tally_guid, details=f"Tally Sales Register Reverse Sync update (status: {invoice_status})")
-                                    stats["updated"] += 1
-                                except Exception as e:
-                                    log_event("ReverseSync", f"RentAsst invoice {existing_ra_id} (Tally GUID {tally_guid}) status left at '{current_status}' — could not update to '{invoice_status}': {e}")
-
-                            # Backfill: an invoice created before push_invoice_items() existed
-                            # (or whose item push failed) still has zero items — check the
-                            # live item count first, not just "did we try before", so this is
-                            # safe to run every sync: once items exist, this never re-pushes.
-                            if resolved_items:
-                                current_items = current.get("items") if isinstance(current, dict) else None
-                                if not current_items:
-                                    try:
-                                        ra_client.push_invoice_items(existing_ra_id, resolved_items)
-                                        store.add_history("invoice", existing_ra_id, "synced", external_id=tally_guid, details="Tally Sales Register Reverse Sync — backfilled missing line items")
-                                    except Exception as e:
-                                        log_event("ReverseSync", f"Failed to backfill line items for RentAsst invoice {existing_ra_id} (Tally GUID {tally_guid}): {e}")
-                        else:
-                            stats["skipped"] += 1
-                        continue
-
-                    # 4. Post to RentAsst Cloud REST API
-                    res = ra_client.push_invoice(filtered_payload)
-
-                    # 5. Save SQLite mapping ONLY after confirmed HTTP success
-                    ra_id = str(res.get("id") or res.get("rentasst_id") or f"RA-INV-{alter_id}")
-                    rev_key = generate_integration_key("default", "invoice", tally_guid, "reverse")
-
-                    # Reserve this brand-new RentAsst id under forward sync's own
-                    # "forward" lock key immediately — see the matching comment on the
-                    # customer create path above. Prevents a concurrently running
-                    # forward sync from treating this invoice as RentAsst-native and
-                    # pushing it right back into Tally as a duplicate before our
-                    # mapping row lands.
-                    xdir_lock_key = lock_mgr.generate_lock_key("default", "invoice", "forward", ra_id)
-                    lock_mgr.acquire_lock(xdir_lock_key, worker_id, lease_seconds=120)
-                    try:
-                        store.save_mapping(
-                            entity_type="invoice",
-                            source_id=tally_guid,
-                            target_id=ra_id,
-                            source_system="tally",
-                            target_system="rentasst",
-                            integration_key=rev_key,
-                            status="synced",
-                        )
-                        store.add_history("invoice", ra_id, "synced", external_id=tally_guid, details="Tally Sales Register Reverse Sync")
-
-                        # 6. Push product lines once, right after creation
-                        if resolved_items:
-                            try:
-                                ra_client.push_invoice_items(ra_id, resolved_items)
-                            except Exception as e:
-                                log_event("ReverseSync", f"Failed to push line items for RentAsst invoice {ra_id} (Tally GUID {tally_guid}): {e}")
-
-                        stats["created"] += 1
-                    finally:
-                        lock_mgr.release_lock(xdir_lock_key, worker_id)
-
-                elif v_type in ("receipt", "payment", "receipts", "payments"):
-                    amount = float(v.get("amount") or 0.0)
-                    payment_payload = {
-                        "paid_type": 1,
-                        "payment_type_id": 1,
-                        "amount": amount,
-                        "reference_id": str(v.get("voucher_number") or f"PAY-{tally_guid[:8]}")[:45],
-                        "notes": f"Tally Receipt #{v.get('voucher_number')} ({party_name})",
-                        "tally_guid": tally_guid,
-                    }
-
-                    # Resolve the invoice this receipt is settling via Tally's bill-wise
-                    # "Agst Ref" allocation (the invoice's own voucher number), NOT the
-                    # payment's own GUID — a payment's GUID can never match an invoice's
-                    # identity, so that lookup always missed and silently fell back to an
-                    # arbitrary invoice. bill_ref is the Tally-side source of truth for
-                    # which bill this receipt is against.
-                    bill_ref = (v.get("bill_ref") or "").strip()
-                    invoice_id = None
-                    if bill_ref:
-                        try:
-                            inv_list = ra_client.fetch_invoices()
-                            if isinstance(inv_list, list):
-                                # Invoice numbers alone aren't unique across customers —
-                                # GST invoice numbering commonly resets per financial year,
-                                # so the same number can legitimately belong to a different
-                                # customer's (often older) invoice. Matching on number alone
-                                # silently misfiled a payment against the wrong customer's
-                                # invoice/outstanding balance whenever numbers collided.
-                                # Require the invoice's own customer name to match this
-                                # receipt's Tally party too.
-                                candidates = []
-                                for inv in inv_list:
-                                    inv_num = str(inv.get("number") or "").strip()
-                                    if inv_num and inv_num.lower() == bill_ref.lower() and inv.get("id"):
-                                        candidates.append(inv)
-                                if len(candidates) == 1:
-                                    invoice_id = int(candidates[0]["id"])
-                                elif len(candidates) > 1 and party_name:
-                                    for inv in candidates:
-                                        inv_cust = ((inv.get("customer") or {}).get("name") or "").strip()
-                                        if inv_cust and inv_cust.lower() == party_name.strip().lower():
-                                            invoice_id = int(inv["id"])
-                                            break
-                        except Exception as e:
-                            log_event("ReverseSync", f"Invoice lookup by bill reference '{bill_ref}' failed: {e}")
-
-                    if invoice_id is None:
-                        store.add_dead_letter(
-                            "payment", tally_guid,
-                            f"Could not resolve the RentAsst invoice for Tally Receipt #{v.get('voucher_number')} "
-                            f"(bill reference: '{bill_ref or 'none found'}'). Refusing to attach payment to an "
-                            f"arbitrary invoice.",
-                            json.dumps(v),
-                        )
-                        stats["failed"] += 1
-                        continue
-
-                    payment_payload["invoice_id"] = invoice_id
-
-                    # 1. Field Ownership Policy Filter
-                    filtered_payload = filter_payload_by_ownership("payment", "reverse", payment_payload)
-
-                    # 2. Pre-Flight Data Validation Check
-                    is_valid, val_err = validate_entity_payload("payment", filtered_payload)
-                    if not is_valid:
-                        log_event("ReverseSync", f"Payload validation failed for Tally Receipt reverse sync (GUID {tally_guid}): {val_err}")
-                        store.add_dead_letter("payment", tally_guid, f"Reverse Sync Validation Failure: {val_err}", json.dumps(v))
-                        stats["failed"] += 1
-                        continue
-
-                    # 3. Post to RentAsst Cloud REST API
-                    res = ra_client.push_payment(filtered_payload)
-
-                    # 4. Save SQLite mapping ONLY after confirmed HTTP success
-                    ra_id = str(res.get("id") or res.get("rentasst_id") or f"RA-PAY-{alter_id}")
-                    rev_key = generate_integration_key("default", "payment", tally_guid, "reverse")
-
-                    # Reserve this brand-new RentAsst id under forward sync's own
-                    # "forward" lock key immediately — see the matching comment on the
-                    # customer create path above. Prevents a concurrently running
-                    # forward sync from treating this payment as RentAsst-native and
-                    # pushing it right back into Tally as a duplicate before our
-                    # mapping row lands.
-                    xdir_lock_key = lock_mgr.generate_lock_key("default", "payment", "forward", ra_id)
-                    lock_mgr.acquire_lock(xdir_lock_key, worker_id, lease_seconds=120)
-                    try:
-                        store.save_mapping(
-                            entity_type="payment",
-                            source_id=tally_guid,
-                            target_id=ra_id,
-                            source_system="tally",
-                            target_system="rentasst",
-                            integration_key=rev_key,
-                            status="synced",
-                        )
-                        store.add_history("payment", ra_id, "synced", external_id=tally_guid, details="Tally Voucher Reverse Sync")
-                        stats["created"] += 1
-                    finally:
-                        lock_mgr.release_lock(xdir_lock_key, worker_id)
                 else:
                     stats["skipped"] += 1
 

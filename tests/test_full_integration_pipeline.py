@@ -120,11 +120,16 @@ class TestFullIntegrationPipeline(unittest.TestCase):
     def test_e2e_reverse_sync_tally_to_rentasst(self, mock_fetch_vouchers):
         """
         Integration Test 2: Reverse sync from Tally vouchers to RentAsst REST API.
+
+        Uses a Sales Order (rentout) voucher — reverse sync only mirrors rental
+        orders (plus customers/equipment, exercised elsewhere) from Tally into
+        RentAsst now; Invoices/Payments are RentAsst-native and reach Tally only via
+        forward sync, referencing the rental order's own Tally identity instead.
         """
         mock_fetch_vouchers.return_value = [{
             "tally_guid": "GUID-TALLY-REV-100",
             "voucher_number": "VOUCHER-REV-100",
-            "voucher_type": "sales",
+            "voucher_type": "sales order",
             "party_name": "Reverse Customer Ltd",
             "date": "2026-08-10",
             "amount": 1180.0,
@@ -135,7 +140,9 @@ class TestFullIntegrationPipeline(unittest.TestCase):
         mock_ext_client.cfg = MagicMock()
 
         mock_ra_client = MagicMock()
-        mock_ra_client.push_invoice.return_value = {"id": "RA-REV-INV-100", "status": "created"}
+        mock_ra_client.fetch_customers.return_value = []
+        mock_ra_client.push_customer.return_value = {"id": 42}
+        mock_ra_client.push_rentout.return_value = {"id": "RA-REV-ORD-100", "status": "created"}
 
         stats = sync_tally_to_rentasst(
             ra_client=mock_ra_client,
@@ -144,10 +151,10 @@ class TestFullIntegrationPipeline(unittest.TestCase):
         )
 
         self.assertEqual(stats["created"], 1)
-        rev_key = generate_integration_key("default", "invoice", "GUID-TALLY-REV-100", "reverse")
+        rev_key = generate_integration_key("default", "rental_order", "GUID-TALLY-REV-100", "reverse")
         rev_map = self.store.find_by_integration_key(rev_key)
         self.assertIsNotNone(rev_map)
-        self.assertEqual(rev_map["target_id"], "RA-REV-INV-100")
+        self.assertEqual(rev_map["target_id"], "RA-REV-ORD-100")
 
     def test_e2e_reconciliation_audit(self):
         """
