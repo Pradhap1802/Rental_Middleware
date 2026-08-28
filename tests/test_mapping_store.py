@@ -158,6 +158,32 @@ class TestMappingStore(unittest.TestCase):
         cleared = self.store.clear_dead_letters("invoice")
         self.assertTrue(cleared >= 1)
 
+    def test_find_by_target_does_not_cross_direction(self):
+        """
+        find_by_target() accepted a target_system parameter but never actually put it
+        in the WHERE clause — it matched on target_id/external_id/tally_guid alone,
+        regardless of direction. Confirmed live: run_sync_pipeline's reverse-owned-
+        record guard calls find_by_target(entity_type, item_id, target_system=
+        "rentasst") specifically to find a mapping reverse sync created (target_system
+        ="rentasst"); a same-id FORWARD mapping (target_system="tally", created by
+        this same record later actually forward-syncing) is a different row entirely
+        and must not satisfy that lookup.
+        """
+        self.store.save_mapping(
+            entity_type="rental_order",
+            source_id="21",
+            target_id="RENTAL-ORD-21",
+            source_system="rentasst",
+            target_system="tally",
+            status="synced",
+        )
+
+        self.assertIsNone(self.store.find_by_target("rental_order", "RENTAL-ORD-21", target_system="rentasst"))
+
+        found = self.store.find_by_target("rental_order", "RENTAL-ORD-21", target_system="tally")
+        self.assertIsNotNone(found)
+        self.assertEqual(found["source_system"], "rentasst")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -228,11 +228,11 @@ class MappingStore:
                        target_system, target_company_id, target_id, integration_key,
                        last_synced_hash, last_source_modified_at, last_target_modified_at,
                        last_synced_at, sync_version, status, rentasst_id, external_id, tally_guid, last_hash
-                FROM mapping 
-                WHERE target_company_id=? AND entity_type=? AND (target_id=? OR external_id=? OR tally_guid=?)
+                FROM mapping
+                WHERE target_company_id=? AND entity_type=? AND target_system=? AND (target_id=? OR external_id=? OR tally_guid=?)
                 ORDER BY sync_version DESC LIMIT 1
                 """,
-                (target_company_id, entity_type, target_id, target_id, target_id),
+                (target_company_id, entity_type, target_system, target_id, target_id, target_id),
             )
             row = cur.fetchone()
             return dict(row) if row else None
@@ -260,7 +260,21 @@ class MappingStore:
                 "DELETE FROM mapping WHERE entity_type=? AND (rentasst_id=? OR source_id=?)",
                 (entity_type, rentasst_id, rentasst_id),
             )
-            return cur.rowcount > 0
+            deleted = cur.rowcount > 0
+        if deleted:
+            # find_mapping()/save_mapping() share this cache keyed on
+            # (source_company_id, entity_type, source_id) — save_mapping() already
+            # invalidates its own key on write, but delete() never did. Confirmed
+            # live: is_tally_voucher_duplicate()'s self-heal path calls find_mapping()
+            # (populating the cache) right before delete()-ing that same stale
+            # mapping — without invalidating here, the very next find_mapping() call
+            # for the same key served the just-deleted row back out of cache for up
+            # to the TTL, making a genuinely-deleted record look like it still exists.
+            # rentasst_id here is ambiguous between source_id and target_id (delete()
+            # matches either), so both possible cache keys are cleared; a miss on one
+            # is harmless.
+            self.cache.invalidate(f"map:default:{entity_type}:{rentasst_id}")
+        return deleted
 
     def exists(
         self,
