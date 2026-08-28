@@ -7,6 +7,7 @@ from ..services.config_service import ConfigService
 from ..services.discovery_service import DiscoveryService
 from ..clients.rentasst_client import RentAsstClient
 from ..clients.external_client import ExternalClient
+from ..security.masking import mask_secret
 
 
 router = APIRouter(prefix="/api", tags=["config"])
@@ -181,7 +182,7 @@ def rentasst_verify_otp(
         return {
             "status": "success",
             "message": "RentAsst Mobile OTP verified successfully!",
-            "token": token,
+            "token": mask_secret(token),
             "tenant_id": tenant_id,
             "businesses": res.get("businesses", []),
             "config": svc.config_store.get_masked_config(saved_cfg),
@@ -240,7 +241,7 @@ def rentasst_login(
         return {
             "status": "success",
             "message": f"Successfully retrieved bearer token for {email}!",
-            "token": token,
+            "token": mask_secret(token),
             "tenant_id": tenant_id,
             "businesses": businesses,
             "config": svc.config_store.get_masked_config(saved_cfg),
