@@ -228,7 +228,18 @@ DEFAULT_RENTOUT_SETTINGS = {
     "calculate_without_rent_amount": False,
     "enable_discount": False,
     "enable_shipping": False,
-    "invoice_enabled": False,
+    # RentAsst's own RentController gates real behavior on this per-rentout flag — the
+    # "is_invoiceable" list filter (applyInvoiceableFilter) only matches rentouts with
+    # settings.invoice_enabled=true, and rentIn()/receiveAssets() only validate/require
+    # an invoice number when it's true. Confirmed against RentAsst's own source
+    # (RentController.php) that this isn't a display-only toggle — it's what makes
+    # invoicing available for a rentout at all. Left False (this dict's blanket
+    # default for everything else), a reverse-synced rentout had no invoice option
+    # visible anywhere in RentAsst, contradicting this integration's own design: a
+    # Tally-originated order must still be invoiceable, since invoices/payments are
+    # created going forward only (see sync_invoices/sync_payments), referencing the
+    # rental order's existing identity.
+    "invoice_enabled": True,
     "global_rent_amount": False,
     "enable_payment_type": False,
     "enable_labour_charge": False,

@@ -658,6 +658,11 @@ class TestReverseSyncHardening(unittest.TestCase):
         pushed_rentout = mock_ra_client.push_rentout.call_args[0][0]
         self.assertTrue(pushed_rentout["settings"])
         self.assertIn("refund_type", pushed_rentout["settings"])
+        # RentAsst's own RentController gates the "is_invoiceable" filter and
+        # invoice-number validation on settings.invoice_enabled — a reverse-synced
+        # rentout must stay invoiceable so it can later be forward-synced with a real
+        # invoice/payment (see sync_invoices/sync_payments).
+        self.assertTrue(pushed_rentout["settings"]["invoice_enabled"])
         # Header-level calculation_method drives RentAsst's own "Day/Hour based"
         # categorization and PDF/duration display for the rentout as a whole.
         self.assertEqual(pushed_rentout["calculation_method"], 1)
