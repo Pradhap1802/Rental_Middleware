@@ -20,28 +20,48 @@ def _attach_rent_items(rentasst_client: RentAsstClient, invoices: List[Dict[str,
     reverse sync had nothing to read back either, leaving line items empty in both
     directions. get_rent_items() is the same endpoint rental_orders.py already uses to
     solve the identical gap for Rent Out sync.
+
+    Also attaches a 'rent' object carrying the underlying order's own RentAsst number
+    (e.g. 'R100014') — build_sales_invoice_voucher_xml reads data['rent']['number'] to
+    stamp a <REFERENCE> tag on the Tally invoice voucher so it's traceable back to its
+    order, but fetch_invoices()/get_invoice() never return a nested 'rent' object at
+    all (confirmed live: GET /invoices/4 returns only a flat order_id), so that
+    reference was silently always blank. get_rent_items() already returns each item's
+    parent 'rent' relation, so this reuses the same call rather than an extra one —
+    and runs regardless of whether 'items' was already populated (a prior sync
+    attempt may have already backfilled items without ever having had this reference
+    attached), so an already-populated invoice doesn't stay permanently unreferenced.
     """
     for inv in invoices:
-        if inv.get("items"):
-            continue
         order_id = inv.get("order_id")
         if not order_id or (inv.get("order_type") or "").strip().lower() != "rent":
+            continue
+        needs_items = not inv.get("items")
+        needs_reference = not (inv.get("rent") or {}).get("number")
+        if not needs_items and not needs_reference:
             continue
         try:
             raw_items = rentasst_client.get_rent_items(order_id)
         except Exception:
             continue
-        inv["items"] = [
-            {
-                "name": it.get("asset_name") or (it.get("asset") or {}).get("name"),
-                "asset_id": it.get("asset_id"),
-                "quantity": it.get("rented_quantity"),
-                "price": it.get("price"),
-                "total_price": it.get("total_price"),
-                "unit": ((it.get("asset") or {}).get("asset_unit") or {}).get("name"),
-            }
-            for it in raw_items
-        ]
+        if not raw_items:
+            continue
+        if needs_items:
+            inv["items"] = [
+                {
+                    "name": it.get("asset_name") or (it.get("asset") or {}).get("name"),
+                    "asset_id": it.get("asset_id"),
+                    "quantity": it.get("rented_quantity"),
+                    "price": it.get("price"),
+                    "total_price": it.get("total_price"),
+                    "unit": ((it.get("asset") or {}).get("asset_unit") or {}).get("name"),
+                }
+                for it in raw_items
+            ]
+        if needs_reference:
+            rent_number = (raw_items[0].get("rent") or {}).get("number")
+            if rent_number:
+                inv["rent"] = {"number": rent_number}
     return invoices
 
 
