@@ -646,9 +646,11 @@ class TestReverseSyncHardening(unittest.TestCase):
         # calculation_method against 1/2/3 (days/hours/months) and silently defaults to 0
         # for anything else including a missing field — confirmed live: every rentout item
         # landed at total_price=0 (and the whole rentout's grand_total with it) because this
-        # was never sent. 4 = AssetCalculationMethods::FLAT_PRICE (quantity*price, no
-        # duration multiplier), the correct mode for a one-time Tally sale line.
-        self.assertEqual(pushed_items[0]["calculation_method"], 4)
+        # was never sent. 1 = AssetCalculationMethods::DAY, RentAsst's "Day/Hour based"
+        # category — safe here specifically because rent_to is always exactly one day after
+        # rent_from (asserted above), so duration resolves to 1 and
+        # total_price = quantity*price*1, identical to the flat calculation it replaced.
+        self.assertEqual(pushed_items[0]["calculation_method"], 1)
 
         # The rentout header itself must carry a non-empty settings object — an empty {}
         # round-trips through RentAsst's own request parsing as a PHP array, not an
@@ -656,6 +658,9 @@ class TestReverseSyncHardening(unittest.TestCase):
         pushed_rentout = mock_ra_client.push_rentout.call_args[0][0]
         self.assertTrue(pushed_rentout["settings"])
         self.assertIn("refund_type", pushed_rentout["settings"])
+        # Header-level calculation_method drives RentAsst's own "Day/Hour based"
+        # categorization and PDF/duration display for the rentout as a whole.
+        self.assertEqual(pushed_rentout["calculation_method"], 1)
 
     def test_reverse_sync_resolves_asset_id_for_a_rentasst_native_item_via_the_watch_mapping(self):
         """

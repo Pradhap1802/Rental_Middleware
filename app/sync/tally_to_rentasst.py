@@ -1163,6 +1163,13 @@ def sync_tally_to_rentasst(
                         # = 1), validated as nullable|numeric|between:0,10 — a string like
                         # "confirmed" fails that validation with a 422.
                         "status": 1,
+                        # Same plain-integer calculation_method column Rent and RentItem both
+                        # carry (1=day, 2=hour, 3=month, 4=flat — see the equipment sync
+                        # comment above). This is the rentout's own header-level value RentAsst
+                        # uses for its "Day/Hour based" categorization and duration/PDF-period
+                        # display; day-based (1) matches the same value the rent items below
+                        # now use.
+                        "calculation_method": 1,
                         "notes": f"Imported from Tally Sales Order #{v.get('voucher_number')}",
                         "tally_guid": tally_guid,
                         "settings": DEFAULT_RENTOUT_SETTINGS,
@@ -1208,11 +1215,20 @@ def sync_tally_to_rentasst(
                             # and DEFAULTS TO 0 for any other value including null/missing
                             # — confirmed live: every rentout item silently landed at
                             # total_price=0 (and the whole rentout's grand_total with it)
-                            # because this field was never sent. 4 = AssetCalculationMethods
-                            # ::FLAT_PRICE, which computes total_price = quantity*price with
-                            # no duration multiplier — correct for a one-time Tally sale line
-                            # rather than a per-day/hour/month rental rate.
-                            "calculation_method": 4,
+                            # because this field was never sent.
+                            #
+                            # 1 = AssetCalculationMethods::DAY, matching RentAsst's own
+                            # "Day/Hour based" categorization (as opposed to Month/Flat) and
+                            # the same value equipment sync already uses for these assets'
+                            # own calculation_method. Safe specifically because rent_to above
+                            # is always exactly one calendar day after rent_from: RentAsst's
+                            # getTimeDifference() then resolves duration=1 day, so
+                            # total_price = rented_quantity*price*1 — identical to the flat
+                            # calculation this replaces. Using 2 (hour-based) here instead
+                            # would NOT be safe without also narrowing rent_from/rent_to to a
+                            # one-hour window — with the current one-day window it would
+                            # resolve duration=24 hours and inflate total_price 24x.
+                            "calculation_method": 1,
                         })
 
                     # 1. Field Ownership Policy Filter (Reverse Direction: Tally -> RentAsst)
