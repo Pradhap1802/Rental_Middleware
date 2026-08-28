@@ -264,18 +264,21 @@ class TestIdempotencyMechanism(unittest.TestCase):
 
     def test_forward_sync_recovers_when_reverse_mapping_id_was_reused_after_a_reset(self):
         """
-        The reverse-owned-record guard above is keyed purely on RentAsst's numeric id
-        matching a stale mapping's target_id — confirmed live: after RentAsst's own DB was
-        reset, id 1 (previously a reverse-synced Tally item, 'Moto G45', long since deleted
-        from Tally) got reused for a brand-new, RentAsst-native equipment item ('Dell
-        Laptop'). The old guard treated that id collision as "this came from Tally, never
-        forward-sync it" and permanently blocked the new item — 'Assets sync' stayed stuck
-        at skipped=1 forever. The guard must verify the stale mapping's own Tally-side
-        record still exists before trusting it, and forward-sync normally once it doesn't.
+        This self-heal only matters for vouchers now — the reverse-owned-record guard
+        itself is scoped to rental_order/invoice/payment (see run_sync_pipeline), since
+        master data (customer/equipment) is always safely Alter-able by name regardless
+        of a stale reverse mapping. But the id-reuse risk this guards against is still
+        real for vouchers: confirmed live for equipment before that scoping existed —
+        after RentAsst's own DB was reset, id 1 (previously a reverse-synced Tally item,
+        long since deleted from Tally) got reused for a brand-new, RentAsst-native
+        record, and the old guard treated that id collision as "this came from Tally,
+        never forward-sync it", permanently blocking the new record. The guard must
+        verify the stale mapping's own Tally-side record still exists before trusting
+        it, and forward-sync normally (dropping the stale mapping) once it doesn't.
         """
         self.store.save_mapping(
-            entity_type="equipment",
-            source_id="Moto G45",
+            entity_type="rental_order",
+            source_id="TALLY-GUID-OLD",
             target_id="1",
             source_system="tally",
             target_system="rentasst",
@@ -284,8 +287,8 @@ class TestIdempotencyMechanism(unittest.TestCase):
 
         mock_ext_client = MagicMock()
         mock_ext_client.ping.return_value = True
-        # The stale mapping's own source ('Moto G45') is gone from Tally — this is the
-        # reused-id collision, not a genuine reverse-synced record.
+        # The stale mapping's own source is gone from Tally — this is the reused-id
+        # collision, not a genuine reverse-synced record.
         mock_ext_client.check_exists_in_tally.return_value = False
 
         sync_call_count = 0
@@ -293,12 +296,12 @@ class TestIdempotencyMechanism(unittest.TestCase):
         def mock_sync_func(item):
             nonlocal sync_call_count
             sync_call_count += 1
-            return "TALLY-ID-NEW"
+            return "RENTAL-ORD-1"
 
-        items = [{"id": "1", "name": "Dell Laptop"}]
+        items = [{"id": "1", "number": "R100099", "customer_name": "New Customer", "amount": 100.0}]
 
         stats = run_sync_pipeline(
-            entity_type="equipment",
+            entity_type="rental_order",
             fetch_func=lambda: items,
             sync_func=mock_sync_func,
             store=self.store,
@@ -310,7 +313,104 @@ class TestIdempotencyMechanism(unittest.TestCase):
         self.assertEqual(stats["skipped"], 0)
 
         # The stale mapping must be gone, not just bypassed once.
-        self.assertIsNone(self.store.find_mapping("equipment", "Moto G45", source_system="tally"))
+        self.assertIsNone(self.store.find_mapping("rental_order", "TALLY-GUID-OLD", source_system="tally"))
+
+    def test_forward_sync_still_pushes_master_data_edits_for_a_tally_originated_record(self):
+        """
+        Unlike vouchers, a customer/equipment record that originated in Tally (reverse
+        sync separately discovered/matched the same Tally ledger into RentAsst, saving
+        its own mapping with source_system="tally") must still forward-sync normally.
+        Tally's check_exists()/Alter-by-name never risks a duplicate for master data, so
+        skipping it only blocks every RentAsst-owned field (name, mobile, email,
+        address, gst — see ownership.py's FIELD_OWNERSHIP_POLICY) from ever reaching a
+        Tally-originated customer. Confirmed live: customer 'Pradhap' had exactly this
+        shape (a forward mapping from an earlier sync, plus an independent reverse
+        mapping) and a real RentAsst address that stayed permanently un-pushed because
+        the old guard treated the reverse mapping alone as reason enough to skip every
+        forward cycle, regardless of the forward payload having since changed.
+        """
+        self.store.save_mapping(
+            entity_type="customer",
+            source_id="Pradhap",
+            target_id="7",
+            source_system="tally",
+            target_system="rentasst",
+            status="synced",
+        )
+        self.store.save_mapping(
+            entity_type="customer",
+            source_id="7",
+            target_id="Pradhap",
+            integration_key=generate_integration_key("default", "customer", "7", "forward"),
+            last_synced_hash="stale-hash-before-address-was-added",
+            status="synced",
+        )
+
+        mock_ext_client = MagicMock()
+        mock_ext_client.ping.return_value = True
+        mock_ext_client.check_exists_in_tally.return_value = True  # the ledger genuinely exists
+
+        sync_call_count = 0
+
+        def mock_sync_func(item):
+            nonlocal sync_call_count
+            sync_call_count += 1
+            return "Pradhap"
+
+        items = [{"id": "7", "name": "Pradhap", "address": [{"address1": "IT Park, Hosur", "is_billing": True}]}]
+
+        stats = run_sync_pipeline(
+            entity_type="customer",
+            fetch_func=lambda: items,
+            sync_func=mock_sync_func,
+            store=self.store,
+            external_client=mock_ext_client,
+        )
+
+        self.assertEqual(sync_call_count, 1)
+        self.assertEqual(stats["skipped"], 0)
+
+    def test_forward_sync_skips_a_reverse_synced_record_whose_mapping_never_saved(self):
+        """
+        The reverse-owned-record guard above is keyed on a mapping row existing at
+        all — but reverse sync (tally_to_rentasst.py) pushes the record to RentAsst
+        and saves that mapping as two separate steps, and a process restart landing
+        in between (confirmed live: this session's own restarts did exactly this)
+        leaves the record created with no mapping ever written. Without a fallback,
+        the guard sees no evidence of reverse-ownership at all and forward-syncs it
+        as if brand new — confirmed live: two such orders (#114/#115) got duplicated
+        into Tally as fresh RENTAL-ORD-114/115 vouchers before this fallback existed,
+        right alongside the original Tally voucher reverse sync had read them from.
+        'notes' is a plain RentAsst field that survives regardless of whether the
+        mapping did, so it's a reliable second signal: reverse sync always stamps
+        "Imported from Tally ..." into it on creation (see tally_to_rentasst.py).
+        """
+        mock_ext_client = MagicMock()
+        mock_ext_client.ping.return_value = True
+
+        sync_call_count = 0
+
+        def mock_sync_func(item):
+            nonlocal sync_call_count
+            sync_call_count += 1
+            return f"RENTAL-ORD-{item['id']}"
+
+        items = [{
+            "id": "116", "number": "R100014", "customer_name": "Test",
+            "amount": 100.0, "notes": "Imported from Tally Sales Order #21",
+        }]
+
+        stats = run_sync_pipeline(
+            entity_type="rental_order",
+            fetch_func=lambda: items,
+            sync_func=mock_sync_func,
+            store=self.store,
+            external_client=mock_ext_client,
+        )
+
+        self.assertEqual(sync_call_count, 0)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(stats["created"], 0)
 
     def test_forward_sync_still_pushes_a_rentasst_native_record(self):
         """The mirror case: a record with no reverse-sync mapping (genuinely created in

@@ -1,3 +1,4 @@
+import logging
 from typing import Dict, Any
 from ..logging.logger import log_event
 
@@ -113,6 +114,7 @@ def get_field_owner(entity_type: str, field_name: str) -> str:
             log_event(
                 "Ownership",
                 f"Field '{field_key}' on entity '{norm_ent}' has no explicit ownership rule — defaulting to 'both' (unrestricted).",
+                level=logging.DEBUG,
             )
     return ent_policy.get(field_key, "both")
 

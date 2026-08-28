@@ -12,6 +12,15 @@ def compute_payload_hash(payload: Dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+# Logged once per (company, entity_type, item_id) per process lifetime instead of every
+# sync cycle — confirmed live: a handful of permanently-orphaned reverse-synced records
+# (never repaired because reverse sync only revisits a Tally voucher when its ALTERID
+# changes, not just because forward sync keeps flagging it) produced the same identical
+# line for every one of them, every 10 minutes, forever, drowning out everything else in
+# the cycle's log. The underlying skip behavior is unchanged; only the repeat noise is.
+_orphaned_reverse_marker_warned: set = set()
+
+
 def filter_by_date_range(
     items: List[Dict[str, Any]],
     from_date: Optional[str] = None,
@@ -146,9 +155,22 @@ def run_sync_pipeline(
                 # Confirmed live: a RentAsst rentout created by reverse sync from a real
                 # Tally Sales Order got re-pushed by every scheduled forward sync and
                 # failed with exactly that error every time.
-                reverse_mapping = store.find_by_target(
-                    entity_type, item_id, target_system="rentasst", target_company_id=target_company_id
-                )
+                #
+                # Only vouchers carry that risk. Customer/equipment masters are matched
+                # and Alter'd by NAME in Tally regardless of which system created them
+                # first (TallyClient.check_exists), so an Alter never duplicates — it
+                # just updates the existing ledger/stock item. Applying this same skip
+                # to master data instead permanently blocks every RentAsst-owned field
+                # (e.g. a customer's address — see ownership.py's FIELD_OWNERSHIP_POLICY)
+                # from ever reaching a customer/equipment record that originated in
+                # Tally: confirmed live, customers reverse-synced from Tally kept a real
+                # RentAsst address forever un-pushed because this guard skipped them on
+                # every single forward cycle.
+                reverse_mapping = None
+                if entity_type in ("rental_order", "invoice", "payment"):
+                    reverse_mapping = store.find_by_target(
+                        entity_type, item_id, target_system="rentasst", target_company_id=target_company_id
+                    )
                 if reverse_mapping and reverse_mapping.get("source_system") == "tally":
                     # This guard exists to stop a record Tally originally created (reverse
                     # sync) from being pushed right back into Tally as a duplicate — it's
@@ -178,6 +200,42 @@ def run_sync_pipeline(
                         "new RentAsst-native record. Dropping the stale mapping and forward-syncing normally.",
                     )
                     store.delete(entity_type, reverse_source_name)
+
+                elif entity_type in ("rental_order", "invoice"):
+                    # Fallback for exactly the gap the mapping-based guard above can't
+                    # cover: reverse sync (tally_to_rentasst.py) saves its mapping in a
+                    # separate step right AFTER the record is created in RentAsst — a
+                    # process restart landing in that narrow window leaves the record
+                    # created but permanently unmapped. Confirmed live: rentouts #114/
+                    # #115/#116, all carrying reverse sync's own
+                    # "Imported from Tally Sales Order #N" marker in 'notes', had no
+                    # mapping row at all (interrupted by this session's own restarts)
+                    # — #114 and #115 were duplicate-pushed into Tally as brand-new
+                    # RENTAL-ORD-114/115 vouchers before this check existed, alongside
+                    # the original Tally voucher reverse sync had read them from.
+                    # 'notes' is a plain RentAsst field, always present on the fetched
+                    # item regardless of whether a mapping survived, so it's a reliable
+                    # second signal even when the mapping itself is gone. Recovering
+                    # the exact tally_guid to backfill a real mapping isn't attempted
+                    # here — the marker is enough to know forward-syncing this record
+                    # would create a duplicate, which is the actual harm to prevent;
+                    # a future reverse sync cycle re-reading the same Tally voucher is
+                    # what actually repairs the mapping.
+                    notes = str(item.get("notes") or "")
+                    if notes.startswith("Imported from Tally "):
+                        warn_key = (source_company_id, entity_type, item_id)
+                        if warn_key not in _orphaned_reverse_marker_warned:
+                            _orphaned_reverse_marker_warned.add(warn_key)
+                            log_event(
+                                "Idempotency",
+                                f"{entity_type} #{item_id} carries reverse sync's own marker ('{notes}') "
+                                "but has no local mapping — likely an interrupted mapping-save rather than "
+                                "a genuinely RentAsst-native record. Skipping instead of risking a duplicate "
+                                "push into Tally; a future reverse sync cycle should repair the mapping. "
+                                "(repeats of this line for the same record are suppressed until restart)",
+                            )
+                        stats["skipped"] += 1
+                        continue
 
                 payload_hash = compute_payload_hash(item)
                 identifier = extract_identifier(entity_type, item)
