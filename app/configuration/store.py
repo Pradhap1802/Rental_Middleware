@@ -1,9 +1,16 @@
 import json
 import os
+import threading
 from typing import Optional, Dict, Any
 from cryptography.fernet import Fernet
 from ..models.domain import AppConfig
 from ..security.masking import mask_secret
+
+# Guards ConfigStore.update_fields()'s read-modify-write against concurrent callers —
+# QueueWorker runs up to 4 entity-type sync passes at once (ThreadPoolExecutor in
+# app/queue/worker.py), each constructing its own ConfigStore instance, so a plain
+# per-instance lock wouldn't cover it. See update_fields()'s own docstring.
+_SAVE_LOCK = threading.Lock()
 
 
 class ConfigStore:
@@ -99,6 +106,35 @@ class ConfigStore:
         enc = fernet.encrypt(raw)
         with open(self.cfg_path, "wb") as f:
             f.write(enc)
+
+    def update_fields(self, **fields: Any) -> AppConfig:
+        """
+        Atomically applies a partial update on top of the LATEST persisted config,
+        not whatever in-memory AppConfig object a long-running caller loaded earlier.
+
+        SyncService.execute_sync() loads one AppConfig at the start of a sync pass
+        that can run for minutes over a large batch, then (in a few auto-detection
+        cases — tally_edu_mode, tally_order_processing_available) calls cfg_store.
+        save(cfg) at the end to persist a learned setting. QueueWorker runs up to 4
+        entity-type sync passes concurrently (ThreadPoolExecutor in
+        app/queue/worker.py), each with its own independently-loaded snapshot — a
+        plain save(cfg) there blindly writes the ENTIRE stale snapshot, silently
+        reverting any field a DIFFERENT concurrent pass had already learned and
+        persisted moments earlier. Confirmed live: tally_order_processing_available
+        flip-flopped back to unset across consecutive sync cycles this way, so a
+        Tally company already confirmed (this same cycle) to reject the native
+        "Sales Order" voucher type kept re-attempting it and failing identically on
+        the very next retry instead of the learned setting sticking. Re-reading
+        fresh under a lock right before the merge+write closes that window — callers
+        needing this should mutate exactly the field(s) they own through here rather
+        than through save(cfg) with a long-held snapshot.
+        """
+        with _SAVE_LOCK:
+            fresh = self.load_safe() or AppConfig()
+            for key, value in fields.items():
+                setattr(fresh, key, value)
+            self.save(fresh)
+            return fresh
 
     def get_masked_config(self, cfg: Optional[AppConfig] = None) -> Dict[str, Any]:
         target_cfg = cfg or self.load_safe()

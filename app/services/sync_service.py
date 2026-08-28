@@ -45,9 +45,11 @@ class SyncService:
             # re-loaded fresh from disk on every execute_sync() call, so without writing
             # it back here the very next sync cycle would rediscover (and re-fail) the
             # exact same thing all over again instead of starting with it already known.
+            # Goes through cfg_store.update_fields(), NOT cfg_store.save(cfg) — see its
+            # docstring: saving this call's own long-held `cfg` snapshot can silently
+            # revert a field a concurrently-running entity sync just persisted.
             if getattr(ext_client.tally, "edu_mode_auto_detected", False):
-                cfg.tally_edu_mode = True
-                cfg_store.save(cfg)
+                cfg_store.update_fields(tally_edu_mode=True)
 
         def persist_order_processing_if_auto_detected() -> None:
             # Same reasoning as persist_edu_mode_if_auto_detected: sync_rental_order
@@ -57,8 +59,9 @@ class SyncService:
             # rental_order sync would re-attempt (and, if unavailable, re-fail) the
             # native Sales Order path from scratch instead of starting already known.
             if getattr(ext_client.tally, "order_processing_auto_detected", False):
-                cfg.tally_order_processing_available = ext_client.tally.cfg.tally_order_processing_available
-                cfg_store.save(cfg)
+                cfg_store.update_fields(
+                    tally_order_processing_available=ext_client.tally.cfg.tally_order_processing_available
+                )
 
         try:
             entity = (entity_type or "").lower()
