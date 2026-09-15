@@ -1217,6 +1217,76 @@ class TestEquipmentReverseSync(unittest.TestCase):
         self.assertEqual(payload["calculation_method"], 1)
         self.assertEqual(stats["created"], 1)
 
+    def test_creates_zero_stock_asset_as_non_inventory_tracked(self):
+        """
+        RentAsst rejects an inventory-tracked (skip_inventory=False) asset create with a
+        branch quantity of 0 — confirmed live via a real "Please select branch and
+        quantity." 422 on every fresh Tally stock item with zero current stock. Creating
+        it non-inventory-tracked instead must let it through.
+        """
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_equipment.return_value = []
+        mock_ra_client.push_equipment.return_value = {"id": 11}
+
+        stock_item = {
+            "name": "Fresh Zero Stock Asset", "parent": "", "unit": "pc",
+            "hsn_code": "", "gst_rate": 0.0, "quantity": 0.0,
+            "rent_price": 0.0, "alter_id": 301,
+        }
+
+        stats = self._run_sync(mock_ra_client, stock_item)
+
+        mock_ra_client.push_equipment.assert_called_once()
+        payload = mock_ra_client.push_equipment.call_args[0][0]
+        self.assertTrue(payload["skip_inventory"])
+        self.assertEqual(stats["created"], 1)
+
+    def test_creates_in_stock_asset_as_inventory_tracked(self):
+        """Mirror case: real current stock (>0) must still create inventory-tracked,
+        as before — only the genuinely zero-stock case should flip skip_inventory."""
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_equipment.return_value = []
+        mock_ra_client.push_equipment.return_value = {"id": 12}
+
+        stock_item = {
+            "name": "In Stock Asset", "parent": "", "unit": "pc",
+            "hsn_code": "", "gst_rate": 0.0, "quantity": 3.0,
+            "rent_price": 100.0, "alter_id": 302,
+        }
+
+        stats = self._run_sync(mock_ra_client, stock_item)
+
+        payload = mock_ra_client.push_equipment.call_args[0][0]
+        self.assertFalse(payload["skip_inventory"])
+        self.assertEqual(stats["created"], 1)
+
+    def test_rejected_create_records_a_dead_letter(self):
+        """
+        Unlike voucher push failures and equipment update failures, a rejected create used
+        to only log — with no dead letter, a genuine RentAsst rejection (e.g. "Please
+        select branch and quantity.") was invisible from the dashboard's DLQ and silently
+        re-failed identically forever on every scheduled cycle.
+        """
+        mock_ra_client = MagicMock()
+        mock_ra_client.fetch_equipment.return_value = []
+        mock_ra_client.resolve_unit_id.return_value = None
+        mock_ra_client.resolve_category_id.return_value = None
+        mock_ra_client.push_equipment.side_effect = Exception("Please select branch and quantity.")
+
+        stock_item = {
+            "name": "Rejected Asset", "parent": "", "unit": "pc",
+            "hsn_code": "", "gst_rate": 0.0, "quantity": 0.0,
+            "rent_price": 0.0, "alter_id": 303,
+        }
+
+        stats = self._run_sync(mock_ra_client, stock_item)
+
+        self.assertEqual(stats["failed"], 1)
+        dead_letters = self.store.list_dead_letters(entity_type="equipment")
+        matching = [dl for dl in dead_letters if dl["source_id"] == "Rejected Asset"]
+        self.assertEqual(len(matching), 1)
+        self.assertIn("Please select branch and quantity.", matching[0]["error_message"])
+
     def test_updates_gst_hsn_and_rent_price_on_a_forward_owned_asset_without_touching_quantity(self):
         """
         A RentAsst-native asset (found only via a live name match, never through a

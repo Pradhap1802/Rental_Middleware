@@ -60,6 +60,20 @@ class RentAsstClient:
             raise last_error
         raise RetryableException(f"RentAsst API endpoints {endpoints} not found (404)")
 
+    @staticmethod
+    def _enrich_http_error(e: "requests.exceptions.HTTPError", r: "requests.Response") -> "requests.exceptions.HTTPError":
+        """
+        Wraps an HTTPError with the response body so RentAsst's actual validation message
+        (e.g. "Please select branch and quantity.") reaches logs/dead-letters instead of
+        just requests' own generic "422 Client Error: Unprocessable Content for url: ..."
+        summary, which discards the body entirely. Confirmed live: this hid the real
+        rejection reason behind every create/update 422 — the specific cause of one
+        (skip_inventory=False with 0 quantity, on a create-asset call) could only be found
+        by bypassing this client and reading the raw response directly.
+        """
+        err_text = (r.text or "")[:500].replace("\n", " ").strip()
+        return requests.exceptions.HTTPError(f"{e} | Response body: {err_text}", response=r) if err_text else e
+
     def ping(self) -> bool:
         for ep in ["admin/check-required-version", "categories", "health"]:
             try:
@@ -607,7 +621,7 @@ class RentAsstClient:
             except requests.exceptions.HTTPError as e:
                 if r.status_code in (404, 405):
                     continue
-                last_error = e
+                last_error = self._enrich_http_error(e, r)
             except Exception as e:
                 last_error = e
         # Every candidate endpoint either errored or 404/405'd (e.g. a wrong base_url
@@ -655,7 +669,10 @@ class RentAsstClient:
             update_payload["id"] = int(customer_id)
 
         r = self.session.put(url, json=update_payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            raise self._enrich_http_error(e, r) from e
         data = r.json()
         return data.get("data", data) if isinstance(data, dict) else data
 
@@ -673,7 +690,10 @@ class RentAsstClient:
         if str(customer_id).isdigit():
             create_payload.setdefault("customer_id", int(customer_id))
         r = self.session.post(url, json=create_payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            raise self._enrich_http_error(e, r) from e
         data = r.json()
         return data.get("data", data) if isinstance(data, dict) else data
 
@@ -683,7 +703,10 @@ class RentAsstClient:
         for a customer that already has an address on file."""
         url = f"{self.base_url}/customer/{customer_id}/address/{address_id}"
         r = self.session.put(url, json=dict(address), headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            raise self._enrich_http_error(e, r) from e
         data = r.json()
         return data.get("data", data) if isinstance(data, dict) else data
 
@@ -713,7 +736,10 @@ class RentAsstClient:
         update_payload.setdefault("skip_inventory", True)
 
         r = self.session.put(url, json=update_payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            raise self._enrich_http_error(e, r) from e
         data = r.json()
         return data.get("data", data) if isinstance(data, dict) else data
 
@@ -794,7 +820,10 @@ class RentAsstClient:
                 row["rent_id"] = int(rent_id)
             payload.append(row)
         r = self.session.post(url, json=payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            raise self._enrich_http_error(e, r) from e
         data = r.json()
         return data.get("data", data) if isinstance(data, dict) else data
 

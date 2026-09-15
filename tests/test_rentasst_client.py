@@ -51,6 +51,47 @@ class TestPushRentout(unittest.TestCase):
         self.assertTrue(called_url.endswith("/create-rent-details"), called_url)
 
 
+class TestWriteErrorsSurfaceTheResponseBody(unittest.TestCase):
+    """
+    Every write call (push_equipment/_post_with_fallback, update_equipment, etc.) used to
+    call bare raise_for_status() and let requests' own generic "422 Client Error:
+    Unprocessable Content for url: ..." string be the only thing callers/logs ever saw —
+    discarding RentAsst's actual validation message entirely. Confirmed live: the real
+    cause of a create-asset 422 ("Please select branch and quantity.") could only be found
+    by bypassing this client and reading the raw response directly. The enriched error
+    must include that real message.
+    """
+
+    def setUp(self):
+        self.cfg = AppConfig(rentasst_url="http://localhost:8000/api", rentasst_api_key="test-key")
+        self.client = RentAsstClient(self.cfg)
+
+    def _rejecting_response(self, body: str):
+        mock_response = MagicMock()
+        mock_response.status_code = 422
+        mock_response.text = body
+        mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError(response=mock_response)
+        return mock_response
+
+    def test_post_with_fallback_include_response_body_in_raised_error(self):
+        mock_response = self._rejecting_response('{"message":"Please select branch and quantity.","errors":{"branch":["Please select branch and quantity."]}}')
+        self.client.session.post = MagicMock(return_value=mock_response)
+
+        with self.assertRaises(requests.exceptions.HTTPError) as ctx:
+            self.client.push_equipment({"name": "Zero Stock Asset"})
+
+        self.assertIn("Please select branch and quantity.", str(ctx.exception))
+
+    def test_update_equipment_includes_response_body_in_raised_error(self):
+        mock_response = self._rejecting_response('{"message":"The name field is required."}')
+        self.client.session.put = MagicMock(return_value=mock_response)
+
+        with self.assertRaises(requests.exceptions.HTTPError) as ctx:
+            self.client.update_equipment("10", {})
+
+        self.assertIn("The name field is required.", str(ctx.exception))
+
+
 class TestPostWithFallbackAllEndpointsFail(unittest.TestCase):
     """
     _post_with_fallback previously fell through to a fabricated {"id": "RA-MOCK-ID",

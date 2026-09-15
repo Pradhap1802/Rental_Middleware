@@ -1040,7 +1040,16 @@ def sync_tally_to_rentasst(
                 "unit_id": unit_id,
                 "category_id": category_id,
                 "category_ids": json.dumps([category_id]) if category_id else None,
-                "skip_inventory": False,
+                # RentAsst rejects an inventory-tracked asset (skip_inventory=False) with a
+                # branch quantity of 0 — confirmed live via "Please select branch and
+                # quantity." 422s on every Tally stock item with zero current stock (a
+                # fresh item with nothing received yet, CLOSINGBALANCE 0). Creating it
+                # non-inventory-tracked instead lets it through; the update path above
+                # already reads the asset's own current skip_inventory back rather than
+                # forcing it, so once real stock does arrive in Tally, this stays True
+                # until someone flips it in RentAsst — the same "never force either way"
+                # rule the update path already follows, just applied to the initial value.
+                "skip_inventory": qty_int <= 0,
                 "enabled_for_rent": True,
                 "description": description,
                 "available_quantity": qty_int,
@@ -1072,7 +1081,15 @@ def sync_tally_to_rentasst(
                     lock_mgr.release_lock(xdir_lock_key, worker_id)
             except Exception as e:
                 stats["failed"] += 1
-                log_event("ReverseSync", f"Failed to push Tally stock item '{item_name}': {e}")
+                error_msg = str(e)
+                log_event("ReverseSync", f"Failed to push Tally stock item '{item_name}': {error_msg}")
+                # Unlike every other failure branch in this file (voucher push, equipment
+                # update), a rejected create here previously only logged — with no dead
+                # letter, a genuinely rejected item (e.g. RentAsst's "Please select branch
+                # and quantity." on a zero-stock asset) just silently re-failed identically
+                # every 10-minute cycle forever, invisible from the dashboard's DLQ and with
+                # no way to requeue it once actually fixed.
+                store.add_dead_letter("equipment", item_name, error_msg, json.dumps(asset_payload))
             finally:
                 lock_mgr.release_lock(record_lock_key, worker_id)
 
