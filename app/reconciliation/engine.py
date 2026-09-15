@@ -1,6 +1,6 @@
 import json
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from ..mapping.store import MappingStore
 from ..logging.logger import log_event
 
@@ -325,10 +325,19 @@ class ReconciliationEngine:
         ra_rental_orders: List[Dict[str, Any]] = None,
         tally_rental_orders: List[Dict[str, Any]] = None,
         company_id: str = "default",
+        fetch_errors: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
         Executes a read-only reconciliation pass.
         Calculates macro financial totals and records discrepancies in SQLite database.
+
+        `fetch_errors`: source -> error message for any RentAsst/Tally fetch the caller
+        couldn't complete (e.g. connection refused). Those sources are compared as if empty,
+        which used to look identical to "genuinely zero records there" — a reconciliation
+        audit reporting a clean, discrepancy-free COMPLETED run when it actually couldn't
+        reach one or both systems at all. Passing them through marks the run PARTIAL instead,
+        so a clean result actually means the data was compared, not that half of it failed
+        to load.
         """
         ra_cust = ra_customers or []
         t_cust = tally_customers or []
@@ -353,19 +362,21 @@ class ReconciliationEngine:
         )
 
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        status = "PARTIAL" if fetch_errors else "COMPLETED"
 
         # Save run record and discrepancies to DB
         with self.store.db.get_connection() as c:
             summary = {
                 "macro_totals": macro_totals,
                 "discrepancies_count": len(all_discrepancies),
+                "fetch_errors": fetch_errors or {},
             }
             cur_run = c.execute(
                 """
                 INSERT INTO reconciliation_runs (entity_type, run_at, status, summary_json)
-                VALUES ('all', ?, 'COMPLETED', ?)
+                VALUES ('all', ?, ?, ?)
                 """,
-                (now_iso, json.dumps(summary)),
+                (now_iso, status, json.dumps(summary)),
             )
             run_id = cur_run.lastrowid
 
@@ -392,15 +403,17 @@ class ReconciliationEngine:
 
         log_event(
             "Reconciliation",
-            f"Read-only reconciliation run #{run_id} completed: {len(all_discrepancies)} discrepancies found",
+            f"Read-only reconciliation run #{run_id} {status.lower()}: {len(all_discrepancies)} discrepancies found"
+            + (f", fetch errors: {fetch_errors}" if fetch_errors else ""),
             metadata=summary,
         )
 
         return {
             "run_id": run_id,
-            "status": "COMPLETED",
+            "status": status,
             "run_at": now_iso,
             "macro_totals": macro_totals,
             "total_discrepancies": len(all_discrepancies),
             "discrepancies": all_discrepancies,
+            "fetch_errors": fetch_errors or {},
         }

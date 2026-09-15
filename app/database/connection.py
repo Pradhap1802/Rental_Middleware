@@ -239,20 +239,6 @@ class DatabaseManager:
                 except Exception:
                     pass
 
-            # Legacy table alias for dead_letter
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS dead_letter (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    entity_type TEXT NOT NULL,
-                    source_id TEXT,
-                    error TEXT NOT NULL,
-                    payload TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
-
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sync_locks (

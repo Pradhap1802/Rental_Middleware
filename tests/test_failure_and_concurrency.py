@@ -65,7 +65,7 @@ class TestFailureAndConcurrency(unittest.TestCase):
         }]
 
         # Pre-seed customer mapping
-        self.store.save("customer", "CUST-1", "TALLY-CUST-1")
+        self.store.save_mapping("customer", "CUST-1", "TALLY-CUST-1")
 
         # Scheduler trigger runs (record not yet in Tally)
         stats_1 = run_sync_pipeline(
@@ -112,7 +112,7 @@ class TestFailureAndConcurrency(unittest.TestCase):
 
         self.assertEqual(stats["skipped"], 1)
         self.assertEqual(stats["created"], 0)
-        self.assertTrue(self.store.exists("customer", "CUST-TIMEOUT-1"))
+        self.assertIsNotNone(self.store.find_mapping("customer", "CUST-TIMEOUT-1"))
 
     def test_tally_unavailable(self):
         """
@@ -123,12 +123,12 @@ class TestFailureAndConcurrency(unittest.TestCase):
         claimed = self.q_store.claim_next_job()
         self.assertEqual(claimed["id"], job_id)
 
-        # Simulate connection refusal / timeout
-        self.q_store.mark_failed(job_id, error_msg="Tally XML Server connection refused on 127.0.0.1:9000")
+        # Simulate connection refusal / timeout — same path the worker takes via _fail_job()
+        self.q_store.mark_retrying(job_id, error_msg="Tally XML Server connection refused on 127.0.0.1:9000", delay_seconds=30)
 
         with self.q_store.db.get_connection() as c:
             row = c.execute("SELECT status, last_error FROM sync_queue WHERE id=?", (job_id,)).fetchone()
-            self.assertEqual(row["status"], "FAILED")
+            self.assertEqual(row["status"], "RETRYING")
             self.assertIn("connection refused", row["last_error"].lower())
 
     def test_rentasst_unavailable(self):
@@ -137,11 +137,11 @@ class TestFailureAndConcurrency(unittest.TestCase):
         Queue state remains safely intact for retry.
         """
         job_id = self.q_store.enqueue(entity_type="invoice", entity_id="INV-CLOUD-OFFLINE")
-        self.q_store.mark_failed(job_id, error_msg="HTTP 503 Service Unavailable: RentAsst API Gateway")
+        self.q_store.mark_retrying(job_id, error_msg="HTTP 503 Service Unavailable: RentAsst API Gateway", delay_seconds=30)
 
         with self.q_store.db.get_connection() as c:
             row = c.execute("SELECT status FROM sync_queue WHERE id=?", (job_id,)).fetchone()
-            self.assertEqual(row["status"], "FAILED")
+            self.assertEqual(row["status"], "RETRYING")
 
     def test_invalid_invoice_payload_dlq_routing(self):
         """
@@ -228,7 +228,7 @@ class TestFailureAndConcurrency(unittest.TestCase):
             external_client=mock_ext,
         )
 
-        self.assertFalse(self.store.exists("customer", "CUST-RETRY-1"))
+        self.assertIsNone(self.store.find_mapping("customer", "CUST-RETRY-1"))
 
         # Attempt 2: Recovered and successful
         stats_2 = run_sync_pipeline(
@@ -240,7 +240,7 @@ class TestFailureAndConcurrency(unittest.TestCase):
         )
 
         self.assertEqual(stats_2["created"], 1)
-        self.assertTrue(self.store.exists("customer", "CUST-RETRY-1"))
+        self.assertIsNotNone(self.store.find_mapping("customer", "CUST-RETRY-1"))
 
     def test_same_customer_id_in_two_companies_isolation(self):
         """

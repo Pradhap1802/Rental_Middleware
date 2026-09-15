@@ -24,7 +24,7 @@ class TestBackupAndRecovery(unittest.TestCase):
 
     def test_manual_and_scheduled_backup_creation(self):
         # Save sample mapping
-        self.store.save("customer", "CUST-100", "TALLY-CUST-100")
+        self.store.save_mapping("customer", "CUST-100", "TALLY-CUST-100")
 
         res = self.backup_svc.trigger_backup()
         self.assertEqual(res["status"], "success")
@@ -49,13 +49,13 @@ class TestBackupAndRecovery(unittest.TestCase):
 
     def test_backup_restore_procedure(self):
         # 1. State 1: Save Customer 1
-        self.store.save("customer", "CUST-1", "TALLY-CUST-1")
+        self.store.save_mapping("customer", "CUST-1", "TALLY-CUST-1")
         res1 = self.backup_svc.trigger_backup()
         b1_file = res1["db_backup"]
 
         # 2. State 2: Save Customer 2
-        self.store.save("customer", "CUST-2", "TALLY-CUST-2")
-        self.assertTrue(self.store.exists("customer", "CUST-2"))
+        self.store.save_mapping("customer", "CUST-2", "TALLY-CUST-2")
+        self.assertIsNotNone(self.store.find_mapping("customer", "CUST-2"))
 
         # 3. Restore State 1 Backup
         self.store.db.close()  # Close active connection before file overwrite
@@ -65,9 +65,9 @@ class TestBackupAndRecovery(unittest.TestCase):
 
         # Reopen connection after restore
         self.store = MappingStore(self.db_path)
-        self.assertTrue(self.store.exists("customer", "CUST-1"))
+        self.assertIsNotNone(self.store.find_mapping("customer", "CUST-1"))
         # Customer 2 should NOT exist in restored State 1!
-        self.assertFalse(self.store.exists("customer", "CUST-2"))
+        self.assertIsNone(self.store.find_mapping("customer", "CUST-2"))
 
     def test_backup_retention_purge(self):
         # Create 12 dummy backup files
@@ -98,7 +98,7 @@ class TestBackupAndRecovery(unittest.TestCase):
         }]
 
         # 1. State 1: Initial Backup (Invoice not synced yet)
-        self.store.save("customer", "CUST-100", "TALLY-CUST-100")
+        self.store.save_mapping("customer", "CUST-100", "TALLY-CUST-100")
         backup_res = self.backup_svc.trigger_backup()
         old_backup_file = backup_res["db_backup"]
 
@@ -119,7 +119,7 @@ class TestBackupAndRecovery(unittest.TestCase):
         self.store = MappingStore(self.db_path)
 
         # Confirm local SQLite mapping is missing in restored DB
-        self.assertFalse(self.store.exists("invoice", "INV-RESTORE-1"))
+        self.assertIsNone(self.store.find_mapping("invoice", "INV-RESTORE-1"))
 
         # 4. Post-Restore Sync Pipeline Execution:
         # Pre-flight check discovers that voucher 'INV-RESTORE-1' ALREADY EXISTS in Tally Prime!
@@ -136,7 +136,7 @@ class TestBackupAndRecovery(unittest.TestCase):
         # ZERO DUPLICATES CREATED! Target ID adopted and local mapping restored!
         self.assertEqual(stats_2["created"], 0)
         self.assertEqual(stats_2["skipped"], 1)
-        self.assertTrue(self.store.exists("invoice", "INV-RESTORE-1"))
+        self.assertIsNotNone(self.store.find_mapping("invoice", "INV-RESTORE-1"))
 
 
 if __name__ == "__main__":

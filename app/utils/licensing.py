@@ -1,8 +1,3 @@
-import logging
-
-logger = logging.getLogger(__name__)
-
-
 def validate_license(license_key: str) -> bool:
     """Placeholder license validator hook for RentAsst Enterprise licenses."""
     if not license_key:

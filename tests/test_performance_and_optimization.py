@@ -40,9 +40,9 @@ class TestPerformanceAndOptimization(unittest.TestCase):
 
     def test_batch_prefetch_mappings(self):
         # Pre-seed 3 customer mappings in SQLite DB
-        self.store.save("customer", "101", "TALLY-CUST-101")
-        self.store.save("customer", "102", "TALLY-CUST-102")
-        self.store.save("customer", "103", "TALLY-CUST-103")
+        self.store.save_mapping("customer", "101", "TALLY-CUST-101")
+        self.store.save_mapping("customer", "102", "TALLY-CUST-102")
+        self.store.save_mapping("customer", "103", "TALLY-CUST-103")
 
         # Prefetch batch mappings in single SQL query
         prefetched = self.store.prefetch_mappings("customer", ["101", "102", "103"])
@@ -56,11 +56,11 @@ class TestPerformanceAndOptimization(unittest.TestCase):
         self.assertEqual(m101["target_id"], "TALLY-CUST-101")
 
     def test_cache_invalidation_on_write(self):
-        self.store.save("customer", "200", "TALLY-OLD")
+        self.store.save_mapping("customer", "200", "TALLY-OLD")
         _ = self.store.find_mapping("customer", "200")
 
         # Update mapping -> Cache MUST be invalidated
-        self.store.save("customer", "200", "TALLY-NEW")
+        self.store.save_mapping("customer", "200", "TALLY-NEW")
         updated = self.store.find_mapping("customer", "200")
         self.assertEqual(updated["target_id"], "TALLY-NEW")
 
@@ -78,7 +78,7 @@ class TestPerformanceAndOptimization(unittest.TestCase):
             for i in range(10)
         ]
 
-        self.store.save("customer", "CUST-1", "TALLY-CUST-1")
+        self.store.save_mapping("customer", "CUST-1", "TALLY-CUST-1")
 
         stats = run_sync_pipeline(
             entity_type="invoice",

@@ -198,26 +198,6 @@ class QueueStore:
                 except Exception:
                     pass
 
-    def mark_failed(self, job_id: int, error_msg: str) -> None:
-        """Transitions job to FAILED or DLQ state."""
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        err_truncated = error_msg[:1000]
-        with self.db.get_connection() as c:
-            cur = c.execute("SELECT attempt_count, max_attempts FROM sync_queue WHERE id=?", (job_id,))
-            row = cur.fetchone()
-            if row and row["attempt_count"] >= row["max_attempts"]:
-                self.mark_dlq(job_id, error_msg)
-            else:
-                c.execute(
-                    """
-                    UPDATE sync_queue 
-                    SET status='FAILED', attempt_count=attempt_count+1, attempts=attempts+1,
-                        last_error=?, error_message=?, completed_at=?, updated_at=?
-                    WHERE id=?
-                    """,
-                    (err_truncated, err_truncated, now_iso, now_iso, job_id),
-                )
-
     def recover_crashed_jobs(self, stale_threshold_seconds: int = 300) -> Dict[str, int]:
         """
         Detects jobs left stuck in PROCESSING state due to process termination, Windows reboots, or worker crashes.

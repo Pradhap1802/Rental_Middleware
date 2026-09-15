@@ -1,11 +1,8 @@
-import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 from typing import Optional
 from ..configuration.store import ConfigStore
 from ..queue.queue_store import QueueStore
 from ..logging.logger import log_event
-
-logger = logging.getLogger(__name__)
 
 
 class SyncScheduler:

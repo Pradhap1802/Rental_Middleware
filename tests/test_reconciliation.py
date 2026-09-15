@@ -130,6 +130,33 @@ class TestReconciliationEngine(unittest.TestCase):
         self.assertIn("MISSING_IN_TALLY", m_types)
         self.assertIn("MISSING_IN_RENTASST", m_types)
 
+    def test_fetch_errors_mark_run_partial_instead_of_a_false_clean_completed(self):
+        """
+        A run given fetch_errors (some RentAsst/Tally source the caller couldn't reach)
+        must report PARTIAL, not COMPLETED — a caller that fetched nothing from a downed
+        system used to compare it as empty and get back an indistinguishable "COMPLETED,
+        0 discrepancies", i.e. a false-clean audit result.
+        """
+        res = self.engine.run_reconciliation(
+            ra_invoices=[{"id": 1, "number": "INV-001", "grand_total": 1000.0}],
+            fetch_errors={"tally_invoices": "Connection refused"},
+        )
+
+        self.assertEqual(res["status"], "PARTIAL")
+        self.assertEqual(res["fetch_errors"], {"tally_invoices": "Connection refused"})
+
+        with self.engine.store.db.get_connection() as c:
+            row = c.execute("SELECT status FROM reconciliation_runs WHERE id=?", (res["run_id"],)).fetchone()
+        self.assertEqual(row["status"], "PARTIAL")
+
+    def test_no_fetch_errors_still_reports_completed(self):
+        res = self.engine.run_reconciliation(
+            ra_invoices=[{"id": 1, "number": "INV-001", "grand_total": 1000.0}],
+            tally_invoices=[{"voucher_number": "INV-001", "amount": 1000.0}],
+        )
+        self.assertEqual(res["status"], "COMPLETED")
+        self.assertEqual(res["fetch_errors"], {})
+
 
 class TestReconciliationRouteWiring(unittest.TestCase):
     """
@@ -216,6 +243,33 @@ class TestReconciliationRouteWiring(unittest.TestCase):
         # The Physical Stock voucher isn't any of invoice/payment/rental_order/equipment
         all_values = [v for vals in by_entity.values() for v in vals]
         self.assertFalse(any("STK-1" in str(v) for v in all_values))
+
+    def test_a_failed_tally_fetch_reports_partial_instead_of_a_false_clean_run(self):
+        """
+        trigger_reconciliation() used to swallow every RentAsst/Tally fetch exception with
+        a bare `except: pass`, so a Tally connection failure looked exactly like "Tally has
+        zero vouchers" — a reconciliation run reporting COMPLETED with 0 discrepancies while
+        having compared nothing on the Tally side at all. It must now come back PARTIAL with
+        the real error recorded, and still complete using whatever sources did succeed.
+        """
+        mock_fetcher = MagicMock()
+        mock_fetcher.fetch_ledgers.return_value = []
+        mock_fetcher.fetch_stock_items.return_value = []
+        mock_fetcher.fetch_vouchers.side_effect = ConnectionError("Failed to establish a new connection")
+
+        with patch("app.api.reconciliation_routes.TallyFetcher", return_value=mock_fetcher):
+            resp = self.client.post("/api/reconciliation/run")
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["status"], "PARTIAL")
+        self.assertIn("tally_vouchers", data["fetch_errors"])
+        self.assertIn("Failed to establish a new connection", data["fetch_errors"]["tally_vouchers"])
+        # The customer comparison, which didn't fail, still ran and reported normally
+        # (Acme Rentals exists in the mocked RentAsst side but not in Tally's empty ledgers).
+        cust_discrepancies = [d for d in data["discrepancies"] if d["entity_type"] == "customer"]
+        self.assertEqual(len(cust_discrepancies), 1)
+        self.assertEqual(cust_discrepancies[0]["mismatch_type"], "MISSING_IN_TALLY")
 
 
 if __name__ == "__main__":

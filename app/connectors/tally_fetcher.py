@@ -33,7 +33,7 @@ class TallyFetcher:
         self.tally_url = cfg.external_url.rstrip("/")
         self.session = requests.Session()
 
-    def _post_xml(self, xml_payload: str) -> Optional[str]:
+    def _post_xml(self, xml_payload: str) -> str:
         """
         Routes through the same _tally_post()/_TALLY_HTTP_LOCK TallyClient uses for
         every forward-sync request — this used to call bare requests.post() directly,
@@ -45,13 +45,18 @@ class TallyFetcher:
         "Could not set 'SVCurrentCompany'" errors on equipment sync while reverse sync
         was also active, the exact concurrency signature this codebase's own comments
         already document as capable of corrupting or crashing Tally.
+
+        Deliberately does NOT catch connection/timeout/HTTP-status errors — this used to
+        swallow them and return None, which every caller then treated identically to "Tally
+        responded with zero records," so a completely unreachable Tally (wrong port, not
+        running) reported reverse sync as a clean success with nothing to do instead of a
+        failure. Letting the real exception propagate is what lets callers (and the
+        /api/sync/tally_to_rentasst route) tell "nothing to sync" apart from "couldn't reach
+        Tally at all."
         """
-        try:
-            r = _tally_post(self.session, self.tally_url, xml_payload.encode("utf-8"), timeout=10)
-            r.raise_for_status()
-            return sanitize_tally_xml(r.content)
-        except Exception:
-            return None
+        r = _tally_post(self.session, self.tally_url, xml_payload.encode("utf-8"), timeout=10)
+        r.raise_for_status()
+        return sanitize_tally_xml(r.content)
 
     def fetch_vouchers(
         self,

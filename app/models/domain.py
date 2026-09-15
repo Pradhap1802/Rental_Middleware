@@ -31,7 +31,6 @@ class AppConfig(BaseModel):
     # General Settings
     sync_interval_minutes: int = Field(default=10)
     auto_sync_enabled: bool = Field(default=False)
-    proxy: Optional[str] = Field(default="")
     verify_ssl: bool = Field(default=True)
 
 

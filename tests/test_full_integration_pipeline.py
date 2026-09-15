@@ -47,7 +47,7 @@ class TestFullIntegrationPipeline(unittest.TestCase):
             external_client=mock_ext,
         )
         self.assertEqual(c_stats["created"], 1)
-        self.assertTrue(self.store.exists("customer", "CUST-E2E-1"))
+        self.assertIsNotNone(self.store.find_mapping("customer", "CUST-E2E-1"))
 
         # 2. Equipment Sync
         eq_payload = [{"id": "EQ-E2E-1", "name": "JCB Excavator 300", "daily_rate": 500.0}]
@@ -59,7 +59,7 @@ class TestFullIntegrationPipeline(unittest.TestCase):
             external_client=mock_ext,
         )
         self.assertEqual(e_stats["created"], 1)
-        self.assertTrue(self.store.exists("equipment", "EQ-E2E-1"))
+        self.assertIsNotNone(self.store.find_mapping("equipment", "EQ-E2E-1"))
 
         # 3. Rental Order Sync
         order_payload = [{
@@ -96,7 +96,7 @@ class TestFullIntegrationPipeline(unittest.TestCase):
             external_client=mock_ext,
         )
         self.assertEqual(i_stats["created"], 1)
-        self.assertTrue(self.store.exists("invoice", "INV-E2E-1"))
+        self.assertIsNotNone(self.store.find_mapping("invoice", "INV-E2E-1"))
 
         # 5. Payment Sync (Requires Invoice Dependency)
         pay_payload = [{
@@ -114,10 +114,12 @@ class TestFullIntegrationPipeline(unittest.TestCase):
             external_client=mock_ext,
         )
         self.assertEqual(p_stats["created"], 1)
-        self.assertTrue(self.store.exists("payment", "PAY-E2E-1"))
+        self.assertIsNotNone(self.store.find_mapping("payment", "PAY-E2E-1"))
 
+    @unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher.fetch_stock_items")
+    @unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher.fetch_ledgers")
     @unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher.fetch_vouchers")
-    def test_e2e_reverse_sync_tally_to_rentasst(self, mock_fetch_vouchers):
+    def test_e2e_reverse_sync_tally_to_rentasst(self, mock_fetch_vouchers, mock_fetch_ledgers, mock_fetch_stock_items):
         """
         Integration Test 2: Reverse sync from Tally vouchers to RentAsst REST API.
 
@@ -125,7 +127,14 @@ class TestFullIntegrationPipeline(unittest.TestCase):
         orders (plus customers/equipment, exercised elsewhere) from Tally into
         RentAsst now; Invoices/Payments are RentAsst-native and reach Tally only via
         forward sync, referencing the rental order's own Tally identity instead.
+
+        fetch_ledgers/fetch_stock_items are mocked to empty (this test only exercises
+        the voucher path) rather than left to hit the real HTTP call against
+        mock_ext_client's placeholder MagicMock cfg — TallyFetcher._post_xml no longer
+        swallows that call's resulting connection error into a silent [].
         """
+        mock_fetch_ledgers.return_value = []
+        mock_fetch_stock_items.return_value = []
         mock_fetch_vouchers.return_value = [{
             "tally_guid": "GUID-TALLY-REV-100",
             "voucher_number": "VOUCHER-REV-100",

@@ -74,6 +74,33 @@ class TestTallyFetcherSharedHttpLock(unittest.TestCase):
         self.assertIs(called_session, fetcher.session)
         self.assertIn("OK", result)
 
+    def test_post_xml_propagates_connection_failures_instead_of_swallowing_them(self):
+        """
+        _post_xml() used to catch every exception (connection refused, timeout, HTTP error
+        status) and return None, which fetch_ledgers/fetch_vouchers/fetch_stock_items then
+        all treated identically to "Tally responded with zero records" — making a totally
+        unreachable Tally indistinguishable from one that's up with genuinely nothing new.
+        The real exception must now propagate so callers can tell the two apart.
+        """
+        from app.models.domain import AppConfig
+
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        fetcher = TallyFetcher(cfg)
+
+        with patch(
+            "app.connectors.tally_fetcher._tally_post",
+            side_effect=ConnectionError("Failed to establish a new connection"),
+        ):
+            with self.assertRaises(ConnectionError):
+                fetcher._post_xml("<ENVELOPE>test</ENVELOPE>")
+
+        with patch(
+            "app.connectors.tally_fetcher._tally_post",
+            side_effect=ConnectionError("Failed to establish a new connection"),
+        ):
+            with self.assertRaises(ConnectionError):
+                fetcher.fetch_ledgers()
+
 
 class TestTallyFetcherInventoryParsing(unittest.TestCase):
     """

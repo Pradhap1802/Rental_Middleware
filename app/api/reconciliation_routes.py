@@ -29,27 +29,35 @@ def trigger_reconciliation(request: Request):
     ra_cust, ra_inv, ra_pay, ra_equip, ra_rental = [], [], [], [], []
     t_cust, t_inv, t_pay, t_equip, t_rental = [], [], [], [], []
 
+    # A failed fetch here used to be silently treated as "this source has zero records" —
+    # indistinguishable from it genuinely having none — so a reconciliation run could
+    # report a clean, discrepancy-free COMPLETED result while having actually compared
+    # nothing on one or both sides (e.g. RentAsst or Tally totally unreachable). Recording
+    # the real error per source lets run_reconciliation mark the run PARTIAL instead of a
+    # false-clean COMPLETED.
+    fetch_errors: Dict[str, str] = {}
+
     if ra_client and hasattr(ra_client, "fetch_customers"):
         try:
             ra_cust = ra_client.fetch_customers() or []
-        except Exception:
-            pass
+        except Exception as e:
+            fetch_errors["rentasst_customers"] = str(e)
         try:
             ra_inv = ra_client.fetch_invoices() or []
-        except Exception:
-            pass
+        except Exception as e:
+            fetch_errors["rentasst_invoices"] = str(e)
         try:
             ra_pay = ra_client.fetch_payments() or []
-        except Exception:
-            pass
+        except Exception as e:
+            fetch_errors["rentasst_payments"] = str(e)
         try:
             ra_equip = ra_client.fetch_equipment() or []
-        except Exception:
-            pass
+        except Exception as e:
+            fetch_errors["rentasst_equipment"] = str(e)
         try:
             ra_rental = ra_client.fetch_rental_orders() or []
-        except Exception:
-            pass
+        except Exception as e:
+            fetch_errors["rentasst_rental_orders"] = str(e)
 
     # NOTE: previously this fetched ext_client.tally.fetch_companies() here — a list of
     # Tally COMPANY names, not customer ledgers — so every RentAsst customer was reported
@@ -58,16 +66,22 @@ def trigger_reconciliation(request: Request):
     # too. TallyFetcher.fetch_ledgers()/fetch_vouchers() are the real, existing sources for
     # this data (already used by the reverse-sync pipeline).
     if ext_client and getattr(ext_client, "cfg", None) and ext_client.cfg.external_system_type == "tally":
+        fetcher = TallyFetcher(ext_client.cfg)
         try:
-            fetcher = TallyFetcher(ext_client.cfg)
             t_cust = fetcher.fetch_ledgers() or []
+        except Exception as e:
+            fetch_errors["tally_customers"] = str(e)
+        try:
             t_equip = fetcher.fetch_stock_items() or []
+        except Exception as e:
+            fetch_errors["tally_equipment"] = str(e)
+        try:
             all_vouchers = fetcher.fetch_vouchers() or []
             t_inv = [v for v in all_vouchers if v.get("voucher_type") in ("Sales", "Credit Note")]
             t_pay = [v for v in all_vouchers if v.get("voucher_type") == "Receipt"]
             t_rental = [v for v in all_vouchers if v.get("voucher_type") == "Sales Order"]
-        except Exception:
-            pass
+        except Exception as e:
+            fetch_errors["tally_vouchers"] = str(e)
 
     result = engine.run_reconciliation(
         ra_customers=ra_cust,
@@ -80,6 +94,7 @@ def trigger_reconciliation(request: Request):
         tally_equipment=t_equip,
         ra_rental_orders=ra_rental,
         tally_rental_orders=t_rental,
+        fetch_errors=fetch_errors,
     )
     return result
 
@@ -105,6 +120,7 @@ def get_reconciliation_summary(request: Request):
             "status": row["status"],
             "macro_totals": summary_data.get("macro_totals"),
             "total_discrepancies": summary_data.get("discrepancies_count", 0),
+            "fetch_errors": summary_data.get("fetch_errors", {}),
         }
 
 

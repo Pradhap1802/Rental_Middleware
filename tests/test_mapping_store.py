@@ -136,8 +136,7 @@ class TestMappingStore(unittest.TestCase):
         self.assertEqual(inv_map["target_id"], "VOUCHER-777")
 
     def test_backward_compatibility_legacy_adapter(self):
-        # Legacy save call
-        self.store.save(entity_type="equipment", rentasst_id="EQ-5", external_id="TALLY-ITEM-5", last_hash="hash_5")
+        self.store.save_mapping(entity_type="equipment", source_id="EQ-5", target_id="TALLY-ITEM-5", last_synced_hash="hash_5")
 
         ext_id = self.store.get_external_id("equipment", "EQ-5")
         ra_id = self.store.get_rentasst_id("equipment", "TALLY-ITEM-5")

@@ -32,13 +32,3 @@ class TTLCache:
     def invalidate(self, key: str) -> None:
         with self._lock:
             self._cache.pop(key, None)
-
-    def invalidate_prefix(self, prefix: str) -> None:
-        with self._lock:
-            keys_to_del = [k for k in self._cache if k.startswith(prefix)]
-            for k in keys_to_del:
-                del self._cache[k]
-
-    def clear(self) -> None:
-        with self._lock:
-            self._cache.clear()

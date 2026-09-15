@@ -96,34 +96,6 @@ class MappingStore:
             cache_key = f"map:{source_company_id}:{entity_type}:{source_id}"
             self.cache.invalidate(cache_key)
 
-    def save(
-        self,
-        entity_type: str,
-        rentasst_id: str,
-        external_id: str,
-        tally_guid: Optional[str] = None,
-        sync_version: int = 1,
-        last_hash: Optional[str] = None,
-        status: str = "synced",
-        source_system: str = "rentasst",
-        source_company_id: str = "default",
-        target_system: str = "tally",
-        target_company_id: str = "default",
-    ) -> None:
-        self.save_mapping(
-            entity_type=entity_type,
-            source_id=rentasst_id,
-            target_id=external_id,
-            source_system=source_system,
-            source_company_id=source_company_id,
-            target_system=target_system,
-            target_company_id=target_company_id,
-            last_synced_hash=last_hash,
-            sync_version=sync_version,
-            status=status,
-            tally_guid=tally_guid,
-        )
-
     def find_by_integration_key(self, integration_key: str) -> Optional[Dict[str, Any]]:
         if not integration_key:
             return None
@@ -258,15 +230,6 @@ class MappingStore:
             # is harmless.
             self.cache.invalidate(f"map:default:{entity_type}:{rentasst_id}")
         return deleted
-
-    def exists(
-        self,
-        entity_type: str,
-        source_id: str,
-        source_system: str = "rentasst",
-        source_company_id: str = "default",
-    ) -> bool:
-        return self.find_mapping(entity_type, source_id, source_system, source_company_id) is not None
 
     def is_duplicate(
         self,

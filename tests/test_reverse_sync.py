@@ -1462,5 +1462,42 @@ class TestEquipmentReverseSync(unittest.TestCase):
         self.assertEqual(refreshed["target_id"], "55")
 
 
+class TestReverseSyncSurfacesFetchFailures(unittest.TestCase):
+    """
+    sync_tally_to_rentasst()'s outermost except used to log a total fetch failure (e.g.
+    Tally completely unreachable) and then return the zeroed-out stats dict as if the run
+    had simply found nothing to do — indistinguishable from a real, connected "nothing new"
+    result, and unlike every forward sync direction, which already surfaces a connection
+    failure as an error. It must now re-raise so callers (sync_service/sync_routes) report
+    it as a failure the same way.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test_reverse_sync_failure.db")
+        self.store = MappingStore(self.db_path)
+
+    def tearDown(self):
+        if hasattr(self, "store") and self.store:
+            self.store.db.close()
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_unreachable_tally_raises_instead_of_returning_a_false_success(self):
+        ext_client = MagicMock()
+        ext_client.cfg = MagicMock()
+        mock_ra_client = MagicMock()
+
+        with unittest.mock.patch("app.sync.tally_to_rentasst.TallyFetcher") as mock_fetcher_cls:
+            mock_fetcher = MagicMock()
+            mock_fetcher.fetch_ledgers.side_effect = ConnectionError("Failed to establish a new connection")
+            mock_fetcher_cls.return_value = mock_fetcher
+
+            with self.assertRaises(ConnectionError):
+                sync_tally_to_rentasst(
+                    ra_client=mock_ra_client, ext_client=ext_client, store=self.store, force_full_sync=True,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

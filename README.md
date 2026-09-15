@@ -66,10 +66,10 @@ Navigate to `http://localhost:8000` in your web browser.
 | `POST` | `/api/config` | Update encrypted configuration |
 | `POST` | `/api/sync/{entity}` | Trigger sync for `customers`, `equipment`, `invoices`, `payments`, `tally_to_rentasst` |
 | `GET` | `/api/conflicts` | List open bidirectional conflicts |
-| `POST` | `/api/conflicts/resolve` | Resolve conflict with `RENTASST` or `TALLY` authority |
+| `POST` | `/api/conflicts/{id}/resolve` | Resolve conflict with `resolution`: `use_rentasst`, `use_tally`, or `ignore` |
 | `POST` | `/api/reconciliation/run` | Execute read-only reconciliation audit |
-| `GET` | `/api/deadletter` | List dead-letter queue (DLQ) records |
-| `POST` | `/api/deadletter/requeue/{id}` | Requeue DLQ item for retry |
+| `GET` | `/api/deadletters` | List dead-letter queue (DLQ) records |
+| `POST` | `/api/deadletters/{id}/retry` | Requeue DLQ item for retry |
 | `POST` | `/api/backups` | Trigger verified SQLite state backup |
 | `POST` | `/api/backups/restore/{filename}` | Restore database from verified backup |
 
@@ -77,7 +77,7 @@ Navigate to `http://localhost:8000` in your web browser.
 
 ## Running Automated Tests
 
-Run the complete test suite (95 tests):
+Run the complete test suite (262 tests):
 ```powershell
 python -m unittest discover -s tests
 ```

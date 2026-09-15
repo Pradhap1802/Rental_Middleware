@@ -1111,6 +1111,21 @@ class TestRentalOrderNativeVsFallbackVoucherType(unittest.TestCase):
 
         self.assertEqual(mock_session.post.call_count, 2)  # no retry attempted
 
+    def test_fetch_companies_propagates_connection_failure_instead_of_returning_empty(self):
+        """
+        fetch_companies() used to catch every exception (connection refused, timeout) and
+        any non-200 response, returning [] either way — making "Tally is unreachable"
+        indistinguishable from "Tally is up with zero companies open" to callers like
+        GET /api/companies/tally. It must now let the real failure propagate.
+        """
+        cfg = AppConfig(external_url="http://localhost:9000", external_system_type="tally")
+        mock_session = MagicMock()
+        mock_session.post.side_effect = requests.exceptions.ConnectionError("Failed to establish a new connection")
+        client = TallyClient(cfg, session=mock_session)
+
+        with self.assertRaises(requests.exceptions.ConnectionError):
+            client.fetch_companies()
+
 
 if __name__ == "__main__":
     unittest.main()

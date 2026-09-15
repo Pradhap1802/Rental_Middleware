@@ -1425,5 +1425,11 @@ def sync_tally_to_rentasst(
         return stats
 
     except Exception as e:
+        # Re-raise (after logging) instead of swallowing and returning the zeroed-out
+        # `stats` — that used to make "Tally is unreachable" and "ran fine, genuinely
+        # nothing new to sync" both come back as {"status": "success", "stats": {... all
+        # zero}}, unlike every forward sync direction (customers/equipment/invoices/
+        # payments), which already surfaces a connection failure as an HTTP 400. Letting it
+        # propagate here gives tally_to_rentasst the same behavior.
         log_event("ReverseSync", f"Tally to RentAsst sync error: {str(e)}")
-        return stats
+        raise

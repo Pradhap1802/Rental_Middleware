@@ -213,14 +213,15 @@ class TallyClient:
             return self.send_xml(retry_xml, expect_voucher=expect_voucher)
 
     def fetch_companies(self) -> List[Dict[str, str]]:
+        # Deliberately does NOT catch connection/timeout/HTTP-status errors and return []
+        # for them — that used to make "Tally unreachable" and "Tally reachable, zero
+        # companies open" indistinguishable to callers (GET /api/companies/tally reported
+        # success either way). Letting the real exception propagate lets callers tell them
+        # apart.
         xml = build_fetch_companies_xml()
-        try:
-            r = _tally_post(self.session, self.base_url, xml.encode("utf-8"), timeout=10)
-            if r.status_code == 200:
-                return parse_fetch_companies_response(r.content)
-        except Exception:
-            pass
-        return []
+        r = _tally_post(self.session, self.base_url, xml.encode("utf-8"), timeout=10)
+        r.raise_for_status()
+        return parse_fetch_companies_response(r.content)
 
     def check_exists(self, entity_type: str, identifier: str) -> bool:
         if not identifier:
