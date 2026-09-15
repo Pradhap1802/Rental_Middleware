@@ -57,18 +57,20 @@ $$\text{Customer} \longrightarrow \text{Equipment} \longrightarrow \text{Rental 
 
 ## Reverse Sync Pipeline (Tally $\to$ RentAsst)
 
-1. **Voucher Ingestion**:
-   - Fetches Sales Invoices and Receipts from Tally Prime using `ALTERID` checkpointing (`TallyFetcher.fetch_vouchers(last_alter_id)`).
+Reverse sync mirrors customers, equipment, and rental orders (Sales Order vouchers) from
+Tally into RentAsst. Invoices and payments are RentAsst-native and are never
+reverse-synced — they're created later, only via forward sync, referencing the rental
+order's Tally identity established here.
+
+1. **Voucher/Ledger Ingestion**:
+   - Fetches vouchers and ledgers from Tally Prime using `ALTERID` checkpointing (`TallyFetcher.fetch_vouchers(last_alter_id)`).
+   - Sales Order vouchers become RentAsst rentouts; LEDGER masters become RentAsst customers/equipment.
 
 2. **Reverse Field Ownership Filtering**:
-   - Filters payload according to field ownership policy:
-     - `RentAsst` authoritative for customer name, mobile, address.
-     - `Tally` authoritative for opening balance, accounting balance, voucher numbers.
+   - Filters the rental_order payload according to field ownership policy (`app/sync/ownership.py`)
+     before pushing — e.g. `tally_voucher_id`/`tally_master_id`/`tally_guid` stay Tally-authoritative.
 
-3. **Conflict Detection**:
-   - Detects if both systems modified the record since last sync.
-   - If conflict detected, logs entry in `sync_conflicts` table (`status='OPEN'`).
-
-4. **RentAsst REST API Push**:
-   - Sends transformed payload to RentAsst REST API (`RentAsstClient.push_invoice()`).
-   - Persists reverse mapping (`company_id:invoice:reverse:tally_guid`) ONLY AFTER confirmed HTTP response.
+3. **RentAsst REST API Push**:
+   - Sends the transformed payload to RentAsst REST API (`RentAsstClient.push_rentout()` /
+     `push_customer()` / equipment equivalents).
+   - Persists the reverse mapping (`company_id:entity_type:reverse:tally_guid`) ONLY AFTER a confirmed HTTP response.

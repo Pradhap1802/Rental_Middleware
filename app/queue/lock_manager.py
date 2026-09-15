@@ -6,8 +6,8 @@ from ..database.connection import DatabaseManager
 
 class LockManager:
     """
-    Thread-safe & process-safe SQLite Lock/Lease Manager supporting automatic stale-lock purge,
-    lease renewal, and explicit worker ownership.
+    Thread-safe & process-safe SQLite Lock/Lease Manager supporting automatic stale-lock purge
+    and explicit worker ownership.
     """
     def __init__(self, db_path: str, default_lease_seconds: int = 300):
         self.db_path = db_path
@@ -80,15 +80,3 @@ class LockManager:
             cur = c.execute("DELETE FROM sync_locks WHERE lock_key=? AND worker_id=?", (lock_key, worker_id))
             return cur.rowcount > 0
 
-    def renew_lock(self, lock_key: str, worker_id: str, extension_seconds: Optional[int] = None) -> bool:
-        """Renews/extends active lease owned by worker_id."""
-        duration = extension_seconds if extension_seconds is not None else self.default_lease_seconds
-        expires_dt = datetime.now(timezone.utc) + timedelta(seconds=duration)
-        expires_iso = expires_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-        with self.db.get_connection() as c:
-            cur = c.execute(
-                "UPDATE sync_locks SET expires_at=? WHERE lock_key=? AND worker_id=?",
-                (expires_iso, lock_key, worker_id),
-            )
-            return cur.rowcount > 0

@@ -15,16 +15,6 @@ class NonRetryableException(Exception):
     pass
 
 
-BACKOFF_SCHEDULE_SECONDS = [
-    5 * 60,       # Attempt 1 -> 5 min (300s)
-    15 * 60,      # Attempt 2 -> 15 min (900s)
-    30 * 60,      # Attempt 3 -> 30 min (1800s)
-    60 * 60,      # Attempt 4 -> 1 hour (3600s)
-    6 * 3600,     # Attempt 5 -> 6 hours (21600s)
-    24 * 3600,    # Attempt 6 -> 24 hours (86400s)
-]
-
-
 class RetryConfig:
     """Configurable Retry & Backoff Parameters."""
     def __init__(

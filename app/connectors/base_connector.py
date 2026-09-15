@@ -3,11 +3,6 @@ from abc import ABC, abstractmethod
 
 class BaseConnector(ABC):
     @abstractmethod
-    def connect(self) -> bool:
-        """Establishes connection to target system."""
-        pass
-
-    @abstractmethod
     def disconnect(self) -> None:
         """Closes target system connection/session."""
         pass

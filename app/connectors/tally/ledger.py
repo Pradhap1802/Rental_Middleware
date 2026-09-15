@@ -1,14 +1,5 @@
 from typing import Dict, Any, Optional
-from .xml_builder import escape_xml, normalize_state_name, build_import_envelope, build_export_collection_envelope
-
-
-def build_check_ledger_exists_xml(ledger_name: str) -> str:
-    """Builds XML collection request to check if a ledger exists in Tally."""
-    return build_export_collection_envelope(
-        collection_id="CheckExistence",
-        tally_type="LEDGER",
-        fetch_fields="NAME, REMOTEID",
-    )
+from .xml_builder import escape_xml, normalize_state_name, build_import_envelope
 
 
 def build_customer_ledger_xml(data: Dict[str, Any], action: str = "Create", company_name: Optional[str] = None) -> str:

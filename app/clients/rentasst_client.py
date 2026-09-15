@@ -624,10 +624,6 @@ class RentAsstClient:
             "no working RentAsst route found. Refusing to report a fabricated success."
         )
 
-    def push_payment(self, payment_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Push a payment/receipt record from Tally to RentAsst Cloud API."""
-        return self._post_with_fallback(["payment", "payments", "receipt", "receipts"], payment_data)
-
     def push_customer(self, customer_data: Dict[str, Any]) -> Dict[str, Any]:
         """Push a customer master from Tally to RentAsst Cloud API."""
         return self._post_with_fallback(["customer", "customers"], customer_data)
@@ -776,22 +772,6 @@ class RentAsstClient:
         """
         return self._post_with_fallback(["create-rent-details"], rentout_data)
 
-    def update_rentout(self, rent_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Updates header fields on an existing RentAsst rentout via the same
-        create-rent-details endpoint used to create it (POST, not PUT — confirmed against
-        RentAsst's own routes/api.php: 'update-rent-details/{id}' is a POST route, and
-        RentDetailsRequest's rules() branch on $this->isMethod('post')/('put'), not the
-        HTTP verb's REST semantics). Used to patch a rentout's 'settings' column when it's
-        null — see DEFAULT_RENTOUT_SETTINGS in tally_to_rentasst.py for why that's needed
-        before rent items can be added to it.
-        """
-        url = f"{self.base_url}/update-rent-details/{rent_id}"
-        r = self.session.post(url, json=payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
-        r.raise_for_status()
-        data = r.json()
-        return data.get("data", data) if isinstance(data, dict) else data
-
     def push_rentout_items(self, rent_id: str, items: List[Dict[str, Any]]) -> Any:
         """
         Creates rent items (asset, quantity, price) on an existing RentAsst rentout via
@@ -814,39 +794,6 @@ class RentAsstClient:
                 row["rent_id"] = int(rent_id)
             payload.append(row)
         r = self.session.post(url, json=payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
-        r.raise_for_status()
-        data = r.json()
-        return data.get("data", data) if isinstance(data, dict) else data
-
-    def push_invoice(self, invoice_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Push an invoice record from Tally to RentAsst Cloud API."""
-        return self._post_with_fallback(["invoice", "invoices", "sales"], invoice_data)
-
-    def update_invoice(self, invoice_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Update header fields (status, amounts, dates) on an existing RentAsst invoice.
-        NOTE: RentAsst's invoice update endpoint silently ignores an 'items' key (not a
-        fillable column on the Invoice model) — line items must go through
-        push_invoice_items() instead, never through this call.
-        """
-        url = f"{self.base_url}/invoices/{invoice_id}"
-        r = self.session.put(url, json=payload, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
-        r.raise_for_status()
-        data = r.json()
-        return data.get("data", data) if isinstance(data, dict) else data
-
-    def push_invoice_items(self, invoice_id: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Creates line items on an existing RentAsst invoice via the bulk-create endpoint.
-        Invoice line items are a separate resource from the invoice itself in RentAsst
-        (InvoiceItem, not a column on Invoice) — sending them as part of the invoice
-        create/update payload is silently dropped, confirmed against RentAsst's own
-        InvoiceService/InvoiceItemController source. This must only be called once per
-        invoice creation — the endpoint appends rows rather than replacing them, so
-        calling it again on an already-itemized invoice would create duplicates.
-        """
-        url = f"{self.base_url}/invoices/{invoice_id}/items-bulk-create"
-        r = self.session.post(url, json={"items": items}, headers=self.headers, timeout=30, verify=self.cfg.verify_ssl)
         r.raise_for_status()
         data = r.json()
         return data.get("data", data) if isinstance(data, dict) else data

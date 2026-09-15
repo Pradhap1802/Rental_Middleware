@@ -112,12 +112,3 @@ class SyncScheduler:
         log_event("Scheduler", f"Manual sync triggered for {entities}. Enqueued {enqueued} jobs.")
         return enqueued
 
-    def trigger_immediate_sync(self, entity_type: str) -> Optional[int]:
-        """Enqueues high-priority job for immediate execution by Queue Worker."""
-        res = self.queue_store.enqueue(entity_type, priority=True)
-        log_event("Scheduler", f"Immediate sync triggered for '{entity_type}'. Job ID: {res}")
-        return res
-
-    def update_interval(self, interval_minutes: int):
-        if self.is_running:
-            self.start(interval_minutes)

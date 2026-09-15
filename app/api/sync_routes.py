@@ -29,7 +29,6 @@ def sync_equipment_endpoint(from_date: Optional[str] = None, to_date: Optional[s
 
 
 @router.post("/rental_orders")
-@router.post("/orders")
 def sync_rental_orders_endpoint(from_date: Optional[str] = None, to_date: Optional[str] = None, svc: SyncService = Depends(get_sync_service)):
     try:
         stats = svc.execute_sync("rental_orders", from_date=from_date, to_date=to_date)

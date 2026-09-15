@@ -7,9 +7,6 @@ class RestConnector(BaseConnector):
         from ..clients.external_client import ExternalClient
         self.client = ExternalClient(cfg)
 
-    def connect(self) -> bool:
-        return self.health_check()
-
     def disconnect(self) -> None:
         self.client.close()
 

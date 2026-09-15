@@ -341,7 +341,6 @@ class TallyFetcher:
                 v_no = (v_node.findtext("VOUCHERNUMBER") or "").strip()
                 v_date = (v_node.findtext("DATE") or "").strip()
                 party_name = (v_node.findtext("PARTYLEDGERNAME") or v_node.findtext("PARTYNAME") or "").strip()
-                reference = (v_node.findtext("REFERENCE") or "").strip()
                 narration = (v_node.findtext("NARRATION") or "").strip()
                 rentasst_id = (v_node.findtext("UDF_RENTASST_ID") or v_node.findtext("RENTASST_ID") or "").strip()
 
@@ -356,13 +355,10 @@ class TallyFetcher:
 
                 # Parse Ledgers & Amount
                 amount = 0.0
-                ledgers = []
-                bill_ref = ""
                 for l_entry in v_node.findall(".//ALLLEDGERENTRIES.LIST"):
                     lname = l_entry.findtext("LEDGERNAME")
                     amt_text = l_entry.findtext("AMOUNT")
                     if lname:
-                        ledgers.append({"ledger": lname, "amount": amt_text})
                         if not party_name and not lname.startswith("Sales") and not lname.startswith("Rental") and not lname.startswith("CGST") and not lname.startswith("SGST") and not lname.startswith("IGST"):
                             party_name = lname
                         try:
@@ -371,20 +367,13 @@ class TallyFetcher:
                                 amount = val
                         except (ValueError, TypeError):
                             pass
-                    if not bill_ref:
-                        for bill in l_entry.findall(".//BILLALLOCATIONS.LIST"):
-                            bill_name = (bill.findtext("NAME") or "").strip()
-                            bill_type = (bill.findtext("BILLTYPE") or "").strip()
-                            if bill_name and bill_type.lower() in ("agst ref", "against reference"):
-                                bill_ref = bill_name
-                                break
 
                 # Parse Inventory Items if present. Confirmed live against real Tally XML
                 # export (both "Sales Order" and "Sales" voucher types): the actual tag is
                 # ALLINVENTORYENTRIES.LIST — there is no bare INVENTORYENTRIES.LIST tag in
                 # Tally's response at all, so this always returned zero items regardless of
-                # voucher type, silently defeating push_invoice_items()/push_rentout_items()
-                # every single time (they always received an empty list to push).
+                # voucher type, silently defeating push_rentout_items() every single time
+                # (it always received an empty list to push).
                 items = []
                 for item_node in v_node.findall(".//ALLINVENTORYENTRIES.LIST"):
                     item_name = item_node.findtext("STOCKITEMNAME")
@@ -402,7 +391,6 @@ class TallyFetcher:
                 if guid or v_no or alter_id > 0:
                     vouchers.append({
                         "tally_guid": guid,
-                        "remote_id": remote_id,
                         "narration": narration,
                         "alter_id": alter_id,
                         "voucher_number": v_no,
@@ -410,10 +398,7 @@ class TallyFetcher:
                         "date": v_date,
                         "party_name": party_name,
                         "amount": amount,
-                        "reference": reference,
-                        "bill_ref": bill_ref,
                         "rentasst_id": rentasst_id,
-                        "ledgers": ledgers,
                         "items": items,
                     })
         except Exception:

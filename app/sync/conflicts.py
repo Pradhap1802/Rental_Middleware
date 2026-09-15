@@ -5,58 +5,11 @@ from ..mapping.store import MappingStore
 
 class ConflictDetector:
     """
-    Bidirectional Conflict Detection & Resolution Engine.
-    Detects when both RentAsst and Tally modified a record since last_synced_at.
-    Prevents silent overwrites of conflicting fields and records entries in SQLite sync_conflicts table.
+    Records, lists, and resolves bidirectional field conflicts in the SQLite
+    sync_conflicts table (see app/api/conflict_routes.py for the API surface).
     """
     def __init__(self, store: MappingStore):
         self.store = store
-
-    def detect_and_record_conflicts(
-        self,
-        entity_type: str,
-        entity_id: str,
-        rentasst_data: Dict[str, Any],
-        tally_data: Dict[str, Any],
-        last_synced_at: Optional[str] = None,
-        rentasst_mod_time: Optional[str] = None,
-        tally_mod_time: Optional[str] = None,
-        company_id: str = "default",
-    ) -> List[Dict[str, Any]]:
-        """
-        Compares rentasst_data vs tally_data for conflicting field changes.
-        If both modified since last_synced_at and field values differ, records an open conflict in DB.
-        Returns list of open conflicts.
-        """
-        conflicts = []
-        if not rentasst_data or not tally_data:
-            return conflicts
-
-        for field_name, ra_val in rentasst_data.items():
-            if field_name in ("id", "company_id", "created_at", "updated_at"):
-                continue
-
-            tally_val = tally_data.get(field_name)
-            if tally_val is None:
-                continue
-
-            str_ra = str(ra_val).strip() if ra_val is not None else ""
-            str_tally = str(tally_val).strip() if tally_val is not None else ""
-
-            if str_ra and str_tally and str_ra != str_tally:
-                conflict_entry = self.record_conflict(
-                    entity_type=entity_type,
-                    entity_id=entity_id,
-                    field_name=field_name,
-                    rentasst_value=str_ra,
-                    tally_value=str_tally,
-                    rentasst_mod_time=rentasst_mod_time,
-                    tally_mod_time=tally_mod_time,
-                    company_id=company_id,
-                )
-                conflicts.append(conflict_entry)
-
-        return conflicts
 
     def record_conflict(
         self,

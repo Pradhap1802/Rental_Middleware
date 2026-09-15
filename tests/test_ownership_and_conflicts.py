@@ -69,26 +69,6 @@ class TestOwnershipAndConflicts(unittest.TestCase):
         self.assertIn("closing_balance", filtered)
         self.assertNotIn("name", filtered)
 
-    def test_conflict_detection_and_recording(self):
-        ra_data = {"id": 100, "name": "RentAsst Name", "mobile": "9999988888"}
-        tally_data = {"id": 100, "name": "Tally Name", "mobile": "9999988888"}
-
-        conflicts = self.detector.detect_and_record_conflicts(
-            entity_type="customer",
-            entity_id="100",
-            rentasst_data=ra_data,
-            tally_data=tally_data,
-        )
-
-        self.assertEqual(len(conflicts), 1)
-        self.assertEqual(conflicts[0]["field_name"], "name")
-
-        # Verify recorded in DB
-        db_conflicts = self.detector.list_conflicts(status_filter="OPEN")
-        self.assertEqual(len(db_conflicts), 1)
-        self.assertEqual(db_conflicts[0]["rentasst_value"], "RentAsst Name")
-        self.assertEqual(db_conflicts[0]["tally_value"], "Tally Name")
-
     def test_conflict_resolution(self):
         # Record conflict
         c_entry = self.detector.record_conflict(

@@ -80,8 +80,8 @@ class TestTallyFetcherInventoryParsing(unittest.TestCase):
     fetch_vouchers()/​_parse_vouchers_xml() previously searched for a bare
     "INVENTORYENTRIES.LIST" tag that does not exist in Tally's real XML — every voucher's
     line items came back as an empty list regardless of voucher type, which silently
-    defeated push_invoice_items()/push_rentout_items() (they always received nothing to
-    push). Confirmed live against a real "Sales Order" voucher export.
+    defeated push_rentout_items() (it always received nothing to push). Confirmed live
+    against a real "Sales Order" voucher export.
     """
 
     def test_fetch_vouchers_extracts_items_from_real_tally_xml_shape(self):

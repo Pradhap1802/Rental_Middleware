@@ -237,23 +237,6 @@ class MappingStore:
             row = cur.fetchone()
             return dict(row) if row else None
 
-    def find(self, entity_type: str, rentasst_id: str) -> Optional[Dict[str, Any]]:
-        return self.find_mapping(entity_type, rentasst_id)
-
-    def update(self, entity_type: str, rentasst_id: str, **kwargs) -> None:
-        if not kwargs:
-            return
-        fields = []
-        values = []
-        for k, v in kwargs.items():
-            fields.append(f"{k}=?")
-            values.append(v)
-        fields.append("last_attempt=CURRENT_TIMESTAMP")
-        query = f"UPDATE mapping SET {', '.join(fields)} WHERE entity_type=? AND (rentasst_id=? OR source_id=?)"
-        values.extend([entity_type, rentasst_id, rentasst_id])
-        with self.db.get_connection() as c:
-            c.execute(query, tuple(values))
-
     def delete(self, entity_type: str, rentasst_id: str) -> bool:
         with self.db.get_connection() as c:
             cur = c.execute(
@@ -346,9 +329,6 @@ class MappingStore:
         if mapping:
             return mapping.get("source_id") or mapping.get("rentasst_id")
         return None
-
-    def upsert_mapping(self, entity_type: str, rentasst_id: str, external_id: str) -> None:
-        self.save(entity_type, rentasst_id, external_id)
 
     def set_checkpoint(self, entity_type: str, timestamp: str) -> None:
         with self.db.get_connection() as c:

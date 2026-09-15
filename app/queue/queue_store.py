@@ -148,9 +148,6 @@ class QueueStore:
                 (final_status, now_iso, now_iso, job_id),
             )
 
-    def mark_completed(self, job_id: int) -> None:
-        self.mark_success(job_id, partial=False)
-
     def mark_retrying(self, job_id: int, error_msg: str, delay_seconds: int) -> None:
         """Transitions job to RETRYING state with backoff schedule."""
         now_dt = datetime.now(timezone.utc)
@@ -169,9 +166,6 @@ class QueueStore:
                 """,
                 (err_truncated, err_truncated, now_iso, scheduled_iso, scheduled_iso, scheduled_iso, job_id),
             )
-
-    def mark_retry(self, job_id: int, error_msg: str, delay_seconds: int) -> None:
-        self.mark_retrying(job_id, error_msg, delay_seconds)
 
     def mark_dlq(self, job_id: int, error_msg: str) -> None:
         """Transitions job to DLQ state (max retries exhausted) and logs dead-letter record."""

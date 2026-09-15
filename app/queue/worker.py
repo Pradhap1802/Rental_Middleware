@@ -25,9 +25,6 @@ class QueueWorker:
         self._pool: Optional[ThreadPoolExecutor] = None
         self.current_job_info: str = "Idle"
 
-    def set_sync_executor(self, sync_executor: Callable):
-        self.sync_executor = sync_executor
-
     def _process_job(self, job: dict):
         job_id = job.get("job_id") or job["id"]
         entity_type = job["entity_type"]
