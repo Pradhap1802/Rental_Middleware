@@ -1,0 +1,10 @@
+[tool.ruff]
+line-length = 200
+
+[tool.ruff.lint]
+# Deliberately narrow: syntax errors and pyflakes (unused imports/variables, undefined
+# names, etc.) are unambiguous bugs worth blocking CI on. Broader style/opinionated rule
+# sets (import sorting, blind-except, deprecated-typing-syntax, ...) are not enabled here
+# to avoid a disruptive mass-reformat of working code — adopt them incrementally later if
+# desired, rule by rule, rather than all at once.
+select = ["E9", "F"]

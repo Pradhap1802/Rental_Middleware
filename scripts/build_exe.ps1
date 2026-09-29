@@ -12,7 +12,7 @@ if (-not (Test-Path $PythonPath)) {
 }
 
 Write-Host "Ensuring build tools (pyinstaller, pywin32)..." -ForegroundColor Yellow
-& $PythonPath -m pip install --quiet pyinstaller pywin32 tenacity
+& $PythonPath -m pip install --quiet pyinstaller pywin32
 
 $DistDir = "$RootPath\dist\RentalMiddleware"
 if (Test-Path $DistDir) {

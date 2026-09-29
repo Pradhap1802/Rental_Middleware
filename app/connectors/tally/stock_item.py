@@ -1,0 +1,238 @@
+from typing import Dict, Any, Optional
+from .xml_builder import escape_xml, build_import_envelope, format_tally_date
+
+
+def build_unit_xml(name: str, symbol: str = "", action: str = "Create", company_name: Optional[str] = None) -> str:
+    """
+    Builds a standalone Tally UNIT master XML — used to pre-create every unit RentAsst
+    uses as its own isolated request BEFORE any STOCKITEM sync begins, instead of
+    bundling a fresh <UNIT ACTION="Create"> inline into whichever STOCKITEM import
+    happens to need it first. Confirmed live: back-to-back STOCKITEM imports each
+    carrying their own master-creation payload is the same pattern that preceded a
+    native Tally "Memory Access Violation" crash — separating master creation from
+    transactional/item creation into its own pass keeps each individual request small
+    and simple, and lets it be paced independently of the (larger, more complex)
+    STOCKITEM imports that follow.
+    """
+    clean_name = (name or "").strip()
+    symbol_tag = f"\n            <SYMBOL>{escape_xml(symbol)}</SYMBOL>" if symbol else ""
+    msg = f"""          <UNIT NAME="{escape_xml(clean_name)}" ACTION="{action}">
+            <NAME>{escape_xml(clean_name)}</NAME>{symbol_tag}
+            <ISSIMPLEUNIT>YES</ISSIMPLEUNIT>
+          </UNIT>"""
+    return build_import_envelope(msg, report_name="All Masters", company_name=company_name)
+
+
+def build_stock_item_xml(
+    data: Dict[str, Any],
+    action: str = "Create",
+    unit_exists: bool = True,
+    group_exists: bool = True,
+    category_exists: bool = True,
+    company_name: Optional[str] = None,
+    unit_override: Optional[str] = None,
+    unit_matched_existing: bool = False,
+) -> str:
+    """
+    Builds full Tally STOCKITEM XML including prerequisites (Unit, StockGroup, StockCategory).
+
+    unit_override, when given, is the name of a Tally UNIT master that should be used
+    as BASEUNITS — either an existing Tally unit representing this item's RentAsst
+    unit under a different name/symbol spelling (see TallyClient.resolve_unit_name),
+    e.g. RentAsst "Meter" resolved to an existing Tally unit "MTR", or simply the
+    RentAsst unit's own name/symbol-resolved value when nothing existing matched.
+    unit_matched_existing distinguishes those two cases — True only when
+    unit_override names a *different*, already-existing Tally unit master. It's used
+    to decide whether to emit a <SYMBOL> for a freshly created UNIT master: when
+    reusing an existing unit, Tally already has its own symbol and none should be
+    sent; when creating a brand-new unit (unit_exists=False), RentAsst's symbol must
+    still be included, or every newly created Tally unit master ends up missing its
+    symbol.
+    """
+    name = (data.get("name") or f"Item-{data.get('id')}").strip()
+
+    # Unit of Measure & Symbol
+    unit_name = "Nos"
+    unit_symbol = ""
+    if isinstance(data.get("asset_unit"), dict):
+        unit_name = (data["asset_unit"].get("name") or "Nos").strip()
+        unit_symbol = (data["asset_unit"].get("symbol") or "").strip()
+    elif data.get("asset_unit_name"):
+        raw_u = data.get("asset_unit_name").strip()
+        unit_name = raw_u.split("(")[0].strip()
+        if "(" in raw_u and ")" in raw_u:
+            unit_symbol = raw_u.split("(")[1].split(")")[0].strip()
+
+    unit = (unit_override or unit_name or unit_symbol or "Nos").strip()
+    symbol_tag = f"\n            <SYMBOL>{escape_xml(unit_symbol)}</SYMBOL>" if (unit_symbol and not unit_matched_existing) else ""
+
+    # Stock Group
+    group = "Primary"
+    if isinstance(data.get("asset_category"), dict) and data.get("asset_category", {}).get("name"):
+        group = data["asset_category"]["name"].strip()
+    elif data.get("asset_categories_names"):
+        group = str(data.get("asset_categories_names")).split(",")[0].strip()
+
+    # Stock Category
+    category = ""
+    if isinstance(data.get("asset_brand"), dict) and data.get("asset_brand", {}).get("name"):
+        category = data["asset_brand"]["name"].strip()
+    elif data.get("asset_brand_name"):
+        category = str(data.get("asset_brand_name")).strip()
+
+    asset_code = (data.get("asset_code") or data.get("sku") or "").strip()
+    barcode = (data.get("bar_code") or data.get("barcode") or "").strip()
+    raw_desc = (data.get("description") or "").strip()
+
+    desc_parts = []
+    if asset_code:
+        desc_parts.append(f"Asset Code: {asset_code}")
+    if barcode:
+        desc_parts.append(f"Barcode: {barcode}")
+    if raw_desc:
+        desc_parts.append(raw_desc)
+    full_description = " | ".join(desc_parts)
+
+    # `or`-chained fallbacks (`data.get("x") or data.get("y") or 0`) silently discard a
+    # legitimate explicit 0 in favor of a stale/unrelated value in the fallback field —
+    # confirmed live: a GST-exempt item (gst_rate=0) still carrying an old nonzero
+    # gst_percentage got pushed to Tally at that old rate instead of 0, and a fully
+    # rented-out item (available_quantity=0) got its OPENINGBALANCE set from
+    # original_quantity instead of 0. Only fall back to the alternate field when the
+    # primary key is genuinely absent (None), never when it's present but zero.
+    purchase_price = float(data.get("purchase_price") or 0)
+
+    rent_price_raw = data.get("rent_price")
+    if rent_price_raw is None:
+        rent_price_raw = data.get("day_based_rent_price")
+    rent_price = float(rent_price_raw or 0)
+
+    available_qty = data.get("available_quantity")
+    if available_qty is None:
+        available_qty = data.get("original_quantity") or 0
+
+    gst_rate_raw = data.get("gst_rate")
+    if gst_rate_raw is None:
+        gst_rate_raw = data.get("gst_percentage")
+    gst_rate = float(gst_rate_raw or 0)
+    cgst_rate = round(gst_rate / 2.0, 2) if gst_rate else 0
+    sgst_rate = cgst_rate
+    hsn_code = (data.get("hsn_code") or data.get("hsn_sac_code") or data.get("hsn") or "").strip()
+
+    desc_tag = f"\n            <DESCRIPTION>{escape_xml(full_description)}</DESCRIPTION>" if full_description else ""
+    opening_balance_tag = f"\n            <OPENINGBALANCE>{available_qty} {escape_xml(unit)}</OPENINGBALANCE>" if available_qty else ""
+    opening_rate_tag = f"\n            <OPENINGRATE>{purchase_price:.2f}/{escape_xml(unit)}</OPENINGRATE>" if purchase_price else ""
+    opening_val_tag = f"\n            <OPENINGVALUE>-{purchase_price:.2f}</OPENINGVALUE>" if purchase_price else ""
+
+    gst_block = ""
+    if gst_rate or hsn_code:
+        hsn_tag = f"\n              <HSNCODE>{escape_xml(hsn_code)}</HSNCODE>\n              <HSN>{escape_xml(hsn_code)}</HSN>" if hsn_code else ""
+        rate_of_vat_tag = f"\n            <RATEOFVAT>{gst_rate}</RATEOFVAT>" if gst_rate else ""
+        gst_block = f"""{rate_of_vat_tag}
+            <GSTAPPLICABLE>Applicable</GSTAPPLICABLE>
+            <GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
+            <GSTDETAILS.LIST>
+              <APPLICABLEFROM>20240401</APPLICABLEFROM>
+              <SRCOFGSTDETAILS>Specify Details Here</SRCOFGSTDETAILS>
+              <CALCULATIONTYPE>On Value</CALCULATIONTYPE>
+              <TAXABILITY>Taxable</TAXABILITY>{hsn_tag}
+              <STATEWISEDETAILS.LIST>
+                <STATENAME>Any</STATENAME>
+                <RATEDETAILS.LIST>
+                  <GSTRATEDUTYHEAD>IGST</GSTRATEDUTYHEAD>
+                  <GSTRATE>{gst_rate}</GSTRATE>
+                </RATEDETAILS.LIST>
+                <RATEDETAILS.LIST>
+                  <GSTRATEDUTYHEAD>CGST</GSTRATEDUTYHEAD>
+                  <GSTRATE>{cgst_rate}</GSTRATE>
+                </RATEDETAILS.LIST>
+                <RATEDETAILS.LIST>
+                  <GSTRATEDUTYHEAD>SGST/UTGST</GSTRATEDUTYHEAD>
+                  <GSTRATE>{sgst_rate}</GSTRATE>
+                </RATEDETAILS.LIST>
+              </STATEWISEDETAILS.LIST>
+            </GSTDETAILS.LIST>"""
+        if hsn_code:
+            gst_block += f"""
+            <HSNDETAILS.LIST>
+              <APPLICABLEFROM>20240401</APPLICABLEFROM>
+              <SRCOFHSNDETAILS>Specify Details Here</SRCOFHSNDETAILS>
+              <HSNCODE>{escape_xml(hsn_code)}</HSNCODE>
+              <HSN>{escape_xml(hsn_code)}</HSN>
+              <HSNDESCRIPTION>{escape_xml(hsn_code)}</HSNDESCRIPTION>
+            </HSNDETAILS.LIST>"""
+
+    price_xml = f"\n            <STANDARDPRICELIST.LIST>\n              <DATE>20240401</DATE>\n              <RATE>{rent_price:.2f}/{escape_xml(unit)}</RATE>\n            </STANDARDPRICELIST.LIST>" if rent_price else ""
+    cost_xml = f"\n            <STANDARDCOSTLIST.LIST>\n              <DATE>20240401</DATE>\n              <RATE>{purchase_price:.2f}/{escape_xml(unit)}</RATE>\n            </STANDARDCOSTLIST.LIST>" if purchase_price else ""
+
+    # Prerequisite master XML blocks
+    unit_xml = ""
+    if not unit_exists:
+        unit_xml = f"""          <UNIT NAME="{escape_xml(unit)}" ACTION="Create">\n            <NAME>{escape_xml(unit)}</NAME>{symbol_tag}\n            <ISSIMPLEUNIT>YES</ISSIMPLEUNIT>\n          </UNIT>\n"""
+
+    group_xml = ""
+    if group and not group_exists:
+        group_xml = f"""          <STOCKGROUP NAME="{escape_xml(group)}" ACTION="Create">\n            <NAME>{escape_xml(group)}</NAME>\n          </STOCKGROUP>\n"""
+
+    category_master_xml = ""
+    category_item_tag = ""
+    if category:
+        if not category_exists:
+            category_master_xml = f"""          <STOCKCATEGORY NAME="{escape_xml(category)}" ACTION="Create">\n            <NAME>{escape_xml(category)}</NAME>\n          </STOCKCATEGORY>\n"""
+        category_item_tag = f"\n            <CATEGORY>{escape_xml(category)}</CATEGORY>"
+
+    # BASEUNITS is only sent on Create. Confirmed live: Tally hard-rejects an ENTIRE
+    # Alter with "Cannot alter Units of '<name>'!" the moment a stock item has any
+    # transaction history (opening balance, a voucher, etc.) — Tally treats a stock
+    # item's base unit as locked in at creation, and refuses the whole Alter even when
+    # the resent value is identical to what's already there. Since BASEUNITS was
+    # unconditionally included on every Alter, this made EVERY subsequent update
+    # (GST/price/description/anything) permanently fail forever for any item with real
+    # stock movement, not just genuine unit changes. Tally itself keeps the item's
+    # existing BASEUNITS unchanged when the tag is simply omitted from an Alter.
+    baseunits_tag = f"\n            <BASEUNITS>{escape_xml(unit)}</BASEUNITS>" if action != "Alter" else ""
+
+    item_xml = f"""{unit_xml}{group_xml}{category_master_xml}          <STOCKITEM NAME="{escape_xml(name)}" ACTION="{action}">
+            <NAME>{escape_xml(name)}</NAME>
+            <MAILINGNAME.LIST ISMODIFY="Yes" ACTION="Delete"/>
+            <PARENT>{escape_xml(group)}</PARENT>{category_item_tag}{baseunits_tag}{desc_tag}{opening_balance_tag}{opening_rate_tag}{opening_val_tag}{gst_block}{price_xml}{cost_xml}
+          </STOCKITEM>"""
+
+    return build_import_envelope(item_xml, report_name="All Masters", company_name=company_name)
+
+
+def build_physical_stock_voucher_xml(
+    item_name: str,
+    quantity: float,
+    unit: str = "Nos",
+    company_name: Optional[str] = None,
+    edu_mode: bool = False,
+) -> str:
+    """
+    Builds a Tally "Physical Stock" voucher — the correct mechanism for reconciling a
+    stock item's actual quantity, unlike re-sending OPENINGBALANCE on the STOCKITEM
+    master itself. OPENINGBALANCE is a fixed baseline as of the books' start date, not a
+    live "current stock" field: every Sales voucher pushed afterward keeps consuming
+    against that same fixed baseline, so simply re-sending RentAsst's current
+    available_quantity as OPENINGBALANCE every equipment-sync cycle does NOT correct
+    drift — confirmed live, "Dell Laptop 3440" ended up with a CLOSINGBALANCE of -4 in
+    Tally despite OPENINGBALANCE being resent as 11 (its real RentAsst quantity) on every
+    cycle, because ~15 units had already been consumed by prior Sales vouchers against
+    that one fixed baseline. A Physical Stock voucher instead records a dated inventory
+    count that Tally treats as the new "actual truth" for that date, correctly resetting
+    CLOSINGBALANCE going forward regardless of the voucher history that preceded it.
+    """
+    date_str = format_tally_date(None, edu_mode=edu_mode)
+    msg = f"""          <VOUCHER VCHTYPE="Physical Stock" ACTION="Create">
+            <DATE>{date_str}</DATE>
+            <EFFECTIVEDATE>{date_str}</EFFECTIVEDATE>
+            <VOUCHERTYPENAME>Physical Stock</VOUCHERTYPENAME>
+            <NARRATION>RentAsst stock reconciliation for {escape_xml(item_name)}</NARRATION>
+            <ALLINVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>{escape_xml(item_name)}</STOCKITEMNAME>
+              <ACTUALQTY>{quantity} {escape_xml(unit)}</ACTUALQTY>
+              <BILLEDQTY>{quantity} {escape_xml(unit)}</BILLEDQTY>
+            </ALLINVENTORYENTRIES.LIST>
+          </VOUCHER>"""
+
+    return build_import_envelope(msg, report_name="Vouchers", company_name=company_name)

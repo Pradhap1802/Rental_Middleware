@@ -1,0 +1,125 @@
+from typing import Dict, Any, Tuple, Optional
+from ..mapping.store import MappingStore
+
+
+class MissingDependencyException(Exception):
+    """
+    Exception raised when a required parent dependency mapping (e.g. Customer for Invoice, Invoice for Payment)
+    has not yet completed synchronization. Causes job to transition to WAITING_FOR_DEPENDENCY state.
+    """
+    def __init__(self, message: str, missing_entity: Optional[str] = None, missing_id: Optional[str] = None):
+        super().__init__(message)
+        self.missing_entity = missing_entity
+        self.missing_id = missing_id
+
+
+class DependencyResolver:
+    """
+    Dependency resolver enforcing sync execution hierarchy:
+    Customer -> Equipment -> Rental Order -> Invoice -> Payment
+    """
+
+    @staticmethod
+    def _find_missing_equipment(
+        items: Any,
+        store: MappingStore,
+        source_company_id: str,
+    ) -> Optional[str]:
+        """
+        Rental Order and Invoice items reference equipment by asset_id, but the scheduler
+        enqueues customers/equipment/rental_orders/invoices/payments concurrently every
+        cycle (SyncScheduler._sync_job) with no ordering guarantee that an equipment
+        item's own forward-sync to Tally finishes before a voucher referencing it is
+        pushed. Confirmed live: rental_order and invoice forward-sync both dead-lettered
+        with "Tally Business Error: Stock Item '<name>' does not exist!" for assets whose
+        equipment mapping row simply hadn't been written yet by the equipment job running
+        in a parallel thread. Without this check, that race produces a permanent
+        dead-letter instead of a transient, self-healing wait.
+        """
+        for it in items or []:
+            asset_id = it.get("asset_id")
+            if not asset_id:
+                continue
+            asset_str = str(asset_id).strip()
+            has_equip = store.find_mapping("equipment", asset_str, source_company_id=source_company_id) or store.get_rentasst_id("equipment", asset_str)
+            if not has_equip:
+                return asset_str
+        return None
+
+    @staticmethod
+    def check_dependencies(
+        entity_type: str,
+        data: Dict[str, Any],
+        store: MappingStore,
+        source_company_id: str = "default",
+    ) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
+        """
+        Checks if required parent mappings exist in SQLite mapping store.
+        Returns (has_deps: bool, missing_reason: Optional[str], missing_entity: Optional[str], missing_id: Optional[str]).
+        """
+        ent = (entity_type or "").strip().lower()
+
+        # 1. Invoice Dependency Check (Requires Customer mapping)
+        if ent in ("invoice", "invoices"):
+            cust_id = data.get("customer_id") or (data.get("customer") or {}).get("id")
+            if cust_id:
+                cust_str = str(cust_id).strip()
+                has_cust = store.find_mapping("customer", cust_str, source_company_id=source_company_id) or store.get_rentasst_id("customer", cust_str)
+                if not has_cust:
+                    cust_name = (data.get("customer") or {}).get("name") or data.get("customer_name")
+                    if cust_name and store.get_rentasst_id("customer", cust_name):
+                        has_cust = True
+
+                if not has_cust:
+                    reason = f"Missing Customer dependency mapping (Customer ID: '{cust_str}') for Invoice sync"
+                    return False, reason, "customer", cust_str
+
+            missing_asset_id = DependencyResolver._find_missing_equipment(data.get("items"), store, source_company_id)
+            if missing_asset_id is not None:
+                reason = f"Missing Equipment dependency mapping (Asset ID: '{missing_asset_id}') for Invoice sync"
+                return False, reason, "equipment", missing_asset_id
+
+        # 2. Payment Dependency Check (Requires Invoice or Customer mapping)
+        elif ent in ("payment", "payments"):
+            inv_id = data.get("invoice_id")
+            cust_id = data.get("customer_id")
+
+            if inv_id:
+                inv_str = str(inv_id).strip()
+                has_inv = (
+                    store.find_mapping("invoice", inv_str, source_company_id=source_company_id)
+                    or store.find_mapping("rental_orders", inv_str, source_company_id=source_company_id)
+                    or store.get_rentasst_id("invoice", inv_str)
+                )
+                if not has_inv:
+                    reason = f"Missing Invoice dependency mapping (Invoice ID: '{inv_str}') for Payment sync"
+                    return False, reason, "invoice", inv_str
+
+            elif cust_id:
+                cust_str = str(cust_id).strip()
+                has_cust = store.find_mapping("customer", cust_str, source_company_id=source_company_id) or store.get_rentasst_id("customer", cust_str)
+                if not has_cust:
+                    reason = f"Missing Customer dependency mapping (Customer ID: '{cust_str}') for Payment sync"
+                    return False, reason, "customer", cust_str
+
+        # 3. Rental Order Dependency Check (Requires Customer mapping)
+        elif ent in ("rental_order", "rental_orders"):
+            cust_id = data.get("customer_id") or (data.get("customer") or {}).get("id")
+            if cust_id:
+                cust_str = str(cust_id).strip()
+                has_cust = store.find_mapping("customer", cust_str, source_company_id=source_company_id) or store.get_rentasst_id("customer", cust_str)
+                if not has_cust:
+                    cust_name = data.get("customer_name") or (data.get("customer") or {}).get("name")
+                    if cust_name and store.get_rentasst_id("customer", cust_name):
+                        has_cust = True
+
+                if not has_cust:
+                    reason = f"Missing Customer dependency mapping (Customer ID: '{cust_str}') for Rental Order sync"
+                    return False, reason, "customer", cust_str
+
+            missing_asset_id = DependencyResolver._find_missing_equipment(data.get("items"), store, source_company_id)
+            if missing_asset_id is not None:
+                reason = f"Missing Equipment dependency mapping (Asset ID: '{missing_asset_id}') for Rental Order sync"
+                return False, reason, "equipment", missing_asset_id
+
+        return True, None, None, None

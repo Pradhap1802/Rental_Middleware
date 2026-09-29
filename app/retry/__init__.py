@@ -3,7 +3,6 @@ from .engine import (
     NonRetryableException,
     is_retryable_exception,
     get_backoff_delay_seconds,
-    BACKOFF_SCHEDULE_SECONDS,
 )
 
 __all__ = [
@@ -11,5 +10,4 @@ __all__ = [
     "NonRetryableException",
     "is_retryable_exception",
     "get_backoff_delay_seconds",
-    "BACKOFF_SCHEDULE_SECONDS",
 ]

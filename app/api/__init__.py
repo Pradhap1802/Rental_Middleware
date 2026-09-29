@@ -6,6 +6,9 @@ from .queue_routes import router as queue_router
 from .scheduler_routes import router as scheduler_router
 from .status_routes import router as status_router
 from .backup_routes import router as backup_router
+from .conflict_routes import conflict_router
+from .reconciliation_routes import reconciliation_router
+from .health_routes import health_router
 
 all_routers = [
     config_router,
@@ -16,6 +19,9 @@ all_routers = [
     scheduler_router,
     status_router,
     backup_router,
+    conflict_router,
+    reconciliation_router,
+    health_router,
 ]
 
 

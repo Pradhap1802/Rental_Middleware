@@ -1,6 +1,5 @@
 import os
-import re
-from typing import Dict, Any, Optional
+from typing import Dict
 from ..models.domain import AppConfig
 from ..logging.logger import log_event
 
@@ -35,8 +34,8 @@ class DiscoveryService:
     @classmethod
     def auto_discover_rentasst(cls) -> AppConfig:
         discovered_url = "http://localhost:8000/api"
-        discovered_key = "5|Wgi41qImTrSp05Ohqz1OqLdb6QirrlMG5APXymAR75958752"
-        discovered_tenant = "B100001"
+        discovered_key = ""
+        discovered_tenant = ""
 
         if os.getenv("RENTASST_URL"):
             discovered_url = os.getenv("RENTASST_URL")
@@ -71,5 +70,10 @@ class DiscoveryService:
             external_url="http://localhost:9000",
             external_system_type="tally",
             sync_interval_minutes=10,
-            auto_sync_enabled=True,
+            # Only auto-enable the scheduler when a real key was actually found — on a
+            # client machine that doesn't match any COMMON_RENTASST_PATHS layout (the
+            # normal case), this used to unconditionally return auto_sync_enabled=True
+            # with an empty key and a placeholder-looking tenant id, so the scheduler
+            # started immediately against a config that was never real.
+            auto_sync_enabled=bool(discovered_key),
         )

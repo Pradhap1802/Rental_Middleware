@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 
 
 class AppConfig(BaseModel):
@@ -13,94 +13,25 @@ class AppConfig(BaseModel):
     external_api_key: Optional[str] = Field(default="")
     external_system_type: str = Field(default="tally") # 'tally', 'rest_erp', 'accounting'
     tally_company_name: Optional[str] = Field(default="") # Target Tally Company Name for multi-company setup
-    
+    # Tally "Educational Mode" (the free/unlicensed mode) only accepts vouchers dated the
+    # 1st, 2nd, or last day of a month — rejecting any other date. Default False: real
+    # transaction dates always go through. Only set True against an Educational-mode Tally
+    # install (e.g. a demo/test company), where it forces the day-of-month so imports don't
+    # get rejected outright.
+    tally_edu_mode: bool = Field(default=False)
+
+    # Whether this Tally company's "Order Processing" F11 feature actually accepts
+    # Sales Order voucher imports via the XML gateway. None = unknown (try the native
+    # "Sales Order" voucher first). False = confirmed unavailable (e.g. an unlicensed/
+    # Educational-mode install, or Order Processing disabled) — auto-detected the same
+    # way tally_edu_mode is, so Rent Out sync stops re-attempting a voucher type this
+    # Tally install will never accept. True = confirmed working.
+    tally_order_processing_available: Optional[bool] = Field(default=None)
+
     # General Settings
     sync_interval_minutes: int = Field(default=10)
     auto_sync_enabled: bool = Field(default=False)
-    proxy: Optional[str] = Field(default="")
     verify_ssl: bool = Field(default=True)
-
-
-class CustomerModel(BaseModel):
-    id: str
-    name: str
-    phone: Optional[str] = None
-    email: Optional[str] = None
-    address: Optional[str] = None
-    gstin_tax_id: Optional[str] = None
-
-
-class EquipmentModel(BaseModel):
-    id: str
-    name: str
-    code_sku: Optional[str] = None
-    category: Optional[str] = None
-    daily_rate: float = 0.0
-    monthly_rate: float = 0.0
-    stock_quantity: int = 1
-
-
-class RentalOrderLineModel(BaseModel):
-    equipment_id: str
-    quantity: int = 1
-    unit_price: float = 0.0
-    rental_start_date: str
-    rental_end_date: str
-
-
-class RentalOrderModel(BaseModel):
-    id: str
-    order_number: str
-    customer_id: str
-    order_date: str
-    status: str = "draft" # draft, confirmed, dispatched, returned, cancelled
-    lines: List[RentalOrderLineModel] = []
-    total_amount: float = 0.0
-
-
-class InvoiceModel(BaseModel):
-    id: str
-    invoice_number: str
-    rental_order_id: Optional[str] = None
-    customer_id: str
-    invoice_date: str
-    due_date: str
-    subtotal: float = 0.0
-    tax_amount: float = 0.0
-    total_amount: float = 0.0
-
-
-class PaymentModel(BaseModel):
-    id: str
-    payment_number: str
-    customer_id: str
-    invoice_id: Optional[str] = None
-    rental_order_id: Optional[str] = None
-    payment_date: str
-    amount: float = 0.0
-    payment_type: str = "rental_payment" # 'rental_payment', 'security_deposit', 'deposit_refund'
-    payment_mode: str = "bank"
-
-
-class DeadLetterModel(BaseModel):
-    id: int
-    entity_type: str
-    source_id: str
-    error: str
-    created_at: str
-
-
-class QueueJobModel(BaseModel):
-    id: int
-    entity_type: str
-    payload: Optional[str] = None
-    status: str # 'Pending', 'Running', 'Retry', 'Completed', 'Failed', 'Waiting'
-    attempts: int = 0
-    max_attempts: int = 3
-    error_message: Optional[str] = None
-    created_at: str
-    updated_at: str
-    scheduled_at: str
 
 
 class SystemStatusModel(BaseModel):
@@ -110,6 +41,10 @@ class SystemStatusModel(BaseModel):
     system_health: Dict[str, Any]
     queue_metrics: Dict[str, int]
     resource_metrics: Dict[str, float]
+    entity_sync_status: Dict[str, Any] = Field(default_factory=dict)
+    job_status_breakdown: Dict[str, int] = Field(default_factory=dict)
+    reconciliation_metrics: Dict[str, Any] = Field(default_factory=dict)
+    performance_metrics: Dict[str, Any] = Field(default_factory=dict)
     timestamp: str
 
 
