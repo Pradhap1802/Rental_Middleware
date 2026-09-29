@@ -76,7 +76,15 @@ def build_sales_order_voucher_xml(data: Dict[str, Any], action: str = "Create", 
         data.get("amount") or data.get("total_amount") or data.get("grand_total")
         or data.get("rent_amount") or data.get("subtotal") or 0
     )
-    date_str = format_tally_date(data.get("rent_date") or data.get("order_date") or data.get("date") or data.get("created_at"), edu_mode=edu_mode)
+    date_str = format_tally_date(
+        data.get("rent_date")
+        or data.get("rent_from")
+        or data.get("order_booking_date")
+        or data.get("order_date")
+        or data.get("date")
+        or data.get("created_at"),
+        edu_mode=edu_mode,
+    )
 
     items = data.get("rent_items") or data.get("items") or data.get("assets") or data.get("details") or []
     inventory_allocations = ""
@@ -244,7 +252,15 @@ def build_sales_order_voucher_xml_native(data: Dict[str, Any], action: str = "Cr
         data.get("amount") or data.get("total_amount") or data.get("grand_total")
         or data.get("rent_amount") or data.get("subtotal") or 0
     )
-    date_str = format_tally_date(data.get("rent_date") or data.get("order_date") or data.get("date") or data.get("created_at"), edu_mode=edu_mode)
+    date_str = format_tally_date(
+        data.get("rent_date")
+        or data.get("rent_from")
+        or data.get("order_booking_date")
+        or data.get("order_date")
+        or data.get("date")
+        or data.get("created_at"),
+        edu_mode=edu_mode,
+    )
 
     prereq_ledgers = f"""          <LEDGER NAME="{escape_xml(cust_name)}" ACTION="Create">
             <NAME>{escape_xml(cust_name)}</NAME>
@@ -358,6 +374,28 @@ def build_sales_invoice_voucher_xml(data: Dict[str, Any], action: str = "Create"
     subtotal = float(data.get("subtotal") or 0)
     if not subtotal:
         subtotal = grand_total
+
+    # RentAsst's own invoice header 'subtotal' is NOT reliably the pre-tax figure —
+    # confirmed live: an invoice whose GST is applied "by_product" (a per-line gst_rate,
+    # the normal case for an invoice created from a rent — see
+    # InvoiceService::buildInvoiceDataFromRent/calculateTotals) reports subtotal EQUAL
+    # to grand_total (e.g. both 23,600 for a 20,000 pre-tax order with 18% GST), not the
+    # 20,000 actually booked against Sales Accounts / the stock item lines below. Using
+    # header subtotal for income_entry's own AMOUNT then disagreed with what
+    # inventory_allocations actually summed to (line item total_price, still the real
+    # 20,000), and the grand_total-subtotal tax fallback below silently computed a zero
+    # tax_amount from two equal numbers — together producing an imbalanced voucher
+    # ("Voucher totals do not match! Dr: 23,600.00 Dr Cr: 20,000.00 Cr") that Tally
+    # rejected outright. The item lines' own total_price is what inventory_allocations
+    # actually posts, so summing it here is the one number guaranteed to agree with the
+    # credit side Tally will actually see — preferred over header subtotal whenever
+    # items are present.
+    items_pretax_subtotal = 0.0
+    for it in (data.get("items") or []):
+        if isinstance(it, dict):
+            items_pretax_subtotal += float(it.get("total_price") or (float(it.get("price") or 0) * float(it.get("quantity") or 1)))
+    if items_pretax_subtotal > 0:
+        subtotal = round(items_pretax_subtotal, 2)
 
     # Prefer RentAsst's own CGST/SGST/IGST breakdown — top-level, or summed across line
     # items — over reverse-deriving a single number from grand_total - subtotal. The
