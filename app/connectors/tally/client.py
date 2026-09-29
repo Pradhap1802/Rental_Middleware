@@ -415,7 +415,26 @@ class TallyClient:
             unit_override=resolved_unit_name,
             unit_matched_existing=matched_existing_unit,
         )
-        result = self.send_xml(xml)
+        try:
+            result = self.send_xml(xml)
+        except ValueError as ve:
+            err_lower = str(ve).lower()
+            if "cannot alter units of" in err_lower:
+                # Tally permanently refuses to change the measurement unit of a stock item
+                # that already has inventory transactions — this is a Tally master restriction,
+                # not a transient error. Re-raising with a distinct message keeps the DLQ
+                # entry immediately actionable (the operator needs to manually clear the item's
+                # transaction history in Tally, or accept the existing unit as canonical)
+                # rather than looking like a generic sync failure that warrants re-queuing.
+                raise ValueError(
+                    f"Tally permanently refuses to change the measurement unit of '{name}' "
+                    f"because it already has inventory transactions. This is a Tally master "
+                    f"restriction — the only middleware-external resolution is to clear that "
+                    f"item's transaction history in Tally, or accept its existing unit as "
+                    f"canonical and update the RentAsst asset to match. No amount of "
+                    f"re-queuing will change this outcome. Original error: [{ve}]"
+                ) from ve
+            raise
 
         # Only cache prerequisites we just successfully created — send_xml() already
         # raised above if Tally rejected the import, so reaching here means any Create
