@@ -744,12 +744,33 @@ class RentAsstClient:
         return data.get("data", data) if isinstance(data, dict) else data
 
     def resolve_category_id(self, category_name: str) -> Optional[int]:
-        """Resolve or auto-create Category ID in RentAsst."""
+        """
+        Resolve or auto-create Category ID in RentAsst.
+
+        NOTE: 'asset-category-dropdown' alone is not a reliable lookup — confirmed live
+        it only returns categories with status=true (AssetCategory::dropdown()'s own
+        active-only scope), so any category created inactive (RentAsst's own store()
+        leaves 'status' unset/false unless explicitly passed true) is invisible to it
+        forever, yet still responds HTTP 200 with a validly-parsed (empty) JSON list —
+        _request_with_fallback stops at the first endpoint that returns *any* successful
+        response, so it was never actually falling through to the plain list endpoint
+        below it. The plain '/asset-category' list endpoint sees every category
+        regardless of status, but AssetCategoryService::getAssetCategoryResultsBySearch()
+        defaults BOTH start and length to 0 when the caller sends no pagination params —
+        confirmed live this returns a real 'count' (e.g. 4) alongside an always-empty
+        'data' array, not the actual rows, unless an explicit length is sent. Without
+        querying this endpoint directly (bypassing the dropdown's premature "success"),
+        an existing category could never be found, so this always fell through to
+        create — which then 422s "The name has already been taken" for any name that
+        already exists, silently swallowed by the except below into a permanent None.
+        """
         if not category_name or category_name.lower() in ("primary", "not applicable", ""):
             return None
         clean_name = category_name.strip()
         try:
-            cats = self._request_with_fallback(["asset-category-dropdown", "asset-category", "categories"])
+            cats = self._request_with_fallback(["asset-category"], {"start": 0, "length": 1000})
+            if not isinstance(cats, list) or not cats:
+                cats = self._request_with_fallback(["asset-category-dropdown", "categories"])
             if isinstance(cats, list):
                 for c in cats:
                     if str(c.get("name") or "").strip().lower() == clean_name.lower() and c.get("id"):
