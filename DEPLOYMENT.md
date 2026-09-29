@@ -6,14 +6,16 @@ This document covers Windows Service installation, secret management & credentia
 
 ## 1. Windows Service Installation
 
-### Recommended: `Install.bat`
+### Recommended: run `RentalMiddleware.exe` directly
 
-For a client machine, build the standalone package first (see Section 5), then run **`Install.bat`** as Administrator from that package. It calls `scripts/install_service.ps1`, which:
-- Registers the compiled `RentalMiddleware.exe` directly with the Service Control Manager (it correctly implements the SCM dispatch protocol — no extra setup needed).
-- Falls back to running from source (`service.py` via the project's venv) only if no compiled exe is present, using pywin32's own service installer rather than a generic service registration, since a plain `python.exe` process cannot correctly respond to SCM on its own.
-- Configures automatic restart on failure.
+Build the standalone package first (see Section 5), then copy `dist/RentalMiddleware/` (or its zip) to the client machine and double-click **`RentalMiddleware.exe`**. It installs itself — no separate installer script needed:
+- Prompts for UAC elevation if not already running as Administrator.
+- Registers itself directly with the Service Control Manager (it correctly implements the SCM dispatch protocol — no extra setup needed) and configures automatic restart on failure.
+- Starts the service, waits for `/health/live` to respond, then opens the dashboard.
+- Creates an "Uninstall RentAsst Middleware" Start Menu shortcut.
+- If the service is already installed, double-clicking the exe again just starts it (if needed) and opens the dashboard, instead of reinstalling.
 
-Use `Uninstall.bat` to remove the service.
+To remove the service, use the "Uninstall RentAsst Middleware" Start Menu shortcut, or run `RentalMiddleware.exe uninstall` (also self-elevates).
 
 ### Alternative: NSSM
 
