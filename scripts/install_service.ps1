@@ -4,13 +4,23 @@
 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $IsAdmin) {
     Write-Host "Elevating privileges to Administrator..." -ForegroundColor Yellow
-    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    # -Wait: without it, this (non-elevated) process falls straight through to
+    # Install.bat's "pause" — showing "press any key" before the elevated window
+    # has actually installed anything or opened the browser.
+    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs -Wait
     exit
 }
 
 $ServiceName = "RentAsstMiddlewareService"
 $DisplayName = "RentAsst Standalone Middleware Service"
-$ExePath = "$PSScriptRoot\..\dist\RentalMiddleware\RentalMiddleware.exe"
+# Two layouts call this script: the dev repo (scripts/ next to dist/RentalMiddleware/)
+# and create_installer.ps1's client package (scripts/ next to RentalMiddleware/, no
+# "dist" segment) — check both so the client package's Install.bat actually finds the exe.
+$ExePathCandidates = @(
+    "$PSScriptRoot\..\dist\RentalMiddleware\RentalMiddleware.exe",
+    "$PSScriptRoot\..\RentalMiddleware\RentalMiddleware.exe"
+)
+$ExePath = $ExePathCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 
 # Check if service already exists
 $Service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -20,7 +30,7 @@ if ($Service) {
     sc.exe delete $ServiceName
 }
 
-if (Test-Path $ExePath) {
+if ($ExePath -and (Test-Path $ExePath)) {
     # The compiled exe correctly responds to the Service Control Manager's dispatch
     # protocol (service.py's entry point hands off to servicemanager when launched
     # with no arguments, exactly how SCM launches a registered binary), so New-Service
@@ -48,3 +58,25 @@ sc.exe failure $ServiceName reset= 86400 actions= restart/10000/restart/10000/re
 Write-Host "Service $ServiceName installed successfully." -ForegroundColor Green
 Start-Service -Name $ServiceName
 Write-Host "Service $ServiceName started in background." -ForegroundColor Green
+
+# Start-Service returns as soon as SCM marks the service RUNNING, which happens
+# before uvicorn's own async startup finishes binding the port (see SvcDoRun in
+# service.py) — poll the liveness probe instead of opening the browser immediately
+# against a port that isn't listening yet.
+Write-Host "Waiting for the middleware to come online..." -ForegroundColor Yellow
+$DashboardUrl = "http://127.0.0.1:8088/login"
+$Ready = $false
+for ($i = 0; $i -lt 30; $i++) {
+    try {
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8088/health/live" -UseBasicParsing -TimeoutSec 2
+        if ($resp.StatusCode -eq 200) { $Ready = $true; break }
+    } catch {}
+    Start-Sleep -Seconds 1
+}
+
+if ($Ready) {
+    Write-Host "Opening the middleware dashboard in your browser..." -ForegroundColor Green
+    Start-Process $DashboardUrl
+} else {
+    Write-Host "The service didn't respond within 30 seconds. Open $DashboardUrl manually once it's ready." -ForegroundColor Yellow
+}

@@ -47,10 +47,10 @@ pip install -r requirements.txt
 ```powershell
 python run.py
 ```
-The FastAPI middleware server will start at `http://localhost:8000`.
+The FastAPI middleware server will start at `http://localhost:8088`.
 
 ### 3. Open Production Dashboard
-Navigate to `http://localhost:8000` in your web browser.
+Navigate to `http://localhost:8088` in your web browser.
 
 ---
 
